@@ -1,0 +1,16 @@
+# Книги, файлы уроков и база в репозиторий не попадают никогда: код открытый
+pb_data/
+books/
+files/
+*.pdf
+*.epub
+*.djvu
+*.djv
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.env
+superuser.txt
+pocketbase
+.DS_Store

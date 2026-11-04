@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Библиотека</title>
+<meta name="description" content="Домашняя электронная библиотека: книги, полки, читалка и заметки">
+<meta name="theme-color" content="#F4EFE6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#15181B" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Книги">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="referrer" content="same-origin">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/favicon-64.png?v=1" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=1">
+<link rel="stylesheet" href="/app.css?v=1">
+<script>try{var t=JSON.parse(localStorage.getItem('kn_theme')||'""');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+</head>
+<body>
+
+<section class="auth" id="auth" hidden>
+  <div class="auth-card">
+    <div class="auth-brand"><span class="auth-logo" aria-hidden="true"></span><h1>Библиотека</h1><p id="auth-sub">Книги, полки и заметки в одном месте.</p></div>
+    <div id="auth-body"></div>
+  </div>
+</section>
+
+<div id="app" hidden>
+<nav class="side" id="side" aria-label="Разделы приложения"></nav>
+<div class="page">
+  <div class="update-bar" id="update-bar" hidden><div><span>Вышло обновление приложения.</span><button type="button" class="btn sm primary" id="update-btn">Обновить</button><button type="button" class="icon-btn" id="update-close" aria-label="Скрыть">×</button></div></div>
+  <div class="notice" id="notice" hidden><div id="notice-text"></div></div>
+  <main id="main"><div class="loading">Загружаю…</div></main>
+</div>
+<nav class="tabbar" id="tabbar" aria-label="Разделы приложения"></nav>
+</div>
+
+<section class="reader" id="reader" hidden aria-label="Читалка"></section>
+
+<dialog id="dlg"><form id="dlg-form" novalidate></form></dialog>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="/vendor/pocketbase.umd.js"></script>
+<script src="/app.js?v=1"></script>
+</body>
+</html>

@@ -1,0 +1,99 @@
+# Библиотека — заметки для Claude
+
+Домашняя электронная библиотека: книги (PDF, EPUB, DjVu), полки, читалка PDF, заметки и уроки. Владелец: Григорий (GitHub: Grisha-Kr). Пользователи: он и близкие, до 5 человек, регистрация по приглашению. Адрес: `https://knigi.grishaweb.ru`. Репозиторий открытый: **книги, тексты книг и файлы уроков в него не класть никогда**.
+
+Устройство повторяет «Молитвенный дневник» (Grisha-Kr/molitva): приглашения, письма (правки 2.2), защищённые ссылки на файлы с кукой (правки 2.3), загрузка своим маршрутом, файлы вне `pb_data`.
+
+Этапы. Этап 1 (сделан): книги, полки, загрузка, читалка PDF, заметки и уроки, файлы уроков, «Видна всем», извлечение текста PDF, подпись, журнал, ограничение скорости. Этап 2: выделения в тексте книги цветом с заметкой (у читателей тоже), читалка EPUB. Этап 3: удалённый MCP-сервер для claude.ai (поиск книг, текст по страницам, заметки). Позже: DjVu, распознавание сканов.
+
+## Общение с владельцем
+- Только на русском. Английские слова сопровождать переводом в скобках.
+- Владелец не программист: простыми словами, команды готовыми к вставке, по одной задаче, где выполнять (Mac или сервер).
+- Без длинных тире, без эмодзи, без конструкций «не X, а Y», без пафоса и повторов.
+- Пароли нигде в коде и инструкциях не писать.
+
+## Стек
+- **PocketBase 0.40.3** (`PB_VERSION` в `deploy/install.sh`). До 1.0 перед обновлением читать заметки к выпуску.
+- Интерфейс без сборки: `pb_public/index.html`, `app.css`, `app.js` (одна IIFE), `sw.js`, `manifest.webmanifest`, `privacy.html`. Внешних CDN нет.
+- `pb_public/vendor/`: PocketBase JS SDK 0.28.1; pdf.js 4.10.38 legacy build (`pdfjs/pdf.min.mjs`, `pdf.worker.min.mjs`, `cmaps/`, `standard_fonts/`, Apache 2.0); Quill 2.0.3 (`quill/quill.js`, `quill.snow.css`, BSD-3). Строки `sourceMappingURL` из них убраны.
+- Шрифты `pb_public/fonts/`: Literata 400/600 и курсив (заголовки, текст заметок), Golos Text 400–700 (интерфейс), кириллица и латиница, лицензии OFL рядом.
+- PWA. При изменении `app.js`/`app.css` увеличивать `?v=` в `index.html` (и в `privacy.html` для css) и `VERSION`/`SHELL` в `sw.js`: по `?v=` открытое приложение показывает плашку «Вышло обновление». `sw.js` не трогает `/api/` и адреса с параметрами кроме `?v=`.
+- Значки `pb_public/icons/` (раскрытая книга на #2C4A66, `icon-1024.png` исходник, `logo.svg` для бокового меню). Подпись под значком «Книги» (`short_name`, `apple-mobile-web-app-title`). Ссылки на значки с `?v=1`.
+- Сервер: `pdfinfo`, `pdftoppm`, `pdftotext` (poppler-utils), `qpdf`, `djvused`/`ddjvu` (djvulibre-bin), `unzip`, `sha256sum`, `df`, `timeout`. Ставит `install.sh`, недостающие доставляет `update.sh`.
+
+## Оформление
+- Светлая: фон #F4EFE6 (бумага), карточки #FFFCF6, текст #26231F, серый #6E665A, основной тёмно-синий #2C4A66, охра #A8742F для мелких акцентов (прогресс, значки заметок, «Видна всем»). Тёмная: фон #15181B, карточки #1E2226, основной #8DB3D6, охра #D8A660. Переменные в `:root`, `@media (prefers-color-scheme: dark)` и `:root[data-theme="dark"]`. Тема: `kn_theme` в localStorage и `users.theme`.
+- Телефон: колонка до 560px, нижнее меню «Библиотека», «Полки», «Заметки», «Профиль». От 900px боковое меню (`#side`), колонка до 1080px, сетка книг шире. Кнопки не меньше 44px, значки линейные SVG (`ICON` в app.js).
+- Обложка без картинки: «переплёт» цвета `spineColor(id)` с названием (`coverHTML`).
+
+## Данные (pb_migrations: 1780000000_init.js, 1780000001_mail.js)
+Изменения схемы только **новой** миграцией.
+- `users`: role (user/admin), theme. Видит только себя. Роль через API не меняется. Удаление аккаунта только в панели.
+- `invites`: как в «Молитвенном дневнике» (без срока доступа). Только admin.
+- `authors`: name, sort_name (фамилия первой, `sortName` в lib.js, если пусто), search (строчные, ё = е). Читают все, меняет admin. Одинаковых имён нет (хук). Автор без книг удаляется (`dropLonelyAuthors`).
+- `books`: title, authors (relation, много), year, description, format (pdf/epub/djvu), file (`ID.pdf` в BOOKS_DIR), orig_name, file_size, pages, has_text, status (processing/ready/error), status_note, cover (имя файла в BOOKS_DIR/covers), hash (sha256 исходного файла), search (название и авторы, ставит хук). Дата добавления = `created`. Читают все вошедшие; create/delete только маршрутами; update admin, но хук оставляет прежними format, file, orig_name, file_size, pages, has_text, status, status_note, cover, hash. orig_name, hash, file видит только admin (`onRecordEnrich`).
+- `shelves`: owner, name, parent (self), common, sort. Общие (common) видят все, меняет admin; свои видит и меняет владелец. Глубина до 3 (`MAX_DEPTH`), подполка того же вида и владельца, owner/common/parent после создания не меняются, удалить только пустую без подполок (хуки в lib.js).
+- `shelf_books`: shelf, book, sort; уникальная пара. Права по полке (`@request.body.shelf.common`/`.owner`).
+- `reading`: user, book, page, pages; уникальная пара. Видит владелец, пишет только маршрут progress.
+- `notes`: owner, book (без каскада, может быть пустым), book_title (сервер), kind (note/lesson), title, body (editor, HTML чистится на сервере `cleanHtml`), body_text (текст без тегов, сервер), search (название и текст строчными, ё = е, сервер; по нему поиск, т. к. LIKE в SQLite не понимает регистр кириллицы), page, shared, **quote, anchor (json), color: место под выделения этапа 2**, created, updated. Видят владелец и все при shared. shared и kind = lesson ставит только admin (правила и хук `checkNote`). Чужим скрыты anchor и color.
+- `note_files`: note (каскадно), owner, name, ext, size, file (имя в FILES_DIR), sort. Создаёт только маршрут загрузки, удаляет владелец (хук после удаления убирает файл с диска, срабатывает и при каскаде от урока). Читатель видит только PDF общего урока (правило `note.shared = true && ext = "pdf"`).
+- `read_log`: user, book (без каскада, при удалении книги пусто), book_title, hour (`2026-11-04T13`, UTC), pages (json, номера страниц), pages_seen, bytes_sent, over_limit; уникальная тройка (user, book, hour). Читает admin, пишет только сервер прямыми SQL (`logRow`, `logBytes`, `logPages`), чтобы одновременные запросы не затирали счётчики.
+- `mail_log`: как в «Молитвенном дневнике».
+- Настройки: appName «Библиотека», копия базы в 3:00, хранится 14; ограничения частоты писем (миграция mail).
+
+## Файлы на диске (вне pb_data, в копии базы не входят)
+- `BOOKS_DIR` (по умолчанию `<pb_data>/../books` = `/opt/knigi/books`): `ID.pdf|epub|djvu`; `covers/ID-xxxxxx.jpg` (400 px); `text/ID.txt`; `.uploads/НОМЕР/` (куски загрузки, брошенные старше суток удаляет уборка в 4:17).
+- `FILES_DIR` (`/opt/knigi/files`): файлы уроков `ID.ext`.
+- `<pb_data>/files.key`: ключ подписи ссылок и кук (создаётся сам, попадает в копию базы).
+- Файлы, созданные через `$filesystem.local`, имеют служебный `.attrs` рядом: удалять через `rmFile` (убирает оба).
+
+## Текст книг (для этапа 3)
+`text/ID.txt` пишет `pdfText`: вывод `pdftotext -enc UTF-8` разбит по `\f`, каждая страница начинается строкой `=== Страница N ===`, потом текст, пустая строка. Номер N = номер страницы PDF (как в читалке и в `notes.page`). Пустые страницы тоже есть (только заголовок). Файла нет, если текста нет совсем. `books.has_text` = страниц с текстом (не меньше 30 знаков без пробелов) не меньше 20%. EPUB и DjVu пока без текста.
+
+## Логика на сервере (pb_hooks)
+- `main.pb.js`: хуки и маршруты. `lib.js`: роли, авторы, полки, заметки (`cleanHtml`, `plainText`, `checkNote`), регистрация, письма. `files_lib.js`: папки, ключ, кука и ссылки, Range, лимит, журнал, загрузка частями, обработка, обложки, удаление книги. В обработчиках код верхнего уровня недоступен: `require(`${__hooks}/lib.js`)` внутри.
+- Регистрация: первый `role=admin`, остальные по коду `invite`.
+- **Загрузка** (admin): `POST /api/knigi/upload/start {name, size, kind: book|file, note}` → `{upload, chunk: 8 МБ, chunks}` (проверка расширения, размера: книга 500 МБ, файл урока 50 МБ, свободного места `size*2` против `MIN_FREE_GB`); `POST /api/knigi/upload/{up}/{n}` multipart `chunk` (размер куска проверяется, повтор перезаписывает); `POST .../finish` склеивает (`cat`) и создаёт `books` (status processing, название и авторы из имени «Автор - Название») или `note_files`; `DELETE /api/knigi/upload/{up}`. Куски по 8 МБ нужны, чтобы одна загрузка не упиралась во время одного запроса и не держала память.
+- **Обработка** (`processQueue`): блокировка через `$app.store().setFunc("kn_proc")`, по одной книге, пока есть status = processing. Запуск: `POST /api/knigi/process` (приложение зовёт сразу после загрузки), cron `knigi_process` каждую минуту. PDF: sha256 исходника, `pdfinfo` (страницы, Title, Author; год не берётся), **`qpdf --object-streams=generate --stream-data=preserve`** (см. ниже), обложка `pdftoppm -scale-to-x 400 -jpeg`, текст. EPUB: `unzip -p` container.xml и OPF (title, creator, date, description, обложка → `fs.createThumb` 400x0). DjVu: `djvused -e n`, обложка через `ddjvu -format=pdf -page=1` + pdftoppm. Название из файла ставится, только если администратор не правил название и имя файла не вида «Автор - Название» (у EPUB свойства важнее). Ошибка → status error, текст в status_note; «Обработать заново» = `POST /api/knigi/books/{id}/reprocess`.
+- **Почему qpdf**: в PDF без потоков объектов (ReportLab, ImageMagick, многие сканы) описание каждой страницы лежит рядом с её картинкой. pdf.js при открытии вызывает `checkLastPage` и при переходе на страницу N перебирает описания всех предыдущих страниц, то есть с загрузкой по кускам скачивает почти весь файл (проверено: 110 МБ при открытии). После `qpdf --object-streams=generate` открытие стоит 1,2 МБ, страница 150 тоже. Линеаризация (`--linearize`) не помогает. Если qpdf не справился, остаётся исходный файл и пометка в status_note.
+- **Ссылки и кука** (как материалы «Молитвенного дневника»): `GET /api/knigi/session` ставит куку `kn_s` (JWT {u}, 12 ч, `Path=/api/knigi/f`, HttpOnly, SameSite=Strict, Secure при https/X-Forwarded-Proto). `GET /api/knigi/books/{id}/link` → `{url, size, ttl, mark, chunk}` и та же кука; ключ в адресе (JWT {k, i, u}, 2 ч). `GET /api/knigi/f/book/{id}?t=` проверяет ключ, куку и что человек один; **только Range, не больше 4 МБ** (`MAX_SPAN`), без Range 400; у не-администратора лимит и журнал; заголовки no-store, octet-stream, inline. Файлы уроков: `GET /api/knigi/files/{id}/link`, `GET /api/knigi/f/file/{id}?t=` (PDF частями; `&dl=1` целиком только владельцу). Обложки: `GET /api/knigi/f/cover/{id}?v=имя` по куке, кэш браузера 30 дней (адрес меняется с обложкой). `POST /api/knigi/logout` стирает куку.
+- **Лимит** (`takeBytes`): в памяти (`$app.store`, ключ `kn_rate:user`) два счётчика по часам, прошлый час учитывается долей; сверх `MAX_MB_PER_HOUR` ответ 429 `{message, wait}`. После перезапуска счёт с нуля. На admin не действует.
+- **Журнал**: байты пишет маршрут файла книги, страницы пишет `POST /api/knigi/books/{id}/progress {page, pages, seen}` (он же сохраняет `reading`). `GET /api/knigi/admin/log?days&user&book` (admin). Уборка старше `READ_LOG_DAYS` в cron `knigi_clean` (4:17).
+- **Подпись**: `watermarkFor(user)` = «Имя · почта», пусто у admin и при `WATERMARK=0`; рисует клиент на холсте.
+- Удаление книги: `DELETE /api/knigi/books/{id}?notes=keep|delete` (admin): свои заметки администратора удаляются или остаются без книги, чужие всегда остаются без книги (book пусто, book_title), read_log.book пусто, книга удаляется (каскад shelf_books, reading), файлы, текст, обложка, авторы без книг.
+- Прочее: `POST /api/knigi/books/{id}/cover` (admin, картинка до 10 МБ → 400 px), `GET /api/knigi/disk` (admin), `GET /api/knigi/setup`.
+- Настройки из `knigi.env`: `APP_URL`, `BEHIND_PROXY`, `OWNER_NAME`, `CONTACT_EMAIL`, `BOOKS_DIR`, `FILES_DIR`, `MIN_FREE_GB` (5), `WATERMARK` (1), `READ_LOG` (1), `READ_LOG_DAYS` (180), `MAX_MB_PER_HOUR` (200). `onBootstrap` пишет appURL и trusted proxy, создаёт папки и ключ. Чтение настроек: `S` в files_lib.js (на каждый вызов, перезапуск нужен только потому, что меняется окружение процесса).
+
+## Клиент (pb_public/app.js)
+- Состояние `S`: books, authors, shelves, sbooks (shelf_books), reading, notes (без body, `body_text:excerpt(160)`), nfiles; `PBN`, `loadAll`, `subscribeAll` (живые обновления всех ключей). Всё грузится при входе (книг тысячи, поля ограничены `BOOK_FIELDS`).
+- Экраны (`VIEWS`, адрес после `#`): `/` главная (поиск по `search` книг и авторов на клиенте, «Продолжить чтение», полки, недавние), `/shelves`, `/sh/ID`, `/books` (сортировка, формат, «скан без текста», сетка или список), `/authors`, `/a/ID`, `/b/ID` (`?tab=lessons`), `/read/ID?p=N`, `/pdf/ID?note=ID` (файл урока), `/note/ID`, `/note/new?book&page&kind=lesson`, `/notes`, `/profile`, `/log`.
+- Окна `openForm` (поля, `html`, `onClick` для `[data-dlg]`, `onInput`, `onChange`, `noSubmit`), меню `openMenu`.
+- **Читалка** (`RD`, `rdShow`): pdf.js через свой `PDFDataRangeTransport` (`rdMakeTransport`): каждый кусок 512 КБ (`CHUNK_PDF`) отдельным `fetch` с Range, большие запросы делятся по 2 МБ; `disableAutoFetch`, `disableStream`. 401 → новая ссылка и повтор; 429 → пауза (`rdPause`), запросы ждут в `RD.pending` и продолжаются кнопкой. Одна страница на экране, масштаб «страница целиком» × `RD.zoom` (1–4), соседние страницы в `RD.cache`, следующая рисуется заранее. Листание: свайп, нажатие по краям (28%), стрелки, ползунок, «45 из 120» → переход. Щипок и Ctrl+колесо меняют масштаб. Оглавление `getOutline`. «Тёмные страницы» (`kn_darkPages`, CSS invert). Прогресс через 1,5 с после смены страницы и при уходе (`keepalive`). Книга остаётся в памяти после закрытия читалки.
+- **Подпись** `rdWatermark`: после `page.render` на тот же холст: по диагонали rgba(40,40,40,.12) и внизу мелко с датой.
+- **Текстовый слой**: `rdText()` = admin или `READER_TEXT_LAYER`. **`READER_TEXT_LAYER = false` на этапе 1; на этапе 2 поставить true**: у читателей появится выделяемый слой (`TextLayer` pdf.js, `--scale-factor` на `.rd-page`, CSS `.textLayer`). Копирование, вырезание, контекстное меню и перетаскивание у не-администратора блокируются всегда (обработчики на `#reader`), печать выключена CSS `@media print`, Ctrl/Cmd+P и S в читалке гасятся. Проверено с true: выделение работает, буфер пустой.
+- Цитата в заметку: выделение запоминается (`selectionchange` → `RD.sel`), «Заметка» передаёт его через `UI.quote` (только admin, у читателей появится на этапе 2).
+- **Редактор** (`ED`, `edMount`): Quill 2 грузится лениво, панель: заголовок 2 и 3 уровня, жирный, курсив, подчёркнутый, списки, цитата, ссылка, отмена (своя кнопка `undo`). Загрузка HTML `clipboard.convert`, сохранение `getSemanticHTML()` (`&nbsp;` → пробел). Черновик `kn_draft_ID` в localStorage сразу, на сервер через 1,5 с (`edSave`); новая заметка получает id на клиенте и создаётся при первом непустом сохранении (`history.replaceState` на `#/note/ID`). Экран заметки не перерисовывается от живых обновлений, пока открыт редактор.
+- **Загрузка** (`UP`, `addUploads`, `runUploads`): по одному файлу, куски через XHR (полоса), до 6 попыток с паузой, затем `finish` и `process`. Панель `#uploads`. Повтор по имени и размеру пропускается (кнопка «Всё равно»).
+- Поиск заметок: на сервере по `notes.search` (`search ~ слово` для каждого слова).
+
+## Этап 2: что предусмотрено
+- Выделения: `notes.quote` (выделенный текст), `notes.anchor` (json: страница и положение, например `{page, rects:[[x,y,w,h] в долях страницы], text_start, text_end}`), `notes.color`. Вероятно, новый вид `kind = "highlight"` (новая миграция добавит значение в select). Рисовать выделения поверх `.rd-page` отдельным слоем (подпись остаётся на холсте).
+- Текстовый слой у читателей: `READER_TEXT_LAYER = true`. Блокировка копирования уже есть.
+- EPUB: файл отдаётся тем же способом (`/api/knigi/f/book`), но читалке EPUB нужен весь файл (zip): отдельный маршрут или epub.js с range-доступом к zip. Подумать о лимите и подписи (подпись в EPUB рисовать поверх текста иначе).
+
+## Этап 3: MCP-сервер
+- Источники: `books` (title, authors, year, description, pages, has_text, search), `text/ID.txt` (страницы по меткам `=== Страница N ===`), `notes` (body_text, page, book), `shelves`. Права как в приложении: только книги и свои заметки пользователя, чьим ключом идёт запрос.
+- Удобно отдавать текст по диапазону страниц; для быстрого доступа можно один раз построить смещения страниц в `text/ID.idx`.
+
+## Проверка перед выкладкой
+`node --check pb_public/app.js`. Локально: `./pocketbase serve --http 127.0.0.1:8093 --dir /tmp/knigi/pb_data --publicDir pb_public --hooksDir pb_hooks --migrationsDir pb_migrations` (с `BOOKS_DIR`, `FILES_DIR`). Если бинарник PocketBase лежит в `/tmp`, он считает себя запущенным через `go run` и печатает весь SQL: класть вне `/tmp`.
+- Тестовые книги делать программой (ReportLab, PIL): текстовый PDF с оглавлением, скан без текста, большой скан около 100 МБ; EPUB с обложкой; DOCX. В Playwright файлы с русскими именами передавать содержимым (`{name, mimeType, buffer}`): по пути он их теряет.
+- Проверено на этапе 1 (API и браузер 390 и 1280 px, светлая и тёмная): регистрация, загрузка 3 PDF и EPUB, обложки, текст, «скан без текста», полки трёх уровней и запрет четвёртого, книга на двух полках, читалка (листание, переход, оглавление, прогресс), заметка из читалки с цитатой, урок с заголовком, списком, PDF и DOCX, «Видна всем»; читатель по приглашению: видит общие полки и книги, общий урок только с PDF, не видит заметок и уроков администратора; своя полка с подполкой, своя заметка, которую администратор не видит; прямыми запросами не загружает книгу, не меняет общую полку, не включает shared, не пишет уроки, не читает журнал; ссылка без куки, с чужой кукой, без Range, с куском больше 4 МБ не работает; подпись у читателя есть, у администратора нет, при `WATERMARK=0` нет; при `MAX_MB_PER_HOUR=5` читатель видит паузу, администратор нет, в журнале красная строка; удаление книги с выбором для заметок; через Caddy куски книги не сжимаются, Range проходит.
+
+## Сервер и выкладка
+- AdminVPS, Ubuntu 24.04, IP 168.113.170.172, 4 ГБ памяти, диск 60 ГБ. Рядом «Зачётка» (8090), «Молитвенный дневник» (8091), «Греческий курс» (8092).
+- Приложение: `/opt/knigi` (код `src`, данные `pb_data`, книги `books`, файлы уроков `files`, настройки `knigi.env`, `superuser.txt`), пользователь и служба `knigi`, PocketBase на `127.0.0.1:8093`.
+- `/etc/caddy/sites/knigi.caddy`: `protocols tls1.2 tls1.2`, `@compress not path /api/knigi/f/*` + `encode @compress zstd gzip` (файлы книг частями не сжимаются), `reverse_proxy 127.0.0.1:8093`. Общий Caddyfile скрипт не трогает (проверяет `import /etc/caddy/sites/*.caddy`), после своего файла `caddy validate`, при ошибке файл убирается.
+- Установка: `curl -fsSL https://raw.githubusercontent.com/Grisha-Kr/knigi/main/deploy/install.sh | bash -s -- knigi.grishaweb.ru me@grishakr.ru "Григорий Кривобок"`. Повторный запуск дописывает в `knigi.env` только отсутствующие настройки.
+- Обновление: `bash /opt/knigi/src/deploy/update.sh` (ставит недостающие программы, копия базы, git pull, запуск; если не запустилось, `git reset --hard` на прежний коммит и запуск).
+- В скриптах `git -c safe.directory=/opt/knigi/src`.
