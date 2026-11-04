@@ -167,21 +167,40 @@ function plainText(html) {
     .replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim();
 }
 
+// Цвета выделений (этап 2)
+const HL_COLORS = ["yellow", "green", "blue", "pink"];
+
 function checkNote(e) {
   const r = e.record;
   const admin = isAdmin(e.auth);
+  if (!r.getString("kind")) r.set("kind", "note");
+  const kind = r.getString("kind");
   if (!admin) {
     r.set("shared", false); // делиться может только администратор
-    if (r.getString("kind") !== "note") throw new ForbiddenError("Уроки пишет только администратор.");
+    if (kind !== "note" && kind !== "highlight") throw new ForbiddenError("Уроки пишет только администратор.");
   }
-  if (!r.getString("kind")) r.set("kind", "note");
+  // выделение не превращается в заметку или урок и наоборот: для этого есть «Сделать заметкой»
+  const o = r.isNew() ? null : r.original();
+  if (o && (o.getString("kind") === "highlight") !== (kind === "highlight")) {
+    throw new BadRequestError("Выделение нельзя превратить в заметку. Нажмите «Сделать заметкой»: появится новая заметка, а выделение останется.");
+  }
   r.set("title", r.getString("title").replace(/\s+/g, " ").trim());
   const body = cleanHtml(r.getString("body"));
   r.set("body", body);
   const plain = plainText(body).slice(0, 1000000);
   r.set("body_text", plain);
-  r.set("search", norm(r.getString("title") + " " + plain).slice(0, 1000000));
+  const quote = r.getString("quote").replace(/[ \t]+/g, " ").trim();
+  r.set("quote", quote);
+  r.set("place", r.getString("place").replace(/\s+/g, " ").trim().slice(0, 200));
+  r.set("search", norm(r.getString("title") + " " + plain + " " + quote).slice(0, 1000000));
   if (r.getInt("page") < 0) r.set("page", 0);
+  if (kind === "highlight") {
+    if (!r.getString("book")) throw new BadRequestError("Выделение делается в книге.");
+    if (!quote) throw new BadRequestError("Выделите текст.");
+    if (HL_COLORS.indexOf(r.getString("color")) < 0) r.set("color", "yellow");
+    if (!r.getString("format")) throw new BadRequestError("Не указан формат книги.");
+    r.set("title", "");
+  }
   const bookId = r.getString("book");
   if (bookId) {
     let b = null;
@@ -313,6 +332,6 @@ function mailPolish(e, kind) {
 module.exports = {
   MB, isAdmin, requireAdmin, norm, sortName, splitAuthors, authorId, bookSearch, dropLonelyAuthors,
   MAX_DEPTH, shelfDepth, checkShelfCreate, checkShelfUpdate, checkShelfDelete,
-  cleanHtml, plainText, checkNote, checkRegistration,
+  cleanHtml, plainText, checkNote, checkRegistration, HL_COLORS,
   MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,
 };

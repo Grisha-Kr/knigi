@@ -260,6 +260,34 @@ main{max-width:var(--col);margin:0 auto;padding:calc(14px + env(safe-area-inset-
 .tabs{display:flex;gap:4px;border-bottom:1.5px solid var(--line)}
 .tabs a{min-height:44px;display:flex;align-items:center;padding:0 14px;text-decoration:none;color:var(--muted);font-weight:600;border-bottom:2.5px solid transparent;margin-bottom:-1.5px}
 .tabs a[aria-selected="true"]{color:var(--accent-text);border-color:var(--accent)}
+.tabs a .n{margin-left:6px;font-size:12px;font-weight:700;color:var(--muted)}
+.tabs{overflow-x:auto;scrollbar-width:none}
+
+/* Переключатель форматов книги */
+.fmt-seg{display:inline-flex;align-self:flex-start;border:1.5px solid var(--field-line);border-radius:12px;overflow:hidden;margin-top:2px}
+.fmt-seg button{appearance:none;border:0;background:none;min-height:40px;min-width:64px;padding:2px 14px;font-weight:700;font-size:14px;cursor:pointer;color:var(--muted);display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.15}
+.fmt-seg button + button{border-left:1.5px solid var(--field-line)}
+.fmt-seg button small{font-size:10.5px;font-weight:500}
+.fmt-seg button[aria-checked="true"]{background:var(--soft);color:var(--soft-ink)}
+@media (max-width: 599px){ .fmt-seg{align-self:center} }
+
+/* Выделения в списке */
+.hl-row{display:flex;gap:10px;align-items:flex-start;padding:10px 6px 10px 14px;border-top:1px solid var(--line);position:relative}
+.rows .hl-row:first-child{border-top:0}
+.hl-row::before{content:"";position:absolute;left:2px;top:12px;bottom:12px;width:5px;border-radius:3px;background:var(--hl)}
+.hl-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;text-decoration:none;color:var(--ink)}
+.hl-q{font-family:var(--f-head);font-size:15.5px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.hl-q.open{display:block;-webkit-line-clamp:unset}
+.hl-t{font-size:14px;color:var(--ink-2);border-left:2px solid var(--ochre-soft);padding-left:8px;white-space:pre-line;overflow-wrap:anywhere}
+.hl-main small{font-size:12.5px;color:var(--muted)}
+.hl-side{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:none}
+.linkbtn.sm{min-height:32px;font-size:13px}
+.hl-filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.hl-chip{appearance:none;min-height:36px;min-width:44px;padding:0 10px;border-radius:999px;border:1.5px solid var(--field-line);background:none;cursor:pointer;display:inline-grid;place-items:center;font-weight:600;font-size:13.5px}
+.hl-chip i{display:block;width:20px;height:20px;border-radius:50%;background:var(--hl)}
+.hl-chip[aria-pressed="true"]{border-color:var(--accent);background:var(--soft);color:var(--soft-ink)}
+.check-chip.sm{min-height:36px;font-size:13.5px}
+.ed-place{font-weight:600;color:var(--ink-2)}
 .notes-card > .btn{align-self:flex-start}
 
 /* Строка заметки */
@@ -484,6 +512,50 @@ dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 32px)}
 .rd-page{position:relative;background:#fff;box-shadow:0 2px 12px rgb(0 0 0 / .25);transform-origin:center;flex:none}
 .rd-page canvas{display:block;width:100%;height:100%;-webkit-user-drag:none;pointer-events:none}
 .reader.dark-pages .rd-page canvas{filter:invert(.9) hue-rotate(180deg)}
+
+/* Выделения на странице PDF: под текстовым слоем, полупрозрачно, при любом масштабе (доли страницы) */
+.hl-layer{position:absolute;inset:0;pointer-events:none;z-index:0}
+.hl-mark{position:absolute;display:block;background:var(--hl);opacity:.42;mix-blend-mode:multiply;border-radius:2px}
+.hl-mark.tmp{opacity:.32;outline:1.5px dashed rgb(0 0 0 / .35)}
+.reader.dark-pages .hl-mark{mix-blend-mode:screen;opacity:.5}
+.hl-mark.flash{animation:hl-flash 1.8s ease-out}
+@keyframes hl-flash{0%,30%,60%{opacity:.95;box-shadow:0 0 0 3px #C2410C}15%,45%{opacity:.25}100%{opacity:.42;box-shadow:none}}
+
+/* Панель выделения: цвета, «Заметка», мысль, удалить */
+.hl-pop{position:fixed;z-index:70;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 40px rgb(0 0 0 / .25);padding:6px;display:flex;flex-direction:column;gap:4px;max-width:calc(100vw - 16px)}
+.hp-row{display:flex;align-items:center;gap:4px}
+.hp-colors{display:flex;gap:2px;padding-right:4px;border-right:1px solid var(--line);margin-right:2px}
+.hp-c{appearance:none;width:44px;height:44px;border:0;background:none;border-radius:50%;cursor:pointer;display:grid;place-items:center;padding:0}
+.hp-c::before{content:"";width:26px;height:26px;border-radius:50%;background:var(--hl);box-shadow:inset 0 0 0 1px rgb(0 0 0 / .12)}
+.hp-c.on::before{box-shadow:0 0 0 2.5px var(--card),0 0 0 4.5px var(--ink)}
+.hp-b{appearance:none;min-height:44px;border:0;background:none;border-radius:10px;padding:0 10px;font-weight:600;font-size:14.5px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;color:var(--ink)}
+.hp-b svg{width:19px;height:19px}
+.hp-i{appearance:none;width:44px;height:44px;border:0;background:none;border-radius:10px;cursor:pointer;display:grid;place-items:center;color:var(--ink);padding:0;font-size:12px;font-weight:700}
+.hp-i svg{width:20px;height:20px}
+.hp-b:hover,.hp-i:hover,.hp-c:hover{background:color-mix(in srgb,var(--ink) 7%,transparent)}
+.hp-t{font-size:13.5px;color:var(--ink-2);padding:2px 8px 6px;max-width:330px;white-space:pre-line;border-top:1px solid var(--line);padding-top:6px}
+@media (max-width: 380px){ .hp-c{width:38px} .hp-b span{display:none} }
+
+/* «Маркер»: выделение пальцем без системного меню, листание выключено */
+.mk-btn[aria-pressed="true"]{background:var(--ochre-soft);color:var(--ochre-ink)}
+.mk-btn.off{opacity:.4}
+.reader.marker .rd-stage{cursor:text}
+.reader.marker .textLayer,.reader.marker .textLayer *{-webkit-user-select:none!important;user-select:none!important;cursor:text}
+.reader.touch:not(.reader-free) .textLayer,.reader.touch:not(.reader-free) .textLayer *{-webkit-user-select:none;user-select:none}
+
+/* Читалка EPUB: страница книги (foliate-js), подпись и временная подсветка поверх */
+.ep-stage{flex:1;min-height:0;position:relative;background:var(--card);overflow:hidden}
+.ep-host,.ep-host foliate-view{position:absolute;inset:0;display:block;width:100%;height:100%}
+.ep-mark{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+.ep-tmp{position:absolute;inset:0;pointer-events:none;z-index:1}
+.ep-tmp .hl-mark{opacity:.35}
+.reader.epub .rd-slider{accent-color:var(--ochre)}
+.reader.bars-off .ep-stage{margin:-52px 0}
+.ep-num{min-width:120px;max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:normal;font-size:14px}
+.fs-btn{font-family:var(--f-head);display:inline-flex;align-items:baseline;justify-content:center;gap:1px}
+.fs-btn b{font-size:15px}
+.fs-btn b.big{font-size:20px}
+.fs-btn small{font-size:13px;font-weight:700}
 .rd-msg{position:absolute;inset:0;display:grid;place-items:center;padding:24px;z-index:4;background:color-mix(in srgb,var(--reader-bg) 70%,transparent)}
 .rd-msg-box{background:var(--card);border-radius:16px;padding:20px;max-width:360px;display:flex;flex-direction:column;gap:12px;text-align:center;box-shadow:0 12px 40px rgb(0 0 0 / .2)}
 .rd-msg-box .btn{align-self:center}

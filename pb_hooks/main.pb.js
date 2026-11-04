@@ -76,11 +76,11 @@ onRecordCreate((e) => { e.record.set("search", require(`${__hooks}/lib.js`).book
 onRecordUpdate((e) => { e.record.set("search", require(`${__hooks}/lib.js`).bookSearch(e.app, e.record)); e.next(); }, "books");
 
 // Администратор через API меняет только название, авторов, год и описание.
-// Файл, формат, страницы, обложку, состояние и прочее ставит только сервер.
+// Форматы, страницы, обложку, состояние и прочее ставит только сервер (сводка по book_files, syncBook).
 onRecordUpdateRequest((e) => {
   if (!e.hasSuperuserAuth()) {
     const o = e.record.original();
-    for (const f of ["format", "file", "orig_name", "file_size", "pages", "has_text", "status", "status_note", "cover", "hash"]) {
+    for (const f of ["formats", "text_file", "file_size", "pages", "has_text", "status", "status_note", "cover"]) {
       e.record.set(f, o.get(f));
     }
     const title = e.record.getString("title").replace(/\s+/g, " ").trim();
@@ -103,12 +103,12 @@ onRecordAfterUpdateSuccess((e) => {
   }
 }, "books");
 
-// Служебные поля книги видит только администратор.
+// Служебные поля файла книги (имя на диске, исходное имя, отпечаток) видит только администратор.
 onRecordEnrich((e) => {
   const auth = e.requestInfo.auth;
   if (!(auth && (auth.isSuperuser() || auth.getString("role") === "admin"))) e.record.hide("orig_name", "hash", "file");
   e.next();
-}, "books");
+}, "book_files");
 
 /* ---------- Полки ---------- */
 onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkShelfCreate(e); e.next(); }, "shelves");
@@ -152,10 +152,11 @@ onRecordUpdateRequest((e) => {
   e.next();
 }, "notes");
 
-// Чужую общую заметку читатель видит без служебных полей.
+// Чужую заметку видно только общую (shared). Место выделения (anchor) у общей видно: по нему
+// читатель переходит к месту в EPUB. Если запись почему-то пришла не общей, служебные поля скрыты.
 onRecordEnrich((e) => {
   const auth = e.requestInfo.auth;
-  if (!(auth && (auth.isSuperuser() || auth.id === e.record.getString("owner")))) e.record.hide("anchor", "color");
+  if (!(auth && (auth.isSuperuser() || auth.id === e.record.getString("owner") || e.record.getBool("shared")))) e.record.hide("anchor", "color");
   e.next();
 }, "notes");
 
@@ -194,32 +195,44 @@ routerAdd("GET", "/api/knigi/f/cover/{id}", (e) => {
   return e.fileFS($os.dirFS(F.coversDir()), name);
 });
 
-// Ссылка на файл книги: на 2 часа и только вместе с кукой, которую ставит этот же ответ.
+// Ссылка на файл книги нужного формата (?f=pdf|epub, без f: PDF): на 2 часа и только вместе с кукой,
+// которую ставит этот же ответ. В ключе ссылки номер файла (book_files).
 routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   let b = null;
   try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
   if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
-  if (b.getString("format") !== "pdf") throw new BadRequestError("Читалка для этого формата появится позже.");
-  if (b.getString("status") === "processing") throw new BadRequestError("Книга ещё обрабатывается. Попробуйте через минуту.");
-  const size = F.exists($filepath.join(F.booksDir(), b.getString("file"))) ? b.getInt("file_size") : 0;
+  const fmt = String((e.requestInfo().query || {}).f || "pdf");
+  if (fmt !== "pdf" && fmt !== "epub") throw new BadRequestError("Читалка для этого формата появится позже.");
+  let f = null;
+  try { f = $app.findFirstRecordByFilter("book_files", "book = {:b} && format = {:f}", { b: b.id, f: fmt }); } catch (_) {}
+  if (!f) throw new NotFoundError(`У этой книги нет файла ${fmt.toUpperCase()}.`);
+  if (f.getString("status") === "processing") throw new BadRequestError("Книга ещё обрабатывается. Попробуйте через минуту.");
+  const size = F.exists($filepath.join(F.booksDir(), f.getString("file"))) ? f.getInt("file_size") : 0;
   if (!size) throw new NotFoundError("Файл книги не найден на сервере.");
-  return e.json(200, { url: F.makeLink(e, "book", b.id, e.auth.id), size, ttl: F.LINK_TTL, mark: F.watermarkFor(e.auth), chunk: 512 * 1024 });
+  if (fmt === "epub" && size > F.EPUB_MAX) throw new BadRequestError("Этот EPUB слишком большой для читалки.");
+  return e.json(200, { url: F.makeLink(e, "book", f.id, e.auth.id), size, ttl: F.LINK_TTL, mark: F.watermarkFor(e.auth), chunk: 512 * 1024,
+    file: f.id, format: fmt, whole: fmt === "epub" });
 }, $apis.requireAuth("users"));
 
-// Отдача файла книги: только частями (Range) и не больше 4 МБ за раз. Вход проверяется дважды: ключ в адресе и кука.
-// У читателей сервер считает отданные байты (лимит в час) и пишет журнал. На администратора это не действует.
+// Отдача файла книги (номер файла из book_files; у книг этапа 1 он совпадает с номером книги).
+// PDF только частями (Range) и не больше 4 МБ за раз. EPUB целиком: читалке нужен весь архив, файлы небольшие.
+// Вход проверяется дважды: ключ в адресе и кука. У читателей сервер считает отданные байты (лимит в час)
+// и пишет журнал. На администратора это не действует.
 routerAdd("GET", "/api/knigi/f/book/{id}", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   const id = e.request.pathValue("id");
   const user = F.linkUser(e, "book", id);
-  let b = null;
-  try { b = $app.findRecordById("books", id); } catch (_) {}
-  if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
-  const name = b.getString("file");
-  const range = F.parseRange(e.request.header.get("Range"), b.getInt("file_size"));
+  let f = null, b = null;
+  try { f = $app.findRecordById("book_files", id); b = $app.findRecordById("books", f.getString("book")); } catch (_) {}
+  if (!f || !b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  const name = f.getString("file");
+  const size = f.getInt("file_size");
+  const whole = f.getString("format") === "epub" && !e.request.header.get("Range");
+  if (whole && size > F.EPUB_MAX) throw new BadRequestError("Этот EPUB слишком большой для читалки.");
+  const range = whole ? { start: 0, end: size - 1, len: size } : F.parseRange(e.request.header.get("Range"), size);
   if (!range) throw new BadRequestError("Книга открывается только в читалке приложения.");
-  if (range.len > F.MAX_SPAN) throw new BadRequestError("Слишком большой кусок файла за один раз.");
+  if (!whole && range.len > F.MAX_SPAN) throw new BadRequestError("Слишком большой кусок файла за один раз.");
   const admin = user.getString("role") === "admin";
   if (!admin) {
     const wait = F.takeBytes(user.id, range.len);
@@ -293,29 +306,38 @@ routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
   try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
   if (!b) throw new NotFoundError("Книга не найдена.");
   const body = e.requestInfo().body || {};
-  const pages = b.getInt("pages") || parseInt(body.pages, 10) || 0;
+  // формат: PDF (страница) или EPUB (процент и место); старое приложение формат не присылает, это PDF
+  const fmt = body.format === "epub" ? "epub" : "pdf";
+  let f = null;
+  try { f = $app.findFirstRecordByFilter("book_files", "book = {:b} && format = {:f}", { b: b.id, f: fmt }); } catch (_) {}
+  if (!f) throw new NotFoundError(`У этой книги нет файла ${fmt.toUpperCase()}.`);
+  const pages = (fmt === "pdf" && f.getInt("pages")) || Math.min(parseInt(body.pages, 10) || 0, 1000000);
   let page = parseInt(body.page, 10) || 1;
   if (page < 1) page = 1;
   if (pages && page > pages) page = pages;
+  const pct = fmt === "epub" ? Math.min(100, Math.max(0, Math.round((parseFloat(body.pct) || 0) * 10) / 10)) : (pages ? Math.round(page / pages * 1000) / 10 : 0);
+  const pos = fmt === "epub" ? String(body.pos || "").slice(0, 2000) : "";
+  const key = { u: e.auth.id, b: b.id, f: fmt };
+  const fill = (r) => { r.set("page", page); r.set("pages", pages); r.set("pct", pct); r.set("pos", pos); };
   let r = null;
-  try { r = $app.findFirstRecordByFilter("reading", "user = {:u} && book = {:b}", { u: e.auth.id, b: b.id }); } catch (_) {}
+  try { r = $app.findFirstRecordByFilter("reading", "user = {:u} && book = {:b} && format = {:f}", key); } catch (_) {}
   if (!r) {
     r = new Record($app.findCollectionByNameOrId("reading"));
     r.set("user", e.auth.id);
     r.set("book", b.id);
+    r.set("format", fmt);
   }
-  r.set("page", page);
-  r.set("pages", pages);
+  fill(r);
   try { $app.save(r); } catch (err) {
     // два запроса одновременно создали запись: обновляем ту, что уже есть
-    r = $app.findFirstRecordByFilter("reading", "user = {:u} && book = {:b}", { u: e.auth.id, b: b.id });
-    r.set("page", page); r.set("pages", pages); $app.save(r);
+    r = $app.findFirstRecordByFilter("reading", "user = {:u} && book = {:b} && format = {:f}", key);
+    fill(r); $app.save(r);
   }
   if (e.auth.getString("role") !== "admin" && Array.isArray(body.seen)) {
     const seen = body.seen.map((x) => parseInt(x, 10)).filter((x) => x > 0 && (!pages || x <= pages)).slice(0, 500);
     F.logPages(e.auth.id, b, seen);
   }
-  return e.json(200, { id: r.id, page, pages, updated: r.getString("updated") });
+  return e.json(200, { id: r.id, format: fmt, page, pages, pct, pos, updated: r.getString("updated") });
 }, $apis.requireAuth("users"));
 
 /* ---------- Загрузка книг и файлов уроков (только администратор) ---------- */
@@ -346,10 +368,14 @@ routerAdd("POST", "/api/knigi/process", (e) => {
 }, $apis.requireAuth("users"));
 routerAdd("POST", "/api/knigi/books/{id}/reprocess", (e) => {
   require(`${__hooks}/lib.js`).requireAdmin(e);
+  const F = require(`${__hooks}/files_lib.js`);
   const b = $app.findRecordById("books", e.request.pathValue("id"));
-  b.set("status", "processing");
-  b.set("status_note", "");
-  $app.save(b);
+  for (const f of F.filesOf(b.id)) {
+    f.set("status", "processing");
+    f.set("status_note", "");
+    $app.save(f);
+  }
+  F.syncBook(b.id);
   return e.json(200, { ok: true });
 }, $apis.requireAuth("users"));
 
@@ -373,12 +399,47 @@ routerAdd("DELETE", "/api/knigi/books/{id}", (e) => {
   return e.json(200, { ok: true });
 }, $apis.requireAuth("users"));
 
+// Объединить с другой книгой: GET показывает, что перейдёт (и есть ли одинаковые форматы), POST объединяет.
+// Остаётся книга {id}, вторая ({other}) пропадает, её файлы, полки, заметки и прогресс переходят к первой.
+routerAdd("GET", "/api/knigi/books/{id}/merge/{other}", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const F = require(`${__hooks}/files_lib.js`);
+  const a = $app.findRecordById("books", e.request.pathValue("id"));
+  const b = $app.findRecordById("books", e.request.pathValue("other"));
+  return e.json(200, F.mergeInfo(a, b));
+}, $apis.requireAuth("users"));
+routerAdd("POST", "/api/knigi/books/{id}/merge/{other}", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const F = require(`${__hooks}/files_lib.js`);
+  let a = null, b = null;
+  try { a = $app.findRecordById("books", e.request.pathValue("id")); b = $app.findRecordById("books", e.request.pathValue("other")); } catch (_) {}
+  if (!a || !b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  F.mergeBooks(a, b);
+  return e.json(200, { ok: true });
+}, $apis.requireAuth("users"));
+
+// Убрать формат: GET показывает, сколько выделений и читателей у этого формата, DELETE убирает.
+routerAdd("GET", "/api/knigi/book-files/{id}", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const F = require(`${__hooks}/files_lib.js`);
+  return e.json(200, F.formatInfo($app.findRecordById("book_files", e.request.pathValue("id"))));
+}, $apis.requireAuth("users"));
+routerAdd("DELETE", "/api/knigi/book-files/{id}", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const F = require(`${__hooks}/files_lib.js`);
+  let f = null;
+  try { f = $app.findRecordById("book_files", e.request.pathValue("id")); } catch (_) {}
+  if (!f) throw new NotFoundError("Файл не найден: возможно, его уже убрали.");
+  F.removeFormat(f);
+  return e.json(200, { ok: true });
+}, $apis.requireAuth("users"));
+
 // Сколько места свободно (для окна «Добавить книги»).
 routerAdd("GET", "/api/knigi/disk", (e) => {
   require(`${__hooks}/lib.js`).requireAdmin(e);
   const F = require(`${__hooks}/files_lib.js`);
   const sum = new DynamicModel({ total: 0, count: 0 });
-  $app.db().select("COALESCE(SUM(file_size), 0) as total", "COUNT(*) as count").from("books").one(sum);
+  $app.db().select("COALESCE(SUM(file_size), 0) as total", "COUNT(DISTINCT book) as count").from("book_files").one(sum);
   return e.json(200, { free: F.freeBytes(), min: F.S.minFree(), books: sum.total, count: sum.count });
 }, $apis.requireAuth("users"));
 

@@ -5,16 +5,21 @@ const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 /* ---------- Настройки в коде ---------- */
-// Текстовый слой у читателей (не администратора). Этап 1: выключен, читатель видит только картинку страницы,
-// выделять и копировать ему нечего. Этап 2: включить (true), чтобы выделять цветом и писать заметку
-// к выделенному месту. Копирование, контекстное меню и перетаскивание у читателей заблокированы в любом случае.
-const READER_TEXT_LAYER = false;
+// Текстовый слой у читателей (не администратора). Этап 1: был выключен. Этап 2: включён, чтобы читатели
+// выделяли текст цветом и писали к нему мысль. Копирование, контекстное меню и перетаскивание у читателей
+// заблокированы в любом случае, а на телефоне выделение у них только через «Маркер» (без системного меню).
+const READER_TEXT_LAYER = true;
 const CHUNK_PDF = 512 * 1024;      // кусок книги, который читалка просит у сервера
 const MAX_REQ = 4 * CHUNK_PDF;     // не больше 2 МБ за один запрос
 const MB = 1024 * 1024;
 const FORMATS = {pdf: 'PDF', epub: 'EPUB', djvu: 'DjVu'};
-const BOOK_FIELDS = 'id,title,authors,year,description,format,file_size,pages,has_text,status,status_note,cover,search,created,updated';
-const NOTE_FIELDS = 'id,owner,book,book_title,kind,title,page,shared,created,updated,body_text:excerpt(160,true)';
+const FMT_ORDER = ['pdf', 'epub', 'djvu'];
+const BOOK_FIELDS = 'id,title,authors,year,description,formats,file_size,pages,has_text,text_file,status,status_note,cover,search,created,updated';
+const BFILE_FIELDS = 'id,book,format,file_size,pages,has_text,status,status_note,created';
+const NOTE_FIELDS = 'id,owner,book,book_title,kind,title,page,shared,quote,color,format,place,created,updated,body_text:excerpt(400,true)';
+// Цвета выделений: в базе слово, на экране полупрозрачная заливка под текстом
+const HL = {yellow: ['Жёлтый', '#F7D53E'], green: ['Зелёный', '#7DD87A'], blue: ['Голубой', '#6DB9F2'], pink: ['Розовый', '#F38DC3']};
+const HL_KEYS = Object.keys(HL);
 
 /* ---------- Значки (линейные SVG) ---------- */
 const sv = d => `<svg viewBox="0 0 24 24" aria-hidden="true">${d}</svg>`;
@@ -56,18 +61,23 @@ const ICON = {
   expand: sv('<path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/>'),
   collapse: sv('<path d="M20 4l-6 6M14 5v5h5M4 20l6-6M10 19v-5H5"/>'),
   camera: sv('<path d="M4 8h3.5L9 5.5h6L16.5 8H20v11H4z"/><circle cx="12" cy="13" r="3.5"/>'),
+  marker: sv('<path d="M14.5 4.5l5 5L10 19H5v-5z"/><path d="M12 7l5 5"/><path d="M4 21h9"/>'),
+  hl: sv('<path d="M5 20h14"/><path d="M8 16l-1.5-1.5L15 6l3 3-8.5 8.5z"/>'),
+  copy: sv('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>'),
+  aa: '<svg viewBox="0 0 24 24" aria-hidden="true"><text x="2" y="18" font-size="15" font-weight="700" fill="currentColor" stroke="none" font-family="Georgia,serif">А</text><text x="13" y="18" font-size="10" font-weight="700" fill="currentColor" stroke="none" font-family="Georgia,serif">а</text></svg>',
 };
 
 /* ---------- Состояние ---------- */
-const S = {books:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], invites:[], users:[], owner:null, loaded:false, disk:null};
-const PBN = {books:'books', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files'};
+const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], invites:[], users:[], owner:null, loaded:false, disk:null};
+const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files'};
 const KEYS = Object.keys(PBN);
-const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS})};
+const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS}), bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS})};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('kn_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('kn_'+k, JSON.stringify(v)); } catch(e){} };
 const dropLS = k => { try { localStorage.removeItem('kn_'+k); } catch(e){} };
 const UI = {hops:0, q:'', reorder:'', booksView: loadLS('booksView', 'grid'), booksSort: loadLS('booksSort', 'title'), booksFmt:'', booksScan:false,
   tab:'notes', notesQ:'', notesKind:'', notesHits:null, logQ:{days:7, user:'', book:''}, log:null, descOpen:false,
+  cardFmt:{}, hlColor:'', hlThought:false, hlOpen:new Set(), noteCtx:null,
   fullFor:'', fullNow:false, normalOnce:false};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
@@ -122,7 +132,32 @@ const byId = (key, id) => S[key].find(x => x.id === id);
 const bySort = (a, b) => (a.sort ?? 0) - (b.sort ?? 0) || collator.compare(a.name || '', b.name || '');
 const authorName = id => (byId('authors', id) || {}).name || '';
 const authorsText = b => (b.authors || []).map(authorName).filter(Boolean).join(', ');
-const readingOf = bookId => S.reading.find(r => r.book === bookId);
+/* ---------- Форматы книги и прогресс по форматам ---------- */
+// У книги может быть несколько файлов (PDF, EPUB, DjVu, по одному каждого формата). Прогресс у каждого формата свой.
+const fmtSort = (a, b) => FMT_ORDER.indexOf(a) - FMT_ORDER.indexOf(b);
+const filesOfBook = id => S.bfiles.filter(f => f.book === id).sort((a, b) => fmtSort(a.format, b.format));
+const fileOf = (id, fmt) => S.bfiles.find(f => f.book === id && f.format === fmt);
+const bookFormats = b => ((b.formats && b.formats.length) ? [...b.formats] : filesOfBook(b.id).map(f => f.format)).sort(fmtSort);
+const canRead = f => !!f && (f.format === 'pdf' || f.format === 'epub') && f.status === 'ready';
+const readFmt = r => r.format || 'pdf';
+const readsOf = id => S.reading.filter(r => r.book === id && fileOf(id, readFmt(r)));
+const readOf = (id, fmt) => S.reading.find(r => r.book === id && readFmt(r) === fmt);
+// Последнее чтение этой книги (любой формат): для «Продолжить чтение» и полоски на обложке
+const readingOf = id => readsOf(id).sort((a, b) => String(b.updated).localeCompare(String(a.updated)))[0];
+const progPct = r => !r ? 0 : readFmt(r) === 'epub' ? Math.min(100, Math.round(r.pct || 0)) : r.pages ? Math.min(100, Math.round(r.page / r.pages * 100)) : 0;
+const progText = r => readFmt(r) === 'epub' ? `${Math.round(r.pct || 0)}%` : `с. ${r.page}${r.pages ? ' из ' + r.pages : ''}`;
+// Какой формат открывает «Читать»: тот, что этот человек читал последним, иначе PDF с текстом, иначе EPUB, иначе первый
+function defaultFormat(b){
+  const last = readingOf(b.id);
+  if(last && canRead(fileOf(b.id, readFmt(last)))) return readFmt(last);
+  const pdf = fileOf(b.id, 'pdf'), epub = fileOf(b.id, 'epub');
+  if(pdf && pdf.has_text && canRead(pdf)) return 'pdf';
+  if(canRead(epub)) return 'epub';
+  if(canRead(pdf)) return 'pdf';
+  return bookFormats(b)[0] || 'pdf';
+}
+const isScan = b => { const f = fileOf(b.id, 'pdf'); return !!f && f.status === 'ready' && !f.has_text; };
+const readHref = (bookId, fmt, extra) => `#/read/${bookId}?f=${fmt}${extra || ''}`;
 const myShelf = s => !s.common && s.owner === me().id;
 const canEditShelf = s => s && (s.common ? isAdmin() : s.owner === me().id);
 const shelfKids = (parent, common) => S.shelves.filter(s => (s.parent || '') === (parent || '') && (parent ? true : (common ? s.common : myShelf(s)))).sort(bySort);
@@ -137,6 +172,7 @@ function shelfCount(s){
 }
 const booksOfAuthor = id => S.books.filter(b => (b.authors || []).includes(id));
 const notesOfBook = id => S.notes.filter(n => n.book === id);
+const myHls = id => S.notes.filter(n => n.book === id && n.kind === 'highlight' && n.owner === me().id);
 const titleSort = (a, b) => collator.compare(a.title || '', b.title || '');
 
 function upsert(key, rec){ const arr = S[key]; const i = arr.findIndex(x => x.id === rec.id); if(i >= 0) arr[i] = {...arr[i], ...rec}; else arr.push({...rec}); schedule(); }
@@ -153,11 +189,11 @@ async function subscribeAll(){
   await pb.collection('users').subscribe(me().id, e => { if(e.action === 'update'){ pb.authStore.save(pb.authStore.token, e.record); themeFromUser(); schedule(); } });
   for(const k of KEYS){
     await pb.collection(PBN[k]).subscribe('*', e => {
-      if(e.action === 'delete') removeLocal(k, e.record.id);
+      if(e.action === 'delete'){ removeLocal(k, e.record.id); if(k === 'notes') hlLive(e.record, true); }
       else {
         const r = e.record;
         // заметки: в общем списке без текста, только начало для подписи
-        if(k === 'notes'){ r.body_text = String(r.body_text || '').slice(0, 160); delete r.body; delete r.search; }
+        if(k === 'notes'){ hlLive(r); r.body_text = String(r.body_text || '').slice(0, 400); delete r.body; delete r.search; delete r.anchor; }
         upsert(k, r);
       }
     });
@@ -256,7 +292,8 @@ const VIEWS = {};
 function render(force){
   const r = route();
   const reading = r.name === 'read' || r.name === 'pdf';
-  if(reading){ if(S.loaded) rdShow(r); return; }
+  // читалка открывается заново только при переходе (force): живые обновления данных её не трогают
+  if(reading){ if(S.loaded && (force || !RD.open)) rdShow(r); return; }
   if(RD.open) rdClose();
   noteFullSync(r);
   sideMe();
@@ -288,16 +325,17 @@ function coverHTML(b, cls){
   const img = b.cover ? `<img src="${esc(coverUrl(b))}" alt="" loading="lazy" draggable="false" onerror="this.remove()">` : '';
   return `<span class="cover ${cls || ''}">${ph}${img}</span>`;
 }
-const fmtBadge = b => b.format !== 'pdf' ? `<span class="badge">${FORMATS[b.format] || b.format}</span>` : '';
+// Пометка формата на обложке: у книги только с PDF её нет, иначе все форматы через точку
+const fmtBadge = b => { const f = bookFormats(b); return f.length > 1 || (f[0] && f[0] !== 'pdf') ? `<span class="badge">${f.map(x => FORMATS[x] || x).join(' · ')}</span>` : ''; };
 function bookTile(b){
   const r = readingOf(b.id);
-  const prog = r && r.pages ? `<span class="prog"><i style="width:${Math.min(100, Math.round(r.page / r.pages * 100))}%"></i></span>` : '';
+  const prog = r && progPct(r) ? `<span class="prog"><i style="width:${progPct(r)}%"></i></span>` : '';
   return `<a class="tile" href="#/b/${b.id}">${coverHTML(b)}${fmtBadge(b)}${b.status === 'processing' ? '<span class="badge wait">Обрабатывается</span>' : ''}${prog}
     <span class="t-title">${esc(b.title)}</span><span class="t-author">${esc(authorsText(b))}</span></a>`;
 }
 function bookRow(b, extra){
   return `<a class="brow" href="#/b/${b.id}">${coverHTML(b, 'sm')}<span class="brow-t"><b>${esc(b.title)}</b><span>${esc(authorsText(b))}</span>
-    <small>${[b.year || '', b.pages ? b.pages + ' с.' : '', FORMATS[b.format], b.format === 'pdf' && b.status === 'ready' && !b.has_text ? 'скан без текста' : '', b.status === 'processing' ? 'обрабатывается' : ''].filter(Boolean).join(' · ')}</small>${extra || ''}</span>${ICON.chev}</a>`;
+    <small>${[b.year || '', b.pages ? b.pages + ' с.' : '', bookFormats(b).map(f => FORMATS[f]).join(', '), isScan(b) ? 'скан без текста' : '', b.status === 'processing' ? 'обрабатывается' : ''].filter(Boolean).join(' · ')}</small>${extra || ''}</span>${ICON.chev}</a>`;
 }
 const booksGrid = list => list.length ? `<div class="grid">${list.map(bookTile).join('')}</div>` : '<p class="empty">Книг пока нет.</p>';
 
@@ -319,13 +357,14 @@ VIEWS.home = () => {
     return head + `<section class="block">${hits.authors.length ? `<h2>Авторы</h2><div class="chips">${hits.authors.slice(0, 12).map(a => `<a class="chip" href="#/a/${a.id}">${ICON.author}${esc(a.name)}</a>`).join('')}</div>` : ''}
       <h2>Книги · ${hits.books.length}</h2>${hits.books.length ? `<div class="rows">${hits.books.slice(0, 100).map(b => bookRow(b)).join('')}</div>` : '<p class="empty">Ничего не нашлось. Проверьте написание или поищите по одному слову.</p>'}</section>`;
   }
-  const cont = S.reading.filter(r => byId('books', r.book)).sort((a, b) => String(b.updated).localeCompare(String(a.updated))).slice(0, 3);
+  const cont = [...new Set(S.reading.filter(r => byId('books', r.book)).sort((a, b) => String(b.updated).localeCompare(String(a.updated))).map(r => r.book))]
+    .slice(0, 3).map(id => readingOf(id)).filter(Boolean);
   const common = shelfKids('', true), mine = shelfKids('', false);
   const recent = [...S.books].sort((a, b) => String(b.created).localeCompare(String(a.created))).slice(0, 12);
   return head + `
-    ${cont.length ? `<section class="block"><h2>Продолжить чтение</h2><div class="cont">${cont.map(r => { const b = byId('books', r.book);
-      return `<a class="cont-item" href="#/read/${b.id}">${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small>
-        <span class="prog wide"><i style="width:${r.pages ? Math.min(100, Math.round(r.page / r.pages * 100)) : 0}%"></i></span><small>с. ${r.page}${r.pages ? ' из ' + r.pages : ''}</small></span></a>`; }).join('')}</div></section>` : ''}
+    ${cont.length ? `<section class="block"><h2>Продолжить чтение</h2><div class="cont">${cont.map(r => { const b = byId('books', r.book), multi = bookFormats(b).length > 1;
+      return `<a class="cont-item" href="${readHref(b.id, readFmt(r))}">${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small>
+        <span class="prog wide"><i style="width:${progPct(r)}%"></i></span><small>${multi ? FORMATS[readFmt(r)] + ' · ' : ''}${progText(r)}</small></span></a>`; }).join('')}</div></section>` : ''}
     <section class="block"><div class="block-h"><h2>Полки</h2><a class="more-link" href="#/shelves">Все полки</a></div>
       ${common.length ? `<div class="shelf-cards">${common.map(shelfCard).join('')}</div>` : `<p class="empty">${isAdmin() ? 'Общих полок пока нет. Создайте первую на вкладке «Полки».' : 'Общих полок пока нет.'}</p>`}</section>
     <section class="block"><div class="block-h"><h2>Мои полки</h2>${mine.length ? '' : '<a class="more-link" href="#/shelves">Создать</a>'}</div>
@@ -389,9 +428,9 @@ function sortedBooks(list){
   return list.sort(titleSort);
 }
 VIEWS.books = () => {
-  let list = S.books.filter(b => (!UI.booksFmt || b.format === UI.booksFmt) && (!UI.booksScan || (b.format === 'pdf' && b.status === 'ready' && !b.has_text)));
+  let list = S.books.filter(b => (!UI.booksFmt || bookFormats(b).includes(UI.booksFmt)) && (!UI.booksScan || isScan(b)));
   list = sortedBooks(list);
-  const fmts = Object.keys(FORMATS).filter(f => S.books.some(b => b.format === f));
+  const fmts = FMT_ORDER.filter(f => S.bfiles.some(x => x.format === f));
   return `${backLink('#/shelves', 'Полки')}<header class="head"><h1>Все книги</h1><span class="n-head">${list.length}</span></header>
     <div class="toolbar">
       <label class="sel"><span class="sr">Сортировка</span><select id="books-sort">${Object.entries(SORTS).map(([k, l]) => `<option value="${k}"${UI.booksSort === k ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
@@ -420,56 +459,117 @@ VIEWS.a = r => {
 };
 
 /* ---------- Карточка книги ---------- */
+// Где в книге: «PDF, с. 45» или «EPUB, Глава 3 · 41%». Формат пишем, только если у книги их несколько.
+function placeText(n, b){
+  const fmt = n.format || (n.page ? 'pdf' : '');
+  const where = fmt === 'epub' ? (n.place || '') : n.page ? 'с. ' + n.page : '';
+  if(!where) return '';
+  return (b && bookFormats(b).length > 1 && fmt ? FORMATS[fmt] + ', ' : '') + where;
+}
+// Ссылка в читалку на место заметки или выделения
+function noteHref(n){
+  const b = n.book ? byId('books', n.book) : null;
+  if(!b) return '';
+  const fmt = n.format || (n.page ? 'pdf' : '');
+  if(fmt === 'pdf' && canRead(fileOf(b.id, 'pdf'))) return readHref(b.id, 'pdf', (n.page ? '&p=' + n.page : '') + (n.kind === 'highlight' ? '&hl=' + n.id : ''));
+  if(fmt === 'epub' && canRead(fileOf(b.id, 'epub'))) return readHref(b.id, 'epub', '&hl=' + n.id);
+  return '';
+}
 function noteRow(n, opts){
   opts = opts || {};
+  if(n.kind === 'highlight') return hlRow(n, opts);
   const b = n.book ? byId('books', n.book) : null;
   const where = opts.noBook ? '' : b ? esc(b.title) : n.book_title ? `${esc(n.book_title)} (книга удалена)` : 'Без книги';
   return `<a class="note-row" href="#/note/${n.id}">${n.kind === 'lesson' ? ICON.lesson : ICON.notes}
-    <span class="nr-t"><b>${esc(n.title || 'Без заголовка')}</b>${n.body_text ? `<span class="nr-x">${esc(n.body_text)}</span>` : ''}
-      <small>${[where, n.page ? 'с. ' + n.page : '', fmtWhen(n.updated)].filter(Boolean).join(' · ')}</small></span>
+    <span class="nr-t"><b>${esc(n.title || 'Без заголовка')}</b>${n.body_text ? `<span class="nr-x">${esc(n.body_text.slice(0, 160))}</span>` : ''}
+      <small>${[where, esc(placeText(n, b)), fmtWhen(n.updated)].filter(Boolean).join(' · ')}</small></span>
     ${n.shared && n.owner === me().id ? '<span class="tag">Видна всем</span>' : ''}${ICON.chev}</a>`;
 }
+// Выделение в списке: цветная полоска, текст (до 3 строк, дальше «ещё»), мысль, место и дата
+function hlRow(n, opts){
+  opts = opts || {};
+  const b = n.book ? byId('books', n.book) : null;
+  const href = noteHref(n);
+  const open = UI.hlOpen.has(n.id), long = (n.quote || '').length > 170;
+  const where = opts.noBook ? '' : b ? esc(b.title) : n.book_title ? `${esc(n.book_title)} (книга удалена)` : '';
+  const meta = [where, esc(placeText(n, b)), fmtWhen(n.created)].filter(Boolean).join(' · ');
+  const inner = `<span class="hl-q${open ? ' open' : ''}">${esc(n.quote || '')}</span>${n.body_text ? `<span class="hl-t">${esc(n.body_text)}</span>` : ''}<small>${meta}</small>`;
+  return `<div class="hl-row" style="--hl:${(HL[n.color] || HL.yellow)[1]}">${href ? `<a class="hl-main" href="${esc(href)}">${inner}</a>` : `<span class="hl-main">${inner}</span>`}
+    <span class="hl-side">${long ? `<button type="button" class="linkbtn sm" data-act="hl-more" data-id="${n.id}">${open ? 'свернуть' : 'ещё'}</button>` : ''}
+    ${n.shared && n.owner === me().id ? '<span class="tag">Видна всем</span>' : ''}</span></div>`;
+}
+function hlFilters(list){
+  const colors = HL_KEYS.filter(c => list.some(n => n.color === c));
+  if(list.length < 2) return '';
+  return `<div class="hl-filters" role="group" aria-label="Фильтр выделений">
+    <button type="button" class="hl-chip all" data-act="hl-color" data-c="" aria-pressed="${!UI.hlColor}">Все</button>
+    ${colors.map(c => `<button type="button" class="hl-chip" data-act="hl-color" data-c="${c}" aria-pressed="${UI.hlColor === c}" aria-label="${HL[c][0]}" title="${HL[c][0]}"><i style="--hl:${HL[c][1]}"></i></button>`).join('')}
+    <label class="check-chip sm"><input type="checkbox" id="hl-thought"${UI.hlThought ? ' checked' : ''}><span>Только с мыслями</span></label></div>`;
+}
+const hlOrder = (a, b) => fmtSort(a.format || 'pdf', b.format || 'pdf') || (a.page || 0) - (b.page || 0)
+  || (parseFloat((/(\d+(?:[.,]\d+)?)%/.exec(a.place || '') || [])[1]) || 0) - (parseFloat((/(\d+(?:[.,]\d+)?)%/.exec(b.place || '') || [])[1]) || 0)
+  || String(a.created).localeCompare(String(b.created));
 VIEWS.b = r => {
   const b = byId('books', r.id);
   if(!b) return notFound();
-  const rd = readingOf(b.id);
+  const fmts = bookFormats(b);
+  const files = filesOfBook(b.id);
+  let fmt = UI.cardFmt[b.id];
+  if(!fmt || !fmts.includes(fmt)) fmt = defaultFormat(b);
+  const f = fileOf(b.id, fmt);
+  const rd = readOf(b.id, fmt);
   const shelves = S.sbooks.filter(x => x.book === b.id).map(x => byId('shelves', x.shelf)).filter(Boolean);
-  const tab = isAdmin() && r.q.get('tab') === 'lessons' ? 'lessons' : 'notes';
-  const mine = notesOfBook(b.id).filter(n => n.owner === me().id && n.kind === (tab === 'lessons' ? 'lesson' : 'note')).sort((x, y) => String(y.updated).localeCompare(String(x.updated)));
-  const shared = isAdmin() ? [] : notesOfBook(b.id).filter(n => n.owner !== me().id && n.shared).sort((x, y) => (x.page || 0) - (y.page || 0));
-  const canRead = b.format === 'pdf' && b.status === 'ready';
-  const readBtn = b.format !== 'pdf' ? `<p class="soon">Читалка для этого формата появится позже.</p>`
-    : b.status === 'processing' ? '<p class="soon">Книга обрабатывается: через минуту её можно будет открыть.</p>'
-    : `<a class="btn primary big" href="#/read/${b.id}">${ICON.book}<span>${rd && rd.page > 1 ? 'Продолжить со с. ' + rd.page : 'Читать'}</span></a>`;
-  const facts = [b.year ? b.year + ' г.' : '', b.pages ? `${b.pages} ${plural(b.pages, PAGES_W)}` : '', FORMATS[b.format], isAdmin() && b.file_size ? fsize(b.file_size) : '',
-    b.format === 'pdf' && b.status === 'ready' && !b.has_text ? 'скан без текста' : ''].filter(Boolean);
+  const q = r.q.get('tab');
+  const tab = q === 'lessons' && isAdmin() ? 'lessons' : q === 'highlights' ? 'highlights' : 'notes';
+  const kind = tab === 'lessons' ? 'lesson' : tab === 'highlights' ? 'highlight' : 'note';
+  let mine = notesOfBook(b.id).filter(n => n.owner === me().id && n.kind === kind);
+  mine = kind === 'highlight' ? mine.sort(hlOrder) : mine.sort((x, y) => String(y.updated).localeCompare(String(x.updated)));
+  const hlAll = mine;
+  if(kind === 'highlight') mine = mine.filter(n => (!UI.hlColor || n.color === UI.hlColor) && (!UI.hlThought || n.body_text));
+  const shared = isAdmin() ? [] : notesOfBook(b.id).filter(n => n.owner !== me().id && n.shared).sort((x, y) => (x.kind === 'highlight') - (y.kind === 'highlight') || hlOrder(x, y));
+  const readBtn = !f ? '<p class="soon">Файла книги нет.</p>'
+    : f.format === 'djvu' ? '<p class="soon">DjVu: читалка появится позже.</p>'
+    : f.status === 'processing' ? '<p class="soon">Книга обрабатывается: через минуту её можно будет открыть.</p>'
+    : f.status === 'error' ? '<p class="soon">Этот файл не открывается: при обработке была ошибка.</p>'
+    : `<a class="btn primary big" href="${readHref(b.id, fmt)}">${ICON.book}<span>${rd && (fmt === 'epub' ? rd.pct >= 1 : rd.page > 1) ? (fmt === 'epub' ? `Продолжить, ${Math.round(rd.pct)}%` : 'Продолжить со с. ' + rd.page) : 'Читать'}</span></a>`;
+  const seg = fmts.length > 1 ? `<div class="fmt-seg" role="radiogroup" aria-label="Формат">${fmts.map(x => `<button type="button" role="radio" data-act="card-fmt" data-id="${b.id}" data-f="${x}" aria-checked="${x === fmt}">${FORMATS[x]}${x === 'djvu' ? '<small>читалка позже</small>' : ''}</button>`).join('')}</div>` : '';
+  const facts = [b.year ? b.year + ' г.' : '', f && f.pages ? `${f.pages} ${plural(f.pages, PAGES_W)}` : '', fmts.length > 1 ? '' : FORMATS[fmt], isAdmin() && b.file_size ? fsize(b.file_size) : '',
+    fmt === 'pdf' && isScan(b) ? 'скан без текста' : ''].filter(Boolean);
+  const adminNotes = isAdmin() ? files.filter(x => x.status !== 'error' && x.status_note).map(x => `<p class="hint">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note)}</p>`).join('') : '';
+  const errors = files.filter(x => x.status === 'error').map(x => `<p class="form-err">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note || 'Файл не удалось обработать.')}</p>`).join('');
+  const tabs = [['notes', 'Заметки'], ...(isAdmin() ? [['lessons', 'Уроки']] : []), ['highlights', 'Выделения']];
+  const emptyText = {notes: 'Заметок к этой книге пока нет.', lessons: 'Уроков к этой книге пока нет.',
+    highlights: hlAll.length ? 'Под этот фильтр выделений нет.' : 'Выделений пока нет. Откройте книгу, выделите текст и выберите цвет. На телефоне нажмите «Маркер» и проведите пальцем по строкам.'}[tab];
   return `${backLink('#/', 'Библиотека')}
     <article class="book">
       <div class="book-cover">${coverHTML(b, 'lg')}</div>
       <div class="book-info">
         <h1>${esc(b.title)}</h1>
         ${(b.authors || []).length ? `<p class="book-authors">${b.authors.map(id => byId('authors', id)).filter(Boolean).map(a => `<a href="#/a/${a.id}">${esc(a.name)}</a>`).join(', ')}</p>` : ''}
+        ${seg}
         <p class="facts">${facts.map(esc).join(' · ')}</p>
-        ${b.status === 'processing' ? '<p class="tag wait">Обрабатывается</p>' : ''}
-        ${b.status === 'error' ? `<p class="form-err">${esc(b.status_note || 'Файл не удалось обработать.')}</p>` : isAdmin() && b.status_note ? `<p class="hint">${esc(b.status_note)}</p>` : ''}
+        ${b.status === 'processing' && !(f && f.status === 'processing') ? '<p class="tag wait">Обрабатывается</p>' : ''}
+        ${errors}${adminNotes}
         <div class="book-acts">${readBtn}
           <button type="button" class="btn" data-act="to-shelf" data-id="${b.id}">${ICON.shelves}<span>На полку</span></button>
-          ${isAdmin() ? `<button type="button" class="icon-btn" data-act="book-menu" data-id="${b.id}" aria-label="Действия с книгой" aria-haspopup="menu">${ICON.more}</button>` : ''}</div>
+          ${isAdmin() ? `<button type="button" class="icon-btn" data-act="book-menu" data-id="${b.id}" aria-label="Действия с книгой" aria-haspopup="menu" title="Действия с книгой">${ICON.more}</button>` : ''}</div>
         ${shelves.length ? `<p class="on-shelves">На полках: ${shelves.map(s => `<a class="chip sm" href="#/sh/${s.id}">${esc(shelfPath(s).map(p => p.name).join(' › '))}</a>`).join(' ')}</p>` : ''}
         ${b.description ? `<details class="desc"${UI.descOpen ? ' open' : ''}><summary>Описание</summary><p>${esc(b.description).replace(/\n/g, '<br>')}</p></details>` : ''}
       </div>
     </article>
     <section class="card notes-card">
-      ${isAdmin() ? `<div class="tabs" role="tablist"><a role="tab" href="#/b/${b.id}" aria-selected="${tab === 'notes'}">Заметки</a><a role="tab" href="#/b/${b.id}?tab=lessons" aria-selected="${tab === 'lessons'}">Уроки</a></div>` : '<h2>Заметки</h2>'}
-      <div class="rows">${mine.map(n => noteRow(n, {noBook: true})).join('') || `<p class="empty">${tab === 'lessons' ? 'Уроков к этой книге пока нет.' : 'Заметок к этой книге пока нет.'}</p>`}</div>
-      <a class="btn" href="#/note/new?book=${b.id}${tab === 'lessons' ? '&kind=lesson' : ''}">${ICON.plus}<span>${tab === 'lessons' ? 'Урок' : 'Заметка'}</span></a>
+      <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<a role="tab" href="#/b/${b.id}${k === 'notes' ? '' : '?tab=' + k}" aria-selected="${tab === k}">${l}${k === 'highlights' && hlAll.length && tab !== k ? ` <span class="n">${hlAll.length}</span>` : ''}</a>`).join('')}</div>
+      ${kind === 'highlight' ? hlFilters(hlAll) : ''}
+      <div class="rows">${mine.map(n => noteRow(n, {noBook: true})).join('') || `<p class="empty">${emptyText}</p>`}</div>
+      ${kind !== 'highlight' ? `<a class="btn" href="#/note/new?book=${b.id}${tab === 'lessons' ? '&kind=lesson' : ''}">${ICON.plus}<span>${tab === 'lessons' ? 'Урок' : 'Заметка'}</span></a>` : ''}
       ${shared.length ? `<h3 class="sub-h owner-h">${S.owner ? faceHTML(S.owner, 'xs') : ''}<span>Заметки автора библиотеки</span></h3><div class="rows">${shared.map(n => noteRow(n, {noBook: true})).join('')}</div>` : ''}
     </section>`;
 };
 
 /* ---------- Мои заметки ---------- */
 VIEWS.notes = () => {
-  const kinds = isAdmin() ? [['', 'Все'], ['note', 'Заметки'], ['lesson', 'Уроки']] : [['', 'Мои'], ['shared', 'От автора библиотеки']];
+  const kinds = isAdmin() ? [['', 'Все'], ['note', 'Заметки'], ['lesson', 'Уроки'], ['highlight', 'Выделения']]
+    : [['', 'Все мои'], ['note', 'Заметки'], ['highlight', 'Выделения'], ['shared', 'От автора библиотеки']];
   let list = S.notes.filter(n => {
     if(UI.notesKind === 'shared') return n.owner !== me().id;
     if(n.owner !== me().id) return false;
@@ -479,7 +579,7 @@ VIEWS.notes = () => {
   list.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
   return `<header class="head"><h1>Заметки</h1>
       <span class="row-acts"><a class="btn sm" href="#/note/new">${ICON.plus}<span>Заметка</span></a>${isAdmin() ? `<a class="btn sm" href="#/note/new?kind=lesson">${ICON.plus}<span>Урок</span></a>` : ''}</span></header>
-    <label class="search"><span class="sr">Поиск по тексту заметок</span>${ICON.search}<input type="search" id="nq" placeholder="Поиск по заголовку и тексту" value="${esc(UI.notesQ)}" autocomplete="off"></label>
+    <label class="search"><span class="sr">Поиск по тексту заметок и выделений</span>${ICON.search}<input type="search" id="nq" placeholder="Поиск по тексту, цитатам и мыслям" value="${esc(UI.notesQ)}" autocomplete="off"></label>
     <div class="seg" role="radiogroup" aria-label="Что показать">${kinds.map(([k, l]) => `<button type="button" role="radio" data-act="notes-kind" data-k="${k}" aria-checked="${UI.notesKind === k}">${l}</button>`).join('')}</div>
     ${UI.notesQ && !UI.notesHits ? '<p class="hint">Ищу…</p>' : ''}
     <div class="rows">${list.map(n => noteRow(n)).join('') || `<p class="empty">${UI.notesQ ? 'Ничего не нашлось.' : 'Здесь появятся заметки ко всем книгам. Новую заметку можно начать в карточке книги или прямо в читалке.'}</p>`}</div>`;
@@ -813,12 +913,17 @@ VIEWS.note = r => {
   const own = isNew || n.owner === me().id;
   const back = b ? '#/b/' + b.id + (kind === 'lesson' ? '?tab=lessons' : '') : '#/notes';
   const page = isNew ? (+r.q.get('page') || '') : (n.page || '');
+  const ctx = isNew && UI.noteCtx && UI.noteCtx.book === bookId ? UI.noteCtx : null;
+  const fmt = isNew ? (ctx ? ctx.format : (b && fileOf(b.id, 'pdf') ? 'pdf' : '')) : (n.format || (n.page ? 'pdf' : ''));
   const bookLine = b ? `<a href="#/b/${b.id}">${esc(b.title)}</a>` : n && n.book_title ? `${esc(n.book_title)} <span class="muted">(книга удалена)</span>` : '<span class="muted">Без книги</span>';
-  const pageLink = p => b && b.format === 'pdf' && p ? `<a class="page-link" href="#/read/${b.id}?p=${p}">с. ${p}</a>` : p ? `с. ${p}` : '';
+  const pdfOk = b && canRead(fileOf(b.id, 'pdf'));
+  const pageLink = p => pdfOk && p ? `<a class="page-link" href="${readHref(b.id, 'pdf', '&p=' + p)}">с. ${p}</a>` : p ? `с. ${p}` : '';
+  const epubPlace = fmt === 'epub' ? (isNew ? (ctx && ctx.place) : n.place) || '' : '';
+  const epubHref = !isNew && fmt === 'epub' ? noteHref(n) : '';
   if(!own){
     return `${backLink(back, b ? b.title : 'Заметки')}
       <article class="card note-view"><div class="note-top">${S.owner ? faceHTML(S.owner, 'xs') : ''}<p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'} автора библиотеки</p><span class="ed-state"></span>${fullBtnHTML()}</div>
-        <h1>${esc(n.title || 'Без заголовка')}</h1><p class="note-meta">${bookLine}${n.page ? ' · ' + pageLink(n.page) : ''} · изменено ${esc(fmtWhen(n.updated))}</p>
+        <h1>${esc(n.title || 'Без заголовка')}</h1><p class="note-meta">${bookLine}${epubPlace ? ' · ' + (epubHref ? `<a class="page-link" href="${esc(epubHref)}">${esc(placeText(n, b))}</a>` : esc(epubPlace)) : n.page ? ' · ' + pageLink(n.page) : ''} · изменено ${esc(fmtWhen(n.updated))}</p>
         <div class="prose" id="note-body"><p class="muted">Загружаю…</p></div></article>
       ${kind === 'lesson' ? filesBlock(n, false) : ''}`;
   }
@@ -828,7 +933,8 @@ VIEWS.note = r => {
         <span class="ed-state" id="ed-state" role="status">${esc(ED.state)}</span>
         <button type="button" class="icon-btn" data-act="note-menu" aria-label="Действия с заметкой" aria-haspopup="menu">${ICON.more}</button></div>
       <label class="sr" for="ed-title">Заголовок</label><input type="text" id="ed-title" class="ed-title" maxlength="300" placeholder="Заголовок" value="${esc(n ? n.title : '')}">
-      <div class="note-meta">${bookLine}<label class="ed-page">страница <input type="number" id="ed-page" min="0" max="99999" inputmode="numeric" value="${esc(page)}"></label>${b && b.format === 'pdf' ? `<a class="btn sm ghost" id="ed-open" href="#/read/${b.id}${page ? '?p=' + page : ''}">Открыть книгу</a>` : ''}</div>
+      <div class="note-meta">${bookLine}${epubPlace || fmt === 'epub' ? `<span class="ed-place">EPUB, ${esc(epubPlace || 'место не указано')}</span>${epubHref ? `<a class="btn sm ghost" href="${esc(epubHref)}">Открыть книгу</a>` : ''}`
+        : `<label class="ed-page">страница <input type="number" id="ed-page" min="0" max="99999" inputmode="numeric" value="${esc(page)}"></label>${pdfOk ? `<a class="btn sm ghost" id="ed-open" href="${readHref(b.id, 'pdf', page ? '&p=' + page : '')}">Открыть книгу</a>` : ''}`}</div>
       <div id="ed-box" class="ed-box"><p class="muted">Загружаю редактор…</p></div>
     </article>
     ${kind === 'lesson' && n ? filesBlock(n, true) : kind === 'lesson' ? '<p class="hint">Файлы можно будет прикрепить, когда в уроке появится текст или заголовок.</p>' : ''}`;
@@ -894,7 +1000,8 @@ function edData(){
   const q = ED.quill; if(!q) return null;
   const empty = !q.getText().trim();
   const body = empty ? '' : q.getSemanticHTML().replace(/&nbsp;/g, ' ');
-  return {title: ($('#ed-title') || {}).value || '', body, page: +(($('#ed-page') || {}).value || 0) || 0};
+  const pg = $('#ed-page');
+  return {title: ($('#ed-title') || {}).value || '', body, ...(pg ? {page: +(pg.value || 0) || 0} : {})};
 }
 function edChanged(){
   const d = edData(); if(!d) return;
@@ -902,7 +1009,7 @@ function edChanged(){
   saveLS(draftKey(ED.id), {...d, at: Date.now()});
   edState('Есть несохранённые изменения');
   clearTimeout(ED.timer); ED.timer = setTimeout(edSave, 1500);
-  const o = $('#ed-open'); if(o && o.href){ const r = route(); const bid = ED.rec ? ED.rec.book : r.q.get('book'); if(bid) o.href = `#/read/${bid}${d.page ? '?p=' + d.page : ''}`; }
+  const o = $('#ed-open'); if(o && o.href){ const r = route(); const bid = ED.rec ? ED.rec.book : r.q.get('book'); if(bid) o.href = readHref(bid, 'pdf', d.page ? '&p=' + d.page : ''); }
 }
 async function edSave(){
   clearTimeout(ED.timer);
@@ -918,7 +1025,12 @@ async function edSave(){
     let rec;
     if(isNew){
       const kind = isAdmin() && r.q.get('kind') === 'lesson' ? 'lesson' : 'note';
-      rec = await pb.collection('notes').create({id, owner: me().id, kind, book: r.q.get('book') || '', ...d});
+      const book = r.q.get('book') || '';
+      // заметка из читалки: формат и место в книге (у EPUB глава и процент)
+      const ctx = UI.noteCtx && UI.noteCtx.book === book ? UI.noteCtx : null;
+      const extra = ctx ? {format: ctx.format, place: ctx.place || '', anchor: ctx.anchor || null} : book && fileOf(book, 'pdf') && d.page ? {format: 'pdf'} : {};
+      rec = await pb.collection('notes').create({id, owner: me().id, kind, book, ...extra, ...d});
+      UI.noteCtx = null;
       ED.isNew = false;
       if(route().name === 'note' && route().id === 'new'){ history.replaceState(null, '', '#/note/' + id); UI.fullFor = id; }
     } else {
@@ -1169,11 +1281,71 @@ function openShelfBooks(s){
 
 /* ---------- Книга: изменить, обложка, удалить (только администратор) ---------- */
 function bookMenu(btn, b){
+  const fmts = bookFormats(b);
   const items = [{label: 'Изменить данные', run: () => openBookForm(b)}, {label: 'Заменить обложку', run: () => pickCover(b)}];
-  if(b.status === 'error' || (b.status === 'ready' && b.format === 'pdf')) items.push({label: 'Обработать заново', run: async () => {
-    try { await pb.send(`/api/knigi/books/${b.id}/reprocess`, {method: 'POST'}); kickProcess(); toast('Книга снова обрабатывается'); } catch(e){ toast(errText(e)); } }});
+  if(fmts.length < 3) items.push({label: 'Добавить формат', run: () => addFormat(b)});
+  items.push({label: 'Объединить с другой книгой', run: () => mergeBook(b)});
+  if(fmts.length > 1) items.push({label: 'Убрать формат', run: () => removeFormat(b)});
+  if(b.status !== 'processing') items.push({label: 'Обработать заново', run: async () => {
+    try { await pb.send(`/api/knigi/books/${b.id}/reprocess`, {method: 'POST'}); kickProcess(); toast('Книга снова обрабатывается'); loadAll(['books', 'bfiles']).catch(() => {}); } catch(e){ toast(errText(e)); } }});
   items.push({label: 'Удалить книгу', danger: true, run: () => confirmDeleteBook(b)});
   openMenu(btn, items);
+}
+// Ещё один формат к этой книге: обычная загрузка, обработка в фоне
+function addFormat(b){
+  const have = bookFormats(b);
+  const exts = {pdf: '.pdf,application/pdf', epub: '.epub,application/epub+zip', djvu: '.djvu,.djv'};
+  const free = FMT_ORDER.filter(f => !have.includes(f));
+  if(!free.length){ info('Все форматы уже есть', 'У книги уже есть PDF, EPUB и DjVu.'); return; }
+  pickFile(free.map(f => exts[f]).join(','), false, files => { loadDisk(); addUploads(files, 'book', '', b.id); });
+}
+// Объединить: поиск второй книги, предпросмотр (что куда перейдёт), подтверждение
+function mergeBook(b){
+  let q = '';
+  const list = () => { const h = searchHits(q); return (h ? h.books : [...S.books].sort(titleSort)).filter(x => x.id !== b.id).slice(0, 60); };
+  const rows = () => list().map(x => `<button type="button" class="pick-row" data-dlg="merge" data-id="${x.id}">${coverHTML(x, 'xs')}<span><b>${esc(x.title)}</b><small>${esc([authorsText(x), bookFormats(x).map(f => FORMATS[f]).join(', ')].filter(Boolean).join(' · '))}</small></span></button>`).join('') || '<p class="empty">Ничего не нашлось.</p>';
+  openForm({title: 'Объединить с другой книгой', text: `Останется карточка «${b.title}». Выберите вторую книгу: её файлы, полки, заметки и прогресс перейдут сюда.`,
+    html: `<label class="search"><span class="sr">Поиск</span>${ICON.search}<input type="search" id="merge-q" placeholder="Название или автор" autocomplete="off"></label><div class="pick-list" id="merge-list">${rows()}</div>`, noSubmit: true,
+    onInput(el){ if(el.id === 'merge-q'){ q = el.value; $('#merge-list').innerHTML = rows(); } },
+    async onClick(el){
+      const other = byId('books', el.dataset.id); if(!other) return;
+      const m = await pb.send(`/api/knigi/books/${b.id}/merge/${other.id}`, {});
+      if(m.conflict.length){
+        thenOpen(() => info('Объединить нельзя', `У обеих книг есть файл ${m.conflict.map(f => FORMATS[f]).join(' и ')}. Сначала уберите лишний формат в одной из книг («⋯» → «Убрать формат»), потом объединяйте.`));
+        dlg.close(); return;
+      }
+      const parts = [`файлы: ${m.formats.map(f => FORMATS[f]).join(', ') || 'нет'}`];
+      if(m.shelves) parts.push(`места на полках: ${m.shelves}`);
+      const notes = [m.notes ? `${m.notes} ${plural(m.notes, NOTES_W)}` : '', m.lessons ? `${m.lessons} ${plural(m.lessons, ['урок','урока','уроков'])}` : '', m.highlights ? `${m.highlights} ${plural(m.highlights, ['выделение','выделения','выделений'])}` : ''].filter(Boolean);
+      if(notes.length) parts.push(notes.join(', ') + ' (у всех пользователей)');
+      if(m.readers) parts.push(`прогресс чтения: ${m.readers} ${plural(m.readers, ['человек','человека','человек'])}`);
+      thenOpen(() => openForm({title: 'Объединить книги?', text: `Останется «${b.title}» (эта карточка). Из «${other.title}» сюда перейдут: ${parts.join('; ')}. Если у этой книги нет года, описания или обложки, они возьмутся у второй. Карточка «${other.title}» пропадёт. Отменить объединение нельзя.`,
+        submit: 'Объединить', async onSave(){
+          await pb.send(`/api/knigi/books/${b.id}/merge/${other.id}`, {method: 'POST'});
+          await loadAll();
+          toast('Книги объединены'); render(true);
+        }}));
+      dlg.close();
+    }});
+}
+// Убрать один формат: файл, текст, прогресс и выделения в этом формате
+function removeFormat(b){
+  const files = filesOfBook(b.id);
+  if(files.length < 2){ info('Это последний формат', 'Последний формат убрать нельзя. Чтобы убрать книгу совсем, выберите «Удалить книгу».'); return; }
+  const ask = async f => {
+    const m = await pb.send(`/api/knigi/book-files/${f.id}`, {});
+    thenOpen(() => openForm({title: `Убрать ${FORMATS[f.format]}?`, text: `Из книги «${b.title}» удалятся файл ${FORMATS[f.format]} и его текст, прогресс чтения в ${FORMATS[f.format]}${m.readers ? ` (у ${m.readers} ${plural(m.readers, ['человека','человек','человек'])})` : ''} и выделения в этом формате у всех: ${m.highlights}. Заметки останутся. Вернуть можно только новой загрузкой файла.`,
+      submit: 'Убрать', danger: true, async onSave(){
+        await pb.send(`/api/knigi/book-files/${f.id}`, {method: 'DELETE'});
+        delete UI.cardFmt[b.id];
+        await loadAll(['books', 'bfiles', 'reading', 'notes']);
+        toast(`${FORMATS[f.format]} убран`);
+      }}));
+    dlg.close();
+  };
+  openForm({title: 'Убрать формат', text: 'Какой формат убрать из книги?', noSubmit: true,
+    html: `<div class="pick-list">${files.map(f => `<button type="button" class="pick-row" data-dlg="fmt" data-id="${f.id}"><span><b>${FORMATS[f.format]}</b><small>${esc([f.orig_name || '', fsize(f.file_size || 0)].filter(Boolean).join(' · '))}</small></span></button>`).join('')}</div>`,
+    async onClick(el){ const f = files.find(x => x.id === el.dataset.id); if(f) await ask(f); }});
 }
 async function authorIds(text){
   const names = text.split(/\s*[;,]\s*/).map(x => x.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 20);
@@ -1193,10 +1365,10 @@ function openBookForm(b){
     {key: 'year', label: 'Год издания', type: 'number'},
     {key: 'description', label: 'Описание', type: 'textarea', rows: 6, max: 20000}],
     values: {title: b.title, authors: (b.authors || []).map(authorName).filter(Boolean).join(', '), year: b.year || '', description: b.description || ''},
-    html: dl + (b.orig_name ? `<p class="hint">Файл: ${esc(b.orig_name)}, ${fsize(b.file_size || 0)}</p>` : ''),
+    html: dl + filesOfBook(b.id).map(f => `<p class="hint">${FORMATS[f.format]}: ${esc(f.orig_name || '')}, ${fsize(f.file_size || 0)}</p>`).join(''),
     async onSave(v){
       const ids = await authorIds(v.authors);
-      upsert('books', await pb.collection('books').update(b.id, {title: v.title, authors: ids, year: +v.year || 0, description: v.description}, {fields: BOOK_FIELDS + ',orig_name,hash'}));
+      upsert('books', await pb.collection('books').update(b.id, {title: v.title, authors: ids, year: +v.year || 0, description: v.description}, {fields: BOOK_FIELDS}));
       loadAll(['authors']).catch(() => {});
       toast('Сохранено');
     }});
@@ -1223,12 +1395,12 @@ function pickCover(b){
 function confirmDeleteBook(b){
   const mine = notesOfBook(b.id).filter(n => n.owner === me().id);
   const fields = mine.length ? [{key: 'notes', type: 'select', label: `Ваши заметки и уроки к этой книге (${mine.length})`, options: [['keep', 'оставить без книги'], ['delete', 'удалить вместе с книгой']], hint: 'Оставленные будут в разделе «Заметки» с пометкой «книга удалена».'}] : [];
-  openForm({title: 'Удалить книгу?', text: `«${b.title}»: удалятся файл, текст, обложка, место на полках и прогресс чтения у всех. Вернуть можно только новой загрузкой. Заметки читателей останутся у них без книги.`,
+  openForm({title: 'Удалить книгу?', text: `«${b.title}»: удалятся все файлы книги (${bookFormats(b).map(f => FORMATS[f]).join(', ')}), текст, обложка, место на полках и прогресс чтения у всех. Вернуть можно только новой загрузкой. Заметки читателей останутся у них без книги.`,
     fields, values: {notes: 'keep'}, submit: 'Удалить', danger: true,
     async onSave(v){
       await pb.send(`/api/knigi/books/${b.id}?notes=${v.notes === 'delete' ? 'delete' : 'keep'}`, {method: 'DELETE'});
       removeLocal('books', b.id);
-      S.sbooks = S.sbooks.filter(x => x.book !== b.id); S.reading = S.reading.filter(x => x.book !== b.id);
+      S.sbooks = S.sbooks.filter(x => x.book !== b.id); S.reading = S.reading.filter(x => x.book !== b.id); S.bfiles = S.bfiles.filter(x => x.book !== b.id);
       loadAll(['notes', 'authors']).catch(() => {});
       toast('Книга удалена'); go('#/', true);
     }});
@@ -1239,12 +1411,12 @@ function confirmDeleteBook(b){
 const UP = {items: [], running: false, hidden: false};
 const UP_EXT = {book: /\.(pdf|epub|djvu|djv)$/i, file: /\.(pdf|docx?|pptx?|jpe?g|png|webp|gif|heic)$/i};
 const UP_MAX = {book: 500 * MB, file: 50 * MB};
-function addUploads(files, kind, note){
+function addUploads(files, kind, note, book){
   for(const f of files){
-    const it = {id: newId(), file: f, kind, note: note || '', state: 'wait', pct: 0, msg: '', bookId: ''};
+    const it = {id: newId(), file: f, kind, note: note || '', book: book || '', state: 'wait', pct: 0, msg: '', bookId: ''};
     if(!UP_EXT[kind].test(f.name)){ it.state = 'err'; it.msg = kind === 'book' ? 'Подходят только PDF, EPUB и DjVu.' : 'Этот вид файла не подходит.'; }
     else if(f.size > UP_MAX[kind]){ it.state = 'err'; it.msg = `Больше ${UP_MAX[kind] / MB} МБ.`; }
-    else if(kind === 'book' && S.books.some(b => b.orig_name === f.name && b.file_size === f.size)){ it.state = 'skip'; it.msg = 'Такой файл уже есть в библиотеке.'; }
+    else if(kind === 'book' && S.bfiles.some(x => x.orig_name === f.name && x.file_size === f.size)){ it.state = 'skip'; it.msg = 'Такой файл уже есть в библиотеке.'; }
     UP.items.push(it);
   }
   UP.hidden = false;
@@ -1272,7 +1444,7 @@ function xhrChunk(url, blob, onProg){
 }
 async function uploadOne(it){
   const f = it.file;
-  const st = await pb.send('/api/knigi/upload/start', {method: 'POST', body: {name: f.name, size: f.size, kind: it.kind, note: it.note}});
+  const st = await pb.send('/api/knigi/upload/start', {method: 'POST', body: {name: f.name, size: f.size, kind: it.kind, note: it.note, book: it.book}});
   it.upload = st.upload;
   for(let i = 0; i < st.chunks; i++){
     if(it.cancel) throw {msg: 'отменено'};
@@ -1303,7 +1475,7 @@ async function runUploads(){
         it.pct = 100;
         if(res.kind === 'book'){ it.state = 'proc'; it.bookId = res.id; kickProcess(); }
         else { it.state = 'done'; }
-        loadAll(it.kind === 'book' ? ['books', 'authors'] : ['nfiles']).catch(() => {});
+        loadAll(it.kind === 'book' ? ['books', 'bfiles', 'authors'] : ['nfiles']).catch(() => {});
       } catch(e){
         it.state = 'err'; it.msg = e.msg || errText(e);
         if(it.upload) pb.send('/api/knigi/upload/' + it.upload, {method: 'DELETE'}).catch(() => {});
@@ -1339,10 +1511,15 @@ function renderUploadsPanel(){
 // pdf.js (лицензия Apache 2.0) лежит в vendor/pdfjs. Файл книги целиком не передаётся: читалка просит у сервера
 // только нужные куски по 512 КБ (свой загрузчик PDFDataRangeTransport, каждый кусок отдельным запросом с Range).
 // Сохранения, печати и кнопки «Скачать» в читалке нет. Подпись читателя рисуется прямо на холсте страницы.
-// У читателей нет текстового слоя (READER_TEXT_LAYER), копирование, контекстное меню и перетаскивание выключены.
+// Текстовый слой есть у всех (READER_TEXT_LAYER), у читателей копирование, контекстное меню и перетаскивание выключены.
+// Выделения рисуются отдельным слоем под текстовым (.hl-layer), подпись остаётся на холсте.
+const READER = {mode: ''}; // 'pdf' или 'epub': какая читалка сейчас на экране
 const RD = {open: false, key: '', src: null, doc: null, lib: null, link: null, linkAt: 0, mark: '', title: '', page: 1, pages: 0, zoom: 1,
-  cache: new Map(), seq: 0, seen: new Set(), saveT: 0, pending: [], pause: 0, bars: true, outline: null, back: '#/'};
+  cache: new Map(), seq: 0, seen: new Set(), saveT: 0, pending: [], pause: 0, bars: true, outline: null, back: '#/',
+  hls: [], marker: false, mk: null, flash: ''};
 const rdText = () => isAdmin() || READER_TEXT_LAYER;
+// Телефон и планшет: у читателя обычное выделение выключено (иначе Safari покажет «Скопировать» и «Поделиться»), выделяет «Маркер»
+const touchUI = () => window.matchMedia('(hover: none) and (pointer: coarse)').matches;
 let pdfjsLoad = null;
 function loadPdfjs(){
   if(!pdfjsLoad) pdfjsLoad = import('/vendor/pdfjs/pdf.min.mjs').then(lib => { lib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs'; return lib; }).catch(e => { pdfjsLoad = null; throw e; });
@@ -1351,7 +1528,7 @@ function loadPdfjs(){
 async function rdGetLink(force){
   if(!force && RD.link && Date.now() - RD.linkAt < (RD.link.ttl - 600) * 1000) return RD.link;
   const s = RD.src;
-  RD.link = await pb.send(s.kind === 'book' ? `/api/knigi/books/${s.id}/link` : `/api/knigi/files/${s.id}/link`, {});
+  RD.link = await pb.send(s.kind === 'book' ? `/api/knigi/books/${s.id}/link?f=pdf` : `/api/knigi/files/${s.id}/link`, {});
   RD.linkAt = Date.now();
   return RD.link;
 }
@@ -1404,6 +1581,7 @@ function rdPause(err){
 function rdResume(){
   RD.pause = 0; clearTimeout(RD.pauseT);
   $('#rd-msg').hidden = true;
+  if(READER.mode === 'epub'){ const k = EP.key; EP.key = ''; epShow(route(), byId('books', EP.bookId), k); return; }
   const p = RD.pending; RD.pending = [];
   for(const [t, b, e] of p) rdQueue(t, b, e);
 }
@@ -1413,50 +1591,79 @@ function rdMsg(text, isErr){
   m.innerHTML = `<div class="rd-msg-box"><p${isErr ? ' class="form-err"' : ''}>${esc(text)}</p>${isErr ? '<button type="button" class="btn" data-rd="close">Закрыть</button>' : ''}</div>`;
   m.hidden = false;
 }
+const markerBtn = () => `<button type="button" class="icon-btn mk-btn" data-rd="marker" id="rd-marker" aria-pressed="false" aria-label="Маркер" title="Маркер: выделять текст пальцем или мышью">${ICON.marker}</button>`;
 function rdShell(){
   const box = $('#reader');
-  box.innerHTML = `<div class="rd-top"><button type="button" class="icon-btn" data-rd="close" aria-label="Закрыть книгу">${ICON.back}</button>
+  const book = RD.src.kind === 'book';
+  box.innerHTML = `<div class="rd-top"><button type="button" class="icon-btn" data-rd="close" aria-label="Закрыть книгу" title="Закрыть книгу">${ICON.back}</button>
       <h1 class="rd-title" id="rd-title"></h1>
-      <button type="button" class="icon-btn" data-rd="toc" id="rd-toc" aria-label="Оглавление" hidden>${ICON.toc}</button>
-      ${RD.src.kind === 'book' ? `<button type="button" class="btn sm" data-rd="note">${ICON.pen}<span>Заметка</span></button>` : ''}
-      <button type="button" class="icon-btn" data-rd="menu" aria-label="Ещё" aria-haspopup="menu">${ICON.more}</button></div>
+      <button type="button" class="icon-btn" data-rd="toc" id="rd-toc" aria-label="Оглавление" title="Оглавление" hidden>${ICON.toc}</button>
+      ${book ? markerBtn() + `<button type="button" class="btn sm" data-rd="note" title="Заметка к этой странице">${ICON.pen}<span>Заметка</span></button>` : ''}
+      <button type="button" class="icon-btn" data-rd="menu" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button></div>
     <div class="rd-stage" id="rd-stage"><div class="rd-pagebox" id="rd-pagebox"></div></div>
-    <div class="rd-bottom"><button type="button" class="icon-btn" data-rd="prev" aria-label="Предыдущая страница">${ICON.left}</button>
-      <button type="button" class="rd-num" data-rd="goto" id="rd-num" aria-label="Перейти к странице">…</button>
-      <button type="button" class="icon-btn" data-rd="next" aria-label="Следующая страница">${ICON.right}</button>
+    <div class="rd-bottom"><button type="button" class="icon-btn" data-rd="prev" aria-label="Предыдущая страница" title="Предыдущая страница">${ICON.left}</button>
+      <button type="button" class="rd-num" data-rd="goto" id="rd-num" aria-label="Перейти к странице" title="Перейти к странице">…</button>
+      <button type="button" class="icon-btn" data-rd="next" aria-label="Следующая страница" title="Следующая страница">${ICON.right}</button>
       <span class="rd-sp"></span>
-      <button type="button" class="icon-btn" data-rd="zout" aria-label="Уменьшить">${ICON.zout}</button>
-      <button type="button" class="icon-btn" data-rd="zin" aria-label="Увеличить">${ICON.zin}</button>
-      ${document.fullscreenEnabled ? `<button type="button" class="icon-btn" data-rd="full" aria-label="Во весь экран">${ICON.full}</button>` : ''}</div>
+      <button type="button" class="icon-btn" data-rd="zout" aria-label="Уменьшить" title="Уменьшить">${ICON.zout}</button>
+      <button type="button" class="icon-btn" data-rd="zin" aria-label="Увеличить" title="Увеличить">${ICON.zin}</button>
+      ${document.fullscreenEnabled ? `<button type="button" class="icon-btn" data-rd="full" aria-label="Во весь экран" title="Во весь экран">${ICON.full}</button>` : ''}</div>
     <input type="range" class="rd-slider" id="rd-slider" min="1" max="1" value="1" aria-label="Страница">
     <div class="rd-msg" id="rd-msg" hidden></div>`;
+  rdReaderClasses();
+  RD.marker = false;
+}
+function rdReaderClasses(){
+  const box = $('#reader');
   box.classList.toggle('reader-free', isAdmin());
+  box.classList.toggle('touch', touchUI());
   box.classList.toggle('dark-pages', !!loadLS('darkPages', false));
+  box.classList.toggle('epub', READER.mode === 'epub');
+  box.classList.remove('marker');
+}
+function rdOpenScreen(){
+  $('#app').hidden = true; $('#reader').hidden = false; RD.open = true;
+  document.documentElement.classList.add('reading');
+}
+function rdFail(text){
+  $('#reader').innerHTML = `<div class="rd-msg"><div class="rd-msg-box"><p>${esc(text)}</p><button type="button" class="btn" data-rd="close">Назад</button></div></div>`;
 }
 async function rdShow(r){
+  rdOpenScreen();
+  hpHide();
+  let fmt = 'pdf';
+  if(r.name === 'read'){
+    const b = byId('books', r.id);
+    fmt = r.q.get('f') || (b ? defaultFormat(b) : 'pdf');
+    if(b && fmt !== 'pdf' && fmt !== 'epub'){ READER.mode = ''; RD.back = '#/b/' + b.id; rdFail('Читалка для этого формата появится позже.'); return; }
+    if(fmt === 'epub') return epShow(r, b);
+  }
+  if(READER.mode === 'epub') epDispose();
+  READER.mode = 'pdf';
   const src = r.name === 'read' ? {kind: 'book', id: r.id} : {kind: 'file', id: r.id};
   const key = src.kind + ':' + src.id;
   const want = +r.q.get('p') || 0;
-  $('#app').hidden = true; $('#reader').hidden = false; RD.open = true;
-  document.documentElement.classList.add('reading');
+  RD.flash = r.q.get('hl') || '';
   if(RD.key === key && RD.doc){
-    if($('#rd-stage') == null){ RD.src = src; rdShell(); rdHeader(); }
+    if($('#rd-pagebox') == null){ RD.src = src; rdShell(); rdHeader(); $('#rd-slider').max = RD.pages; rdMarkerState(); const t = $('#rd-toc'); if(t) t.hidden = !RD.outline; }
     if(want && want !== RD.page) rdGo(want); else rdGo(RD.page, true);
     return;
   }
   // другая книга: прежнюю закрываем
   rdDispose();
-  RD.key = key; RD.src = src; RD.zoom = 1; RD.seen = new Set(); RD.pause = 0; RD.pending = [];
+  RD.key = key; RD.src = src; RD.zoom = 1; RD.seen = new Set(); RD.pause = 0; RD.pending = []; RD.hls = [];
   if(src.kind === 'book'){
     const b = byId('books', src.id);
-    if(!b){ RD.key = ''; $('#reader').innerHTML = `<div class="rd-msg"><div class="rd-msg-box"><p>Книга не найдена.</p><button type="button" class="btn" data-rd="close">Назад</button></div></div>`; return; }
+    if(!b){ RD.key = ''; rdFail('Книга не найдена.'); return; }
     RD.title = b.title; RD.back = '#/b/' + b.id;
-    if(b.format !== 'pdf'){ $('#reader').innerHTML = `<div class="rd-msg"><div class="rd-msg-box"><p>Читалка для этого формата появится позже.</p><button type="button" class="btn" data-rd="close">Назад</button></div></div>`; RD.key = ''; return; }
+    const f = fileOf(b.id, 'pdf');
+    if(!f){ RD.key = ''; rdFail('У этой книги нет файла PDF.'); return; }
+    if(f.status === 'processing'){ RD.key = ''; rdFail('Книга ещё обрабатывается. Попробуйте через минуту.'); return; }
   } else {
     const f = byId('nfiles', src.id);
     RD.title = f ? f.name : 'Файл урока'; RD.back = r.q.get('note') ? '#/note/' + r.q.get('note') : '#/notes';
   }
-  rdShell(); rdHeader();
+  rdShell(); rdHeader(); rdMarkerState();
   rdMsg('Открываю…');
   try {
     const [lib, link] = await Promise.all([loadPdfjs(), rdGetLink(true)]);
@@ -1470,9 +1677,10 @@ async function rdShow(r){
     if(RD.key !== key){ doc.destroy(); return; }
     RD.doc = doc; RD.pages = doc.numPages;
     rdMsg('');
-    const rd = src.kind === 'book' ? readingOf(src.id) : null;
+    const rd = src.kind === 'book' ? readOf(src.id, 'pdf') : null;
     const start = Math.min(RD.pages, Math.max(1, want || (rd ? rd.page : 1)));
     $('#rd-slider').max = RD.pages;
+    if(src.kind === 'book') rdLoadHls();
     rdGo(start, true);
     doc.getOutline().then(o => { RD.outline = o && o.length ? o : null; const t = $('#rd-toc'); if(t) t.hidden = !RD.outline; }).catch(() => {});
   } catch(e){
@@ -1480,15 +1688,17 @@ async function rdShow(r){
     rdMsg(e && e.name === 'PasswordException' ? 'Файл защищён паролем, его нельзя открыть.' : e && e.name === 'InvalidPDFException' ? 'Файл повреждён или это не PDF.' : errText(e), true);
   }
 }
-function rdHeader(){ const t = $('#rd-title'); if(t) t.textContent = RD.title; }
+function rdHeader(){ const t = $('#rd-title'); if(t) t.textContent = READER.mode === 'epub' ? EP.title : RD.title; }
 function rdDispose(){
   clearTimeout(RD.saveT); clearTimeout(RD.pauseT);
   if(RD.doc) RD.doc.destroy().catch(() => {});
   else if(RD.task) RD.task.destroy().catch(() => {});
-  RD.doc = null; RD.task = null; RD.transport = null; RD.cache.clear(); RD.key = ''; RD.link = null; RD.outline = null; RD.pause = 0; RD.pending = [];
+  RD.doc = null; RD.task = null; RD.transport = null; RD.cache.clear(); RD.key = ''; RD.link = null; RD.outline = null; RD.pause = 0; RD.pending = []; RD.hls = []; RD.mk = null;
 }
 function rdClose(){
-  if(RD.doc) rdSave(true);
+  if(READER.mode === 'epub') epSave(true);
+  else if(RD.doc) rdSave(true);
+  hpHide();
   RD.open = false;
   if(document.fullscreenElement) document.exitFullscreen().catch(() => {});
   document.documentElement.classList.remove('reading');
@@ -1504,8 +1714,8 @@ function rdFit(page){
   return Math.min(W / vp.width, H / vp.height);
 }
 // Подпись прямо на холсте: по диагонали через страницу и мелко внизу
-function rdWatermark(ctx, w, h){
-  const text = RD.mark; if(!text) return;
+function rdWatermark(ctx, w, h, text){
+  text = text == null ? RD.mark : text; if(!text) return;
   const diag = Math.hypot(w, h);
   ctx.save();
   ctx.translate(w / 2, h / 2); ctx.rotate(-Math.atan2(h, w));
@@ -1526,7 +1736,7 @@ function rdWatermark(ctx, w, h){
   ctx.fillText(`${text} · ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`, w / 2, h - small * 0.6);
   ctx.restore();
 }
-// Нарисовать страницу n в новый элемент (холст и, если можно, текстовый слой)
+// Нарисовать страницу n в новый элемент (холст, слой выделений и, если можно, текстовый слой)
 async function rdRender(n){
   const key = n + '@' + RD.zoom + '@' + window.innerWidth + 'x' + window.innerHeight;
   const hit = RD.cache.get(n);
@@ -1538,6 +1748,7 @@ async function rdRender(n){
   if(vp.width * vp.height * out * out > 12e6) out = Math.sqrt(12e6 / (vp.width * vp.height));
   const el = document.createElement('div');
   el.className = 'rd-page';
+  el.dataset.n = n;
   el.style.width = Math.floor(vp.width) + 'px'; el.style.height = Math.floor(vp.height) + 'px';
   el.style.setProperty('--scale-factor', vp.scale);
   const canvas = document.createElement('canvas');
@@ -1548,10 +1759,13 @@ async function rdRender(n){
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
   await page.render({canvasContext: ctx, viewport: vp, transform: out !== 1 ? [out, 0, 0, out, 0, 0] : null}).promise;
   rdWatermark(ctx, canvas.width, canvas.height);
+  const hl = document.createElement('div'); hl.className = 'hl-layer'; el.appendChild(hl);
+  const tmp = document.createElement('div'); tmp.className = 'hl-layer hl-tmp'; el.appendChild(tmp);
   if(rdText()){
     const tl = document.createElement('div'); tl.className = 'textLayer'; el.appendChild(tl);
     try { await new RD.lib.TextLayer({textContentSource: page.streamTextContent(), container: tl, viewport: vp}).render(); } catch(e){}
   }
+  rdDrawHls(el, n);
   RD.cache.set(n, {key, el});
   // держим в памяти только соседние страницы
   for(const k of [...RD.cache.keys()]) if(Math.abs(k - n) > 2 && Math.abs(k - RD.page) > 2) RD.cache.delete(k);
@@ -1560,7 +1774,8 @@ async function rdRender(n){
 async function rdGo(n, force){
   if(!RD.doc) return;
   n = Math.min(RD.pages, Math.max(1, n | 0));
-  if(n === RD.page && !force && $('#rd-pagebox .rd-page')) return;
+  if(n === RD.page && !force && $('#rd-pagebox .rd-page')){ rdFlash(); return; }
+  if(n !== RD.page) hpHide();
   RD.page = n;
   const seq = ++RD.seq;
   $('#rd-num').textContent = `${n} из ${RD.pages}`;
@@ -1569,13 +1784,14 @@ async function rdGo(n, force){
   box.classList.add('busy');
   try {
     const el = await rdRender(n);
-    if(seq !== RD.seq || !RD.open) return;
+    if(seq !== RD.seq || !RD.open || READER.mode !== 'pdf') return;
     box.replaceChildren(el);
     box.classList.remove('busy');
     $('#rd-stage').classList.toggle('zoomed', RD.zoom > 1);
     if(RD.zoom === 1) $('#rd-stage').scrollTo(0, 0);
     RD.seen.add(n);
     rdSaveSoon();
+    rdFlash();
     // следующую страницу готовим заранее, чтобы листалось без ожидания
     if(n < RD.pages) setTimeout(() => { if(seq === RD.seq) rdRender(n + 1).catch(() => {}); }, 250);
   } catch(e){
@@ -1584,27 +1800,30 @@ async function rdGo(n, force){
 }
 function rdSaveSoon(){ clearTimeout(RD.saveT); RD.saveT = setTimeout(() => rdSave(false), 1500); }
 // Прогресс и открытые страницы (для журнала): только у книг
+function saveReading(id, fmt, res){
+  const old = readOf(id, fmt);
+  upsert('reading', {...(old || {}), id: res.id || (old && old.id) || 'tmp-' + id + fmt, book: id, user: me().id, format: fmt, page: res.page, pages: res.pages, pct: res.pct || 0, pos: res.pos || '', updated: res.updated || new Date().toISOString().replace('T', ' ')});
+}
 function rdSave(leaving){
   clearTimeout(RD.saveT);
   if(!RD.src || RD.src.kind !== 'book' || !RD.doc) return;
-  const body = {page: RD.page, pages: RD.pages, seen: [...RD.seen]};
+  const body = {format: 'pdf', page: RD.page, pages: RD.pages, seen: [...RD.seen]};
   RD.seen = new Set();
   const id = RD.src.id;
-  const r = readingOf(id);
+  const r = readOf(id, 'pdf');
   if(r && r.page === body.page && !body.seen.length) return;
   if(leaving){
     fetch(`/api/knigi/books/${id}/progress`, {method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json', Authorization: pb.authStore.token}, body: JSON.stringify(body)}).catch(() => {});
-    if(r) upsert('reading', {...r, page: body.page, updated: new Date().toISOString().replace('T', ' ')});
+    if(r) saveReading(id, 'pdf', {...r, page: body.page, updated: ''});
     return;
   }
-  pb.send(`/api/knigi/books/${id}/progress`, {method: 'POST', body}).then(res => {
-    const old = readingOf(id);
-    upsert('reading', {...(old || {}), id: res.id, book: id, user: me().id, page: res.page, pages: res.pages, updated: res.updated});
-  }).catch(() => { body.seen.forEach(p => RD.seen.add(p)); });
+  pb.send(`/api/knigi/books/${id}/progress`, {method: 'POST', body}).then(res => saveReading(id, 'pdf', res))
+    .catch(() => { body.seen.forEach(p => RD.seen.add(p)); });
 }
 function rdZoom(k){
   const z = Math.min(4, Math.max(1, Math.round(RD.zoom * k * 100) / 100));
   if(z === RD.zoom) return;
+  hpHide();
   RD.zoom = z; RD.cache.clear(); rdGo(RD.page, true);
 }
 function rdGoto(){
@@ -1612,6 +1831,7 @@ function rdGoto(){
     async onSave(v){ const p = +v.p; if(!(p >= 1 && p <= RD.pages)) throw {message: `Введите число от 1 до ${RD.pages}.`}; rdGo(p); }});
 }
 async function rdToc(){
+  if(READER.mode === 'epub') return epToc();
   if(!RD.outline) return;
   const flat = [];
   const walk = (items, lvl) => { for(const it of items){ flat.push({it, lvl}); if(it.items && it.items.length && lvl < 3) walk(it.items, lvl + 1); } };
@@ -1628,56 +1848,429 @@ async function rdToc(){
       } catch(e){ toast('В оглавлении нет ссылки на страницу.'); }
     }});
 }
+// «Заметка»: новая заметка к книге с местом (у PDF страница, у EPUB глава и процент) и выделенным текстом цитатой
 function rdNote(){
-  // администратор может выделить цитату на странице: она попадёт в заметку
-  let sel = window.getSelection && String(window.getSelection() || '').trim();
-  if(!sel && RD.sel && Date.now() - RD.sel.at < 15e3) sel = RD.sel.text;
-  UI.quote = isAdmin() && sel ? sel.slice(0, 3000) : '';
+  const sel = HP.pending ? HP.pending.quote : '';
+  let text = sel;
+  if(!text && READER.mode === 'pdf'){
+    const s = String(window.getSelection() || '').trim();
+    text = s || (RD.sel && Date.now() - RD.sel.at < 15e3 ? RD.sel.text : '');
+  }
+  UI.quote = text ? text.slice(0, 3000) : '';
   UI.normalOnce = true;
+  hpHide();
+  if(READER.mode === 'epub'){
+    const c = EP.cur || {};
+    UI.noteCtx = {book: EP.bookId, format: 'epub', place: epPlace(c.chapter, c.pct), anchor: c.cfi ? {v: 1, cfi: c.cfi, pct: c.pct, chapter: c.chapter || ''} : null};
+    epSave(false);
+    go(`#/note/new?book=${EP.bookId}`);
+    return;
+  }
+  UI.noteCtx = {book: RD.src.id, format: 'pdf', place: 'с. ' + RD.page};
   rdSave(false);
   go(`#/note/new?book=${RD.src.id}&page=${RD.page}`);
 }
 function rdMenu(btn){
   const dark = !!loadLS('darkPages', false);
+  if(READER.mode === 'epub'){
+    openMenu(btn, [
+      {label: 'Оглавление', run: epToc},
+      {label: 'Карточка книги', run: () => go('#/b/' + EP.bookId)},
+    ]);
+    return;
+  }
   openMenu(btn, [
     {label: dark ? 'Обычные страницы' : 'Тёмные страницы', run: () => { saveLS('darkPages', !dark); $('#reader').classList.toggle('dark-pages', !dark); }},
     {label: 'Перейти к странице', run: rdGoto},
     ...(RD.src.kind === 'book' ? [{label: 'Карточка книги', run: () => go('#/b/' + RD.src.id)}] : []),
   ]);
 }
-// Нажатия в читалке
+
+/* ---------- Выделения ---------- */
+// Выделения хранятся в notes (kind = "highlight"): quote = выделенный текст, page и format = где,
+// place = «с. 45» или «Глава 3 · 41%», color = цвет, body = мысль, anchor = точное место:
+//   PDF:  {v: 1, rects: [[x, y, w, h], …] в долях страницы, s, e: номера первой и последней буквы в тексте страницы}
+//   EPUB: {v: 1, cfi: место в книге (EPUB CFI), pct, chapter}
+// Каждый видит и меняет только свои выделения. Общие выделения администратора у читателей только в списках.
+const HP = {mode: '', h: null, pending: null, el: null};
+const hlFields = 'id,owner,book,book_title,kind,page,format,place,color,anchor,quote,body_text,shared,created,updated';
+function hlStrip(rec){ return {...rec, body_text: String(rec.body_text || '').slice(0, 400), body: undefined, search: undefined, anchor: undefined}; }
+// Панель выделения: цвета, «Заметка», у администратора «Копировать»; у готового выделения ещё мысль, удалить и «⋯»
+function hpShow(o){
+  hpHide();
+  Object.assign(HP, {mode: o.mode, h: o.h || null, pending: o.pending || null});
+  const el = document.createElement('div');
+  el.className = 'hl-pop'; el.id = 'hl-pop'; el.setAttribute('role', 'toolbar'); el.setAttribute('aria-label', 'Выделение');
+  const cur = o.h ? o.h.color : '';
+  const thought = o.h && o.h.body_text ? `<p class="hp-t">${esc(o.h.body_text.slice(0, 220))}${o.h.body_text.length > 220 ? '…' : ''}</p>` : '';
+  el.innerHTML = `<div class="hp-row"><span class="hp-colors">${HL_KEYS.map(c => `<button type="button" class="hp-c${cur === c ? ' on' : ''}" data-hp="color" data-c="${c}" style="--hl:${HL[c][1]}" aria-label="${HL[c][0]}" title="${HL[c][0]}"></button>`).join('')}</span>
+    ${o.mode === 'new'
+      ? `<button type="button" class="hp-b" data-hp="note" title="Выделить и написать мысль">${ICON.pen}<span>Заметка</span></button>${isAdmin() ? `<button type="button" class="hp-i" data-hp="copy" aria-label="Копировать" title="Копировать">${ICON.copy}</button>` : ''}`
+      : `<button type="button" class="hp-b" data-hp="thought" title="${o.h.body_text ? 'Изменить мысль' : 'Написать мысль'}">${ICON.pen}<span>Мысль</span></button>
+        <button type="button" class="hp-i" data-hp="del" aria-label="Удалить выделение" title="Удалить выделение">${ICON.trash}</button>
+        <button type="button" class="hp-i" data-hp="more" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button>`}</div>${thought}`;
+  $('#reader').appendChild(el);
+  HP.el = el;
+  const r = o.rect || {left: innerWidth / 2, right: innerWidth / 2, top: innerHeight / 2, bottom: innerHeight / 2};
+  const w = el.offsetWidth, h = el.offsetHeight;
+  let top = r.top - h - 12;
+  if(top < 64) top = r.bottom + 12;
+  if(top + h > innerHeight - 8) top = Math.max(8, innerHeight - h - 70);
+  el.style.top = top + 'px';
+  el.style.left = Math.max(8, Math.min((r.left + r.right) / 2 - w / 2, innerWidth - w - 8)) + 'px';
+}
+function hpHide(){
+  if(HP.el) HP.el.remove();
+  HP.el = null; HP.mode = ''; HP.h = null; HP.pending = null;
+  $$('#reader .hl-tmp').forEach(x => { x.innerHTML = ''; });
+  const t = $('#ep-tmp'); if(t) t.innerHTML = '';
+}
+// Сохранить новое выделение (PDF или EPUB) с цветом
+async function hlCreate(color){
+  const p = HP.pending; if(!p) return null;
+  const isEpub = READER.mode === 'epub';
+  const data = {id: newId(), owner: me().id, kind: 'highlight', book: isEpub ? EP.bookId : RD.src.id, format: isEpub ? 'epub' : 'pdf',
+    quote: p.quote.slice(0, 20000), color, page: isEpub ? 0 : p.n, place: isEpub ? epPlace(p.chapter, p.pct) : 'с. ' + p.n, anchor: p.anchor, body: ''};
+  hpHide();
+  try { window.getSelection().removeAllRanges(); } catch(e){}
+  if(isEpub) epDeselect();
+  try {
+    const rec = await pb.collection('notes').create(data, {fields: hlFields});
+    hlLocal(rec);
+    return rec;
+  } catch(e){ toast(errText(e)); return null; }
+}
+// Свои выделения открытой книги и общий список заметок
+function hlLocal(rec, deleted){
+  const list = rec.format === 'epub' ? EP.hls : RD.hls;
+  const i = list.findIndex(x => x.id === rec.id);
+  if(deleted){ if(i >= 0) list.splice(i, 1); removeLocal('notes', rec.id); }
+  else { if(i >= 0) list[i] = {...list[i], ...rec}; else list.push(rec); upsert('notes', hlStrip(rec)); }
+  if(rec.format === 'epub') epDrawHl(rec, deleted); else rdDrawAll();
+}
+// Живое обновление (другая вкладка или устройство): своё выделение в открытой книге
+function hlLive(r, deleted){
+  if(r.kind !== 'highlight' || r.owner !== me().id) return;
+  if(r.format === 'pdf' && RD.src && RD.src.kind === 'book' && RD.src.id === r.book){
+    const i = RD.hls.findIndex(x => x.id === r.id);
+    if(deleted){ if(i >= 0) RD.hls.splice(i, 1); } else if(r.anchor){ if(i >= 0) RD.hls[i] = {...r}; else RD.hls.push({...r}); }
+    rdDrawAll();
+  }
+  if(r.format === 'epub' && EP.bookId === r.book && EP.view){
+    const i = EP.hls.findIndex(x => x.id === r.id);
+    const old = i >= 0 ? EP.hls[i] : null;
+    if(deleted){ if(i >= 0) EP.hls.splice(i, 1); epDrawHl(old || r, true); }
+    else if(r.anchor){ if(i >= 0) EP.hls[i] = {...r}; else EP.hls.push({...r}); epDrawHl(r); }
+  }
+}
+async function hlUpdate(h, patch){
+  const rec = await pb.collection('notes').update(h.id, patch, {fields: hlFields});
+  hlLocal(rec);
+  return rec;
+}
+async function hlDelete(h){
+  await pb.collection('notes').delete(h.id);
+  hlLocal(h, true);
+  toast('Выделение удалено');
+}
+const textToHtml = t => String(t || '').split(/\n+/).map(x => x.trim()).filter(Boolean).map(x => `<p>${esc(x)}</p>`).join('');
+function hlThought(h){
+  openForm({title: h.body_text ? 'Мысль к выделению' : 'Новая мысль', text: '«' + h.quote.slice(0, 400) + (h.quote.length > 400 ? '…' : '') + '»',
+    fields: [{key: 't', type: 'textarea', label: 'Ваша мысль', rows: 5, max: 20000, placeholder: 'Что вы об этом думаете'}], values: {t: h.body_text || ''},
+    async onSave(v){ await hlUpdate(h, {body: textToHtml(v.t)}); toast('Сохранено'); }});
+}
+function hlSettings(h){
+  openForm({title: 'Настройки', fields: [{key: 'shared', type: 'check', label: 'Видна всем читателям', hint: 'Читатели увидят выделение и вашу мысль в карточке книги, в блоке «Заметки автора библиотеки». На страницах книги у них оно не рисуется.'}],
+    values: {shared: !!h.shared}, async onSave(v){ await hlUpdate(h, {shared: v.shared}); toast(v.shared ? 'Теперь видно всем читателям' : 'Теперь видно только вам'); }});
+}
+// «Сделать заметкой»: новая заметка с цитатой в начале и местом в книге, выделение остаётся
+async function hlToNote(h){
+  try {
+    const rec = await pb.collection('notes').create({id: newId(), owner: me().id, kind: 'note', book: h.book, format: h.format, page: h.page || 0, place: h.place || '',
+      anchor: h.anchor || null, title: '', body: `<blockquote>${esc(h.quote)}</blockquote>${h.body_text ? textToHtml(h.body_text) : '<p></p>'}`});
+    upsert('notes', hlStrip(rec));
+    UI.normalOnce = true;
+    toast('Заметка создана');
+    go('#/note/' + rec.id);
+  } catch(e){ toast(errText(e)); }
+}
+async function hpAction(btn){
+  const a = btn.dataset.hp, h = HP.h;
+  if(a === 'color'){
+    if(HP.mode === 'new'){ const rec = await hlCreate(btn.dataset.c); if(rec) toast('Выделено'); }
+    else if(h){ const c = btn.dataset.c; hpHide(); try { await hlUpdate(h, {color: c}); } catch(e){ toast(errText(e)); } }
+  } else if(a === 'note'){
+    const rec = await hlCreate('yellow');
+    if(rec) hlThought(rec);
+  } else if(a === 'copy'){
+    const t = HP.pending ? HP.pending.quote : '';
+    hpHide();
+    try { window.getSelection().removeAllRanges(); } catch(e){}
+    if(READER.mode === 'epub') epDeselect();
+    try { await navigator.clipboard.writeText(t); toast('Скопировано'); } catch(e){ toast('Не удалось скопировать.'); }
+  } else if(a === 'thought' && h){ hpHide(); hlThought(h); }
+  else if(a === 'del' && h){ if(!arm(btn, 'Удалить?')) return; hpHide(); try { await hlDelete(h); } catch(e){ toast(errText(e)); } }
+  else if(a === 'more' && h){
+    const items = [{label: 'Сделать заметкой', run: () => { hpHide(); hlToNote(h); }}];
+    if(isAdmin()) items.push({label: 'Настройки', run: () => { hpHide(); hlSettings(h); }});
+    items.push({label: 'Удалить выделение', danger: true, run: () => { hpHide(); hlDelete(h).catch(e => toast(errText(e))); }});
+    openMenu(btn, items);
+  }
+}
+const clientBox = r => ({left: r.left, right: r.right, top: r.top, bottom: r.bottom});
+
+/* ---------- Выделения в PDF ---------- */
+async function rdLoadHls(){
+  const key = RD.key, id = RD.src.id;
+  try {
+    const list = await pb.collection('notes').getFullList({filter: pb.filter('owner = {:u} && book = {:b} && kind = "highlight" && format = "pdf"', {u: me().id, b: id}), fields: hlFields});
+    if(RD.key !== key) return;
+    RD.hls = list; rdDrawAll(); rdFlash();
+  } catch(e){}
+}
+function rdDrawAll(){ for(const [n, c] of RD.cache) rdDrawHls(c.el, n); }
+function rdDrawHls(el, n){
+  const layer = el.querySelector('.hl-layer:not(.hl-tmp)'); if(!layer) return;
+  layer.innerHTML = RD.hls.filter(h => h.page === n && h.anchor && Array.isArray(h.anchor.rects)).map(h =>
+    h.anchor.rects.map(([x, y, w, hh]) => `<i class="hl-mark" data-h="${h.id}" style="left:${x * 100}%;top:${y * 100}%;width:${w * 100}%;height:${hh * 100}%;--hl:${(HL[h.color] || HL.yellow)[1]}"></i>`).join('')).join('');
+}
+// Переход к выделению из списка: оно коротко мигает
+function rdFlash(){
+  const id = RD.flash; if(!id) return;
+  const marks = $$(`#rd-pagebox .hl-mark[data-h="${id}"]`);
+  if(!marks.length) return;
+  RD.flash = '';
+  marks.forEach(m => { m.classList.remove('flash'); void m.offsetWidth; m.classList.add('flash'); });
+  setTimeout(() => marks.forEach(m => m.classList.remove('flash')), 2000);
+}
+// Прямоугольники выделения в долях страницы: куски одной строки склеиваются, мусорные отбрасываются
+function rangeRects(range, box){
+  const B = box.getBoundingClientRect();
+  const raw = [];
+  for(const r of range.getClientRects()){
+    if(r.width < 1 || r.height < 1) continue;
+    const x = (r.left - B.left) / B.width, y = (r.top - B.top) / B.height, w = r.width / B.width, h = r.height / B.height;
+    if(h > 0.12 || w > 1.01 || x < -0.01 || y < -0.01 || x + w > 1.01 || y + h > 1.01) continue;
+    raw.push([x, y, w, h]);
+  }
+  raw.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+  const lines = [];
+  for(const r of raw){
+    const L = lines.find(l => { const t = Math.max(l[1], r[1]), b = Math.min(l[1] + l[3], r[1] + r[3]); return b - t > 0.5 * Math.min(l[3], r[3]) && r[0] <= l[0] + l[2] + 0.02 && r[0] + r[2] >= l[0] - 0.02; });
+    if(L){ const x0 = Math.min(L[0], r[0]), y0 = Math.min(L[1], r[1]), x1 = Math.max(L[0] + L[2], r[0] + r[2]), y1 = Math.max(L[1] + L[3], r[1] + r[3]); L[0] = x0; L[1] = y0; L[2] = x1 - x0; L[3] = y1 - y0; }
+    else lines.push([...r]);
+  }
+  return lines.slice(0, 200).map(r => r.map(v => Math.round(v * 1e4) / 1e4));
+}
+// Текст выделения в текстовом слое PDF: между строками пробел, перенос слова со знаком «-» склеивается
+function tlRangeText(range, tl){
+  const w = document.createTreeWalker(tl, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  let out = '', node, pos = 0, s = -1, e = -1;
+  while((node = w.nextNode())){
+    if(node.nodeType === 1){ if(node.tagName === 'BR' && range.intersectsNode(node) && out) out += ' '; continue; }
+    const t = node.nodeValue || '';
+    if(range.intersectsNode(node)){
+      const a = node === range.startContainer ? range.startOffset : 0, b = node === range.endContainer ? range.endOffset : t.length;
+      if(s < 0) s = pos + a;
+      e = pos + b;
+      out += t.slice(a, b);
+    }
+    pos += t.length;
+  }
+  return {text: out.replace(/(\S)[-­] +(?=\p{Ll})/gu, '$1').replace(/\s+/g, ' ').trim(), s: Math.max(0, s), e: Math.max(0, e)};
+}
+// Выделение в PDF → данные для сохранения
+function pdfPending(range, pageEl){
+  const tl = pageEl.querySelector('.textLayer'); if(!tl) return null;
+  const {text, s, e} = tlRangeText(range, tl);
+  const rects = rangeRects(range, pageEl);
+  if(!text || !rects.length) return null;
+  return {n: +pageEl.dataset.n, quote: text, anchor: {v: 1, rects, s, e}, rect: clientBox(range.getBoundingClientRect())};
+}
+// Выделение мышью (и пальцем у администратора): после отпускания показываем панель
+function rdSelCheck(){
+  if(READER.mode !== 'pdf' || RD.marker || !RD.open || HP.mode === 'edit') return;
+  const sel = window.getSelection();
+  if(!sel || sel.isCollapsed || !sel.rangeCount){ if(HP.mode === 'new' && !RD.mk) hpHide(); return; }
+  const range = sel.getRangeAt(0);
+  const pg = $('#rd-pagebox .rd-page');
+  if(!pg || !pg.contains(range.commonAncestorContainer)) return;
+  const p = pdfPending(range, pg);
+  if(p) hpShow({mode: 'new', pending: p, rect: p.rect});
+}
+function rdHitHl(x, y){
+  const pg = $('#rd-pagebox .rd-page'); if(!pg) return null;
+  const B = pg.getBoundingClientRect(), fx = (x - B.left) / B.width, fy = (y - B.top) / B.height;
+  if(fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
+  return RD.hls.slice().reverse().find(h => h.page === RD.page && h.anchor && (h.anchor.rects || []).some(([a, b, w, hh]) => fx >= a - 0.003 && fx <= a + w + 0.003 && fy >= b - 0.003 && fy <= b + hh + 0.003)) || null;
+}
+function hlBox(id){
+  const marks = $$(`#rd-pagebox .hl-mark[data-h="${id}"]`).map(m => m.getBoundingClientRect());
+  if(!marks.length) return null;
+  return {left: Math.min(...marks.map(r => r.left)), right: Math.max(...marks.map(r => r.right)), top: Math.min(...marks.map(r => r.top)), bottom: Math.max(...marks.map(r => r.bottom))};
+}
+// «Маркер»: ведёшь пальцем по строкам, текст выделяется без системного меню. Своё определение буквы под пальцем
+// по текстовому слою: ближайший кусок строки и ближайшая буква в нём (по ширине букв).
+function rdMarkerState(){
+  const b = $('#rd-marker'); if(!b) return;
+  const f = RD.src && RD.src.kind === 'book' ? fileOf(RD.src.id, 'pdf') : null;
+  const noText = !!f && !f.has_text;
+  b.classList.toggle('off', noText);
+  b.setAttribute('aria-pressed', String(RD.marker));
+  $('#reader').classList.toggle('marker', RD.marker);
+}
+function toggleMarker(){
+  if(READER.mode === 'epub'){ EP.marker = !EP.marker; epMarkerState(); toast(EP.marker ? 'Маркер: проведите пальцем по строкам. Листание выключено.' : 'Маркер выключен'); return; }
+  const f = RD.src && RD.src.kind === 'book' ? fileOf(RD.src.id, 'pdf') : null;
+  if(f && !f.has_text){ toast('В этой книге нет текстового слоя, выделять нельзя.'); return; }
+  RD.marker = !RD.marker; hpHide();
+  try { window.getSelection().removeAllRanges(); } catch(e){}
+  rdMarkerState();
+  toast(RD.marker ? 'Маркер: проведите пальцем или мышью по строкам. Листание выключено.' : 'Маркер выключен');
+}
+function tlSpans(tl){
+  return [...tl.querySelectorAll('span')].filter(s => s.firstChild && s.firstChild.nodeType === 3 && s.firstChild.nodeValue.length && !s.classList.contains('markedContent'))
+    .map(s => ({s, r: s.getBoundingClientRect()})).filter(x => x.r.width > 0 && x.r.height > 0);
+}
+function tlCaret(spans, x, y){
+  let best = null, bd = Infinity;
+  for(const it of spans){
+    const r = it.r;
+    const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+    const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+    const d = dy * 3 + dx;
+    if(d < bd){ bd = d; best = it; }
+  }
+  if(!best || bd > 120) return null;
+  const node = best.s.firstChild, len = node.nodeValue.length, rg = document.createRange();
+  if(x <= best.r.left) return {node, offset: 0};
+  if(x >= best.r.right) return {node, offset: len};
+  for(let i = 0; i < len; i++){
+    rg.setStart(node, i); rg.setEnd(node, i + 1);
+    const cr = rg.getBoundingClientRect();
+    if(x < cr.left + cr.width / 2) return {node, offset: i};
+  }
+  return {node, offset: len};
+}
+function caretRange(a, b){
+  const r = document.createRange();
+  r.setStart(a.node, a.offset); r.collapse(true);
+  if(r.comparePoint(b.node, b.offset) < 0){ r.setStart(b.node, b.offset); r.setEnd(a.node, a.offset); }
+  else r.setEnd(b.node, b.offset);
+  return r;
+}
+function mkDraw(){
+  const m = RD.mk; if(!m) return;
+  const tmp = m.page.querySelector('.hl-tmp'); if(!tmp) return;
+  const range = caretRange(m.start, m.end);
+  const rects = range.collapsed ? [] : rangeRects(range, m.page);
+  tmp.innerHTML = rects.map(([x, y, w, h]) => `<i class="hl-mark tmp" style="left:${x * 100}%;top:${y * 100}%;width:${w * 100}%;height:${h * 100}%;--hl:${HL.yellow[1]}"></i>`).join('');
+  return range;
+}
+function mkDown(e){
+  if(READER.mode !== 'pdf' || !RD.marker || !e.isPrimary) return;
+  if(e.target.closest('.hl-pop, [data-rd]')) return;
+  const page = e.target.closest('.rd-page'); if(!page) return;
+  const tl = page.querySelector('.textLayer'); if(!tl) return;
+  e.preventDefault();
+  hpHide();
+  const spans = tlSpans(tl);
+  const start = tlCaret(spans, e.clientX, e.clientY);
+  RD.mk = {page, spans, start, end: start, x: e.clientX, y: e.clientY, id: e.pointerId, moved: false};
+  try { $('#rd-stage').setPointerCapture(e.pointerId); } catch(err){}
+}
+function mkMove(e){
+  const m = RD.mk; if(!m || e.pointerId !== m.id) return;
+  e.preventDefault();
+  if(Math.hypot(e.clientX - m.x, e.clientY - m.y) > 6) m.moved = true;
+  if(!m.start){ m.start = tlCaret(m.spans, e.clientX, e.clientY); if(!m.start) return; }
+  const c = tlCaret(m.spans, e.clientX, e.clientY);
+  if(c){ m.end = c; mkDraw(); }
+}
+function mkUp(e){
+  const m = RD.mk; if(!m || e.pointerId !== m.id) return;
+  RD.mk = null;
+  if(!m.moved){
+    // нажатие без движения: может быть по готовому выделению
+    m.page.querySelector('.hl-tmp').innerHTML = '';
+    const h = rdHitHl(e.clientX, e.clientY);
+    if(h) hpShow({mode: 'edit', h, rect: hlBox(h.id)});
+    return;
+  }
+  if(!m.start || !m.end){ m.page.querySelector('.hl-tmp').innerHTML = ''; return; }
+  const range = caretRange(m.start, m.end);
+  const p = range.collapsed ? null : pdfPending(range, m.page);
+  if(!p){ m.page.querySelector('.hl-tmp').innerHTML = ''; return; }
+  RD.mk = null;
+  hpShow({mode: 'new', pending: p, rect: p.rect});
+  // временная подсветка остаётся, пока не выбран цвет
+  mkKeep(m.page, p.anchor.rects);
+}
+function mkKeep(page, rects){
+  const tmp = page.querySelector('.hl-tmp'); if(!tmp) return;
+  tmp.innerHTML = rects.map(([x, y, w, h]) => `<i class="hl-mark tmp" style="left:${x * 100}%;top:${y * 100}%;width:${w * 100}%;height:${h * 100}%;--hl:${HL.yellow[1]}"></i>`).join('');
+}
+
+/* ---------- Нажатия в читалке ---------- */
+// нажатие на панель не сбрасывает выделение; нажатие мимо открытой панели только закрывает её (без листания)
+$('#reader').addEventListener('pointerdown', e => { const inPop = !!e.target.closest('.hl-pop'); if(inPop) e.preventDefault(); HP.eat = !!HP.el && !inPop; }, true);
+$('#reader').addEventListener('pointerdown', mkDown);
+$('#reader').addEventListener('pointermove', mkMove, {passive: false});
+$('#reader').addEventListener('pointerup', mkUp);
+$('#reader').addEventListener('pointercancel', e => { if(RD.mk && e.pointerId === RD.mk.id){ const t = RD.mk.page.querySelector('.hl-tmp'); if(t) t.innerHTML = ''; RD.mk = null; } });
+$('#reader').addEventListener('pointerup', e => { if(e.pointerType === 'mouse' && !RD.marker && !e.target.closest('.hl-pop, .menu, [data-rd]')) setTimeout(rdSelCheck, 30); });
+let selT = 0;
+document.addEventListener('selectionchange', () => {
+  if(!RD.open || READER.mode !== 'pdf') return;
+  const t = String(window.getSelection() || '').trim();
+  if(t) RD.sel = {text: t, at: Date.now()};
+  // палец (у администратора): панель после паузы, когда человек закончил тянуть границы
+  clearTimeout(selT);
+  if(touchUI()) selT = setTimeout(rdSelCheck, 600);
+  else if(!t && HP.mode === 'new' && !RD.marker) hpHide();
+});
 $('#reader').addEventListener('click', e => {
+  const hp = e.target.closest('[data-hp]');
+  if(hp){ hpAction(hp).catch(err => toast(errText(err))); return; }
   if(menu){
     const it = e.target.closest('.menu [data-i]');
     const m = menu; closeMenu();
     if(it){ m.items[+it.dataset.i].run(); return; }
-    if(e.target.closest('[data-rd="menu"]') === m.btn) return;
+    if(e.target.closest('[data-rd="menu"], [data-hp="more"]') === m.btn) return;
   }
   const b = e.target.closest('[data-rd]');
   if(!b) return;
   const a = b.dataset.rd;
-  if(a === 'close'){ rdClose(); goBack(RD.back || '#/'); }
-  else if(a === 'prev') rdGo(RD.page - 1);
-  else if(a === 'next') rdGo(RD.page + 1);
-  else if(a === 'zin') rdZoom(1.25);
-  else if(a === 'zout') rdZoom(0.8);
-  else if(a === 'goto') rdGoto();
+  if(a !== 'marker') hpHide();
+  const ep = READER.mode === 'epub';
+  if(a === 'close'){ rdClose(); goBack((ep ? EP.back : RD.back) || '#/'); }
+  else if(a === 'prev') ep ? epGo(-1) : rdGo(RD.page - 1);
+  else if(a === 'next') ep ? epGo(1) : rdGo(RD.page + 1);
+  else if(a === 'zin') ep ? epFont(1) : rdZoom(1.25);
+  else if(a === 'zout') ep ? epFont(-1) : rdZoom(0.8);
+  else if(a === 'goto') ep ? epToc() : rdGoto();
   else if(a === 'toc') rdToc();
   else if(a === 'note') rdNote();
   else if(a === 'menu') rdMenu(b);
+  else if(a === 'marker') toggleMarker();
   else if(a === 'resume') rdResume();
   else if(a === 'full'){ if(document.fullscreenElement) document.exitFullscreen().catch(() => {}); else $('#reader').requestFullscreen().catch(() => {}); }
 });
-$('#reader').addEventListener('change', e => { if(e.target.id === 'rd-slider') rdGo(+e.target.value); });
-$('#reader').addEventListener('input', e => { if(e.target.id === 'rd-slider') $('#rd-num').textContent = `${e.target.value} из ${RD.pages}`; });
-// Листание пальцем и нажатием по краям, щипок для масштаба
+$('#reader').addEventListener('change', e => {
+  if(e.target.id === 'rd-slider'){ if(READER.mode === 'epub') epToFraction(+e.target.value / 1000); else rdGo(+e.target.value); }
+});
+$('#reader').addEventListener('input', e => { if(e.target.id === 'rd-slider' && READER.mode === 'pdf') $('#rd-num').textContent = `${e.target.value} из ${RD.pages}`; });
+// Листание пальцем и нажатием по краям, щипок для масштаба (в режиме «Маркер» выключено)
 const TP = {x: 0, y: 0, t: 0, pinch: 0, z: 1, moved: false};
 $('#reader').addEventListener('touchstart', e => {
-  if(!e.target.closest('#rd-stage')) return;
+  if(READER.mode !== 'pdf' || !e.target.closest('#rd-stage')) return;
+  if(RD.marker){ if(e.touches.length === 1 && e.target.closest('.rd-page')) e.preventDefault(); return; }
   if(e.touches.length === 2){ TP.pinch = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); TP.z = 1; return; }
   const t = e.touches[0]; TP.x = t.clientX; TP.y = t.clientY; TP.t = Date.now(); TP.moved = false; TP.pinch = 0;
-}, {passive: true});
+}, {passive: false});
 $('#reader').addEventListener('touchmove', e => {
+  if(READER.mode !== 'pdf') return;
+  if(RD.marker){ if(e.target.closest('#rd-stage')) e.preventDefault(); return; }
   if(TP.pinch && e.touches.length === 2){
     const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
     TP.z = d / TP.pinch;
@@ -1687,6 +2280,7 @@ $('#reader').addEventListener('touchmove', e => {
   TP.moved = true;
 }, {passive: false});
 $('#reader').addEventListener('touchend', e => {
+  if(READER.mode !== 'pdf' || RD.marker) return;
   if(TP.pinch){
     if(e.touches.length) return;
     const pg = $('#rd-pagebox .rd-page'); if(pg) pg.style.transform = '';
@@ -1700,15 +2294,19 @@ $('#reader').addEventListener('touchend', e => {
 });
 $('#reader').addEventListener('click', e => {
   const st = e.target.closest('#rd-stage');
-  if(!st || e.target.closest('[data-rd]') || (TP.swiped && Date.now() - TP.swiped < 500)) return;
+  if(READER.mode !== 'pdf' || !st || e.target.closest('[data-rd], .hl-pop') || (TP.swiped && Date.now() - TP.swiped < 500)) return;
+  if(RD.marker) return; // в режиме «Маркер» нажатия обрабатывает сам маркер
   if(String(window.getSelection() || '').trim()) return; // выделяют текст
+  if(HP.el || HP.eat){ HP.eat = false; hpHide(); return; } // нажатие мимо панели только закрывает её
+  const h = rdHitHl(e.clientX, e.clientY);
+  if(h){ hpShow({mode: 'edit', h, rect: hlBox(h.id)}); return; }
   const r = st.getBoundingClientRect(), x = (e.clientX - r.left) / r.width;
   if(x < 0.28) rdGo(RD.page - 1);
   else if(x > 0.72) rdGo(RD.page + 1);
   else { RD.bars = !RD.bars; $('#reader').classList.toggle('bars-off', !RD.bars); }
 });
 $('#reader').addEventListener('wheel', e => {
-  if(!(e.ctrlKey || e.metaKey)) return;
+  if(READER.mode !== 'pdf' || !(e.ctrlKey || e.metaKey)) return;
   e.preventDefault(); rdZoom(e.deltaY < 0 ? 1.1 : 0.9);
 }, {passive: false});
 document.addEventListener('keydown', e => {
@@ -1716,28 +2314,438 @@ document.addEventListener('keydown', e => {
   const k = e.key;
   if((e.ctrlKey || e.metaKey) && /^[psPS]$/.test(k)){ e.preventDefault(); return; } // печать и сохранение страницы выключены
   if(e.target.closest && e.target.closest('input, textarea, select')) return;
+  if(k === 'Escape' && HP.el){ hpHide(); return; }
+  if(READER.mode === 'epub'){
+    if(k === 'ArrowRight' || k === 'PageDown' || k === ' '){ e.preventDefault(); epGo(1); }
+    else if(k === 'ArrowLeft' || k === 'PageUp'){ e.preventDefault(); epGo(-1); }
+    return;
+  }
   if(k === 'ArrowRight' || k === 'PageDown' || (k === ' ' && RD.zoom === 1)){ e.preventDefault(); rdGo(RD.page + 1); }
   else if(k === 'ArrowLeft' || k === 'PageUp'){ e.preventDefault(); rdGo(RD.page - 1); }
   else if(k === 'Home'){ rdGo(1); } else if(k === 'End'){ rdGo(RD.pages); }
   else if(k === '+' || k === '='){ rdZoom(1.25); } else if(k === '-'){ rdZoom(0.8); }
 });
 // У читателей: без копирования, контекстного меню и перетаскивания. Администратору можно.
-for(const ev of ['copy', 'cut', 'contextmenu', 'dragstart']){
-  $('#reader').addEventListener(ev, e => {
-    if(isAdmin()) return;
-    e.preventDefault();
-    if(ev === 'copy' || ev === 'cut'){ try { e.clipboardData && e.clipboardData.setData('text/plain', ''); } catch(_){} toast('Копировать текст книги нельзя.'); }
+// Копирование перехватывается на всей странице, пока открыта читалка: в буфер обмена попадает пустая строка.
+function noCopy(e){
+  if(isAdmin()) return;
+  e.preventDefault();
+  if(e.type === 'copy' || e.type === 'cut'){ try { e.clipboardData && e.clipboardData.setData('text/plain', ''); } catch(_){} toast('Копировать текст книги нельзя.'); }
+}
+for(const ev of ['contextmenu', 'dragstart']) $('#reader').addEventListener(ev, noCopy);
+for(const ev of ['copy', 'cut']) document.addEventListener(ev, e => { if(RD.open) noCopy(e); }, true);
+let rsT = 0;
+window.addEventListener('resize', () => {
+  if(!RD.open) return;
+  hpHide();
+  clearTimeout(rsT);
+  rsT = setTimeout(() => { if(READER.mode === 'epub') epMarkDraw(); else if(RD.doc){ RD.cache.clear(); rdGo(RD.page, true); } }, 250);
+});
+document.addEventListener('fullscreenchange', () => { if(RD.open && READER.mode === 'pdf' && RD.doc){ RD.cache.clear(); setTimeout(() => rdGo(RD.page, true), 150); } else if(RD.open) setTimeout(epMarkDraw, 150); });
+
+/* ---------- Читалка EPUB ---------- */
+// foliate-js (лицензия MIT, vendor/foliate): книга листается страницами, выделения рисует его слой
+// (overlayer), место в книге хранится как EPUB CFI. Файл приходит целиком по той же защищённой ссылке,
+// что и PDF, считается в лимите и журнале и лежит только в памяти вкладки (fetch без кэша).
+// Скрипты из книги не загружаются и вырезаются из страниц. Подпись читателя рисуется холстом поверх страницы.
+const EP = {key: '', bookId: '', fid: '', view: null, lib: null, title: '', back: '', mark: '', cur: null, hls: [], marker: false,
+  saveT: 0, seen: new Set(), docs: new Map(), mk: null, flash: '', toc: null, annAt: 0};
+const EP_FONT = [90, 100, 115, 130];
+let foliateLoad = null;
+function loadFoliate(){
+  if(!foliateLoad) foliateLoad = Promise.all([import('/vendor/foliate/view.js'), import('/vendor/foliate/overlayer.js')])
+    .then(([v, o]) => ({makeBook: v.makeBook, Overlayer: o.Overlayer})).catch(e => { foliateLoad = null; throw e; });
+  return foliateLoad;
+}
+const epPlace = (chapter, pct) => [String(chapter || '').replace(/\s+/g, ' ').trim().slice(0, 80), isFinite(pct) ? Math.round(pct) + '%' : ''].filter(Boolean).join(' · ');
+// Скрипты и обработчики событий из страниц книги вырезаются: книга не должна ничего делать в приложении
+const epClean = s => String(s)
+  .replace(/<script\b[\s\S]*?<\/script\s*>/gi, '').replace(/<script\b[^>]*\/>/gi, '')
+  .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+  .replace(/((?:xlink:)?href|src)\s*=\s*(["'])\s*javascript:[^"']*\2/gi, '$1=$2#$2');
+function epShell(){
+  $('#reader').innerHTML = `<div class="rd-top"><button type="button" class="icon-btn" data-rd="close" aria-label="Закрыть книгу" title="Закрыть книгу">${ICON.back}</button>
+      <h1 class="rd-title" id="rd-title"></h1>
+      <button type="button" class="icon-btn" data-rd="toc" id="rd-toc" aria-label="Оглавление" title="Оглавление" hidden>${ICON.toc}</button>
+      ${markerBtn()}<button type="button" class="btn sm" data-rd="note" title="Заметка к этому месту">${ICON.pen}<span>Заметка</span></button>
+      <button type="button" class="icon-btn" data-rd="menu" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button></div>
+    <div class="ep-stage" id="ep-stage"><div class="ep-host" id="ep-host"></div><canvas class="ep-mark" id="ep-mark" aria-hidden="true"></canvas><div class="ep-tmp" id="ep-tmp"></div></div>
+    <div class="rd-bottom"><button type="button" class="icon-btn" data-rd="prev" aria-label="Назад" title="Назад">${ICON.left}</button>
+      <button type="button" class="rd-num ep-num" data-rd="goto" id="rd-num" aria-label="Оглавление" title="Оглавление">…</button>
+      <button type="button" class="icon-btn" data-rd="next" aria-label="Дальше" title="Дальше">${ICON.right}</button>
+      <span class="rd-sp"></span>
+      <button type="button" class="icon-btn fs-btn" data-rd="zout" aria-label="Шрифт мельче" title="Шрифт мельче"><b>А</b><small>−</small></button>
+      <button type="button" class="icon-btn fs-btn" data-rd="zin" aria-label="Шрифт крупнее" title="Шрифт крупнее"><b class="big">А</b><small>+</small></button>
+      ${document.fullscreenEnabled ? `<button type="button" class="icon-btn" data-rd="full" aria-label="Во весь экран" title="Во весь экран">${ICON.full}</button>` : ''}</div>
+    <input type="range" class="rd-slider" id="rd-slider" min="0" max="1000" value="0" aria-label="Место в книге">
+    <div class="rd-msg" id="rd-msg" hidden></div>`;
+  rdReaderClasses();
+  EP.marker = false;
+}
+async function epFetch(link, attempt){
+  attempt = attempt || 0;
+  let res;
+  try { res = await fetch(link.url, {cache: 'no-store', credentials: 'same-origin'}); }
+  catch(e){ if(attempt < 3){ await sleep(1500 * (attempt + 1)); return epFetch(link, attempt + 1); } throw {status: 0}; }
+  if(res.ok) return await res.blob();
+  let j = {}; try { j = await res.json(); } catch(e){}
+  if(res.status === 429){ const err = new RangeError429(j.message || ''); err.wait = j.wait || 10; throw err; }
+  throw {status: res.status, response: j};
+}
+async function epShow(r, b, again){
+  READER.mode = 'epub';
+  if(RD.doc) rdSave(true);
+  RD.flash = '';
+  if(!b){ rdFail('Книга не найдена.'); return; }
+  const f = fileOf(b.id, 'epub');
+  EP.back = '#/b/' + b.id;
+  if(!f){ rdFail('У этой книги нет файла EPUB.'); return; }
+  if(f.status !== 'ready'){ rdFail(f.status === 'processing' ? 'Книга ещё обрабатывается. Попробуйте через минуту.' : 'Этот файл не открывается: при обработке была ошибка.'); return; }
+  const hl = r.q.get('hl') || '';
+  if(EP.key === f.id && EP.view){
+    if(!$('#ep-host')){ epShell(); $('#ep-host').appendChild(EP.view); rdHeader(); epTocBtn(); epStyle(); epNum(); requestAnimationFrame(epMarkDraw); }
+    if(hl) epGoNote(hl);
+    return;
+  }
+  epDispose();
+  const key = f.id;
+  Object.assign(EP, {key, bookId: b.id, fid: f.id, title: b.title, hls: [], seen: new Set(), cur: null, flash: hl, docs: new Map(), toc: null});
+  epShell(); rdHeader(); epMarkerState();
+  rdMsg('Открываю…');
+  try {
+    const [lib, link] = await Promise.all([loadFoliate(), pb.send(`/api/knigi/books/${b.id}/link?f=epub`, {})]);
+    if(EP.key !== key) return;
+    EP.lib = lib; EP.mark = link.mark || '';
+    let blob;
+    try { blob = await epFetch(link); }
+    catch(err){
+      if(err && err.status === 401){ blob = await epFetch(await pb.send(`/api/knigi/books/${b.id}/link?f=epub`, {})); }
+      else throw err;
+    }
+    if(EP.key !== key) return;
+    const book = await lib.makeBook(new File([blob], 'book.epub', {type: 'application/epub+zip'}));
+    blob = null;
+    if(book.transformTarget){
+      book.transformTarget.addEventListener('load', ev => { if(ev.detail.isScript) ev.detail.allow = false; });
+      book.transformTarget.addEventListener('data', ev => {
+        const d = ev.detail;
+        if(/html|xml|svg/.test(d.type || '')) d.data = Promise.resolve(d.data).then(x => typeof x === 'string' ? epClean(x) : x);
+      });
+    }
+    const view = document.createElement('foliate-view');
+    EP.view = view;
+    view.addEventListener('load', epOnLoad);
+    view.addEventListener('relocate', epOnRelocate);
+    view.addEventListener('create-overlay', ev => epOverlay(ev.detail.index));
+    view.addEventListener('draw-annotation', ev => {
+      const {draw, annotation} = ev.detail;
+      draw(annotation.flash ? EP.lib.Overlayer.outline : EP.lib.Overlayer.highlight, {color: annotation.color, width: 3});
+    });
+    view.addEventListener('show-annotation', ev => epShowAnn(ev.detail));
+    view.addEventListener('external-link', ev => ev.preventDefault()); // внешние ссылки из книги не открываем
+    $('#ep-host').appendChild(view);
+    await view.open(book);
+    if(EP.key !== key) return;
+    EP.toc = book.toc && book.toc.length ? book.toc : null;
+    epTocBtn();
+    epStyle();
+    const own = await epLoadHls();
+    if(EP.key !== key) return;
+    let start = null;
+    if(hl){ const n = await epNoteAnchor(hl); if(n) start = n.cfi; }
+    if(!start){ const rd = readOf(b.id, 'epub'); if(rd && rd.pos) start = rd.pos; }
+    rdMsg('');
+    await view.init({lastLocation: start, showTextStart: !start});
+    if(hl) setTimeout(() => epFlash(hl), 300);
+    epMarkDraw();
+    void own;
+  } catch(e){
+    if(EP.key !== key) return;
+    if(e instanceof RangeError429){ rdPause(e); return; }
+    rdMsg(errText(e), true);
+  }
+}
+function epTocBtn(){ const t = $('#rd-toc'); if(t) t.hidden = !EP.toc; }
+function epDispose(){
+  clearTimeout(EP.saveT);
+  if(EP.view){ try { EP.view.close(); } catch(e){} EP.view.remove(); }
+  Object.assign(EP, {key: '', view: null, cur: null, hls: [], docs: new Map(), mk: null, toc: null});
+}
+// Тема и размер шрифта: светлая или тёмная вместе с приложением, 4 шага шрифта
+function epStyle(){
+  const v = EP.view; if(!v || !v.renderer) return;
+  const step = Math.min(EP_FONT.length - 1, Math.max(0, loadLS('epubFont', 1)));
+  const dark = isDark();
+  const plain = !isAdmin() && touchUI() && !EP.marker; // у читателя на телефоне выделяет только «Маркер»
+  v.style.setProperty('--overlayer-highlight-opacity', dark ? '.38' : '.45');
+  v.style.setProperty('--overlayer-highlight-blend-mode', dark ? 'normal' : 'multiply');
+  v.renderer.setAttribute('margin', '36px');
+  v.renderer.setAttribute('max-inline-size', '680px');
+  const UR = {cyrillic: 'U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116', latin: 'U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2212,U+FEFF,U+FFFD'};
+  const ff = (w, st, sub) => `@font-face { font-family: Literata; font-style: ${st}; font-weight: ${w}; font-display: swap; src: url(${location.origin}/fonts/literata-${sub}-${w}-${st}.woff2) format("woff2"); unicode-range: ${UR[sub]}; }`;
+  v.renderer.setStyles(`
+    ${['cyrillic', 'latin'].map(sub => ff(400, 'normal', sub) + ff(400, 'italic', sub) + ff(600, 'normal', sub) + ff(600, 'italic', sub)).join('\n')}
+    html { color-scheme: ${dark ? 'dark' : 'light'}; font-size: ${EP_FONT[step]}% !important; }
+    html, body { background: ${dark ? '#1E2226' : '#FFFCF6'} !important; color: ${dark ? '#E6E0D4' : '#26231F'} !important; }
+    body { font-family: Literata, Georgia, serif; }
+    p, li, blockquote, dd { line-height: 1.55; hyphens: auto; -webkit-hyphens: auto; }
+    a:link, a:visited { color: ${dark ? '#9DBEDC' : '#2C4A66'}; }
+    img, svg { max-width: 100%; }
+    ${dark ? 'img { filter: brightness(.9); }' : ''}
+    ${plain ? 'html, body, * { -webkit-user-select: none !important; user-select: none !important; -webkit-touch-callout: none !important; }' : ''}
+    ${EP.marker ? 'html, body { touch-action: none !important; } * { cursor: text; }' : ''}
+    ${!isAdmin() ? '* { -webkit-touch-callout: none !important; }' : ''}`);
+}
+function epFont(d){
+  const step = Math.min(EP_FONT.length - 1, Math.max(0, loadLS('epubFont', 1) + d));
+  if(step === loadLS('epubFont', 1)){ toast(d > 0 ? 'Это самый крупный шрифт.' : 'Это самый мелкий шрифт.'); return; }
+  saveLS('epubFont', step); hpHide(); epStyle();
+}
+function epGo(d){ if(!EP.view) return; hpHide(); d > 0 ? EP.view.next() : EP.view.prev(); }
+function epToFraction(x){ if(EP.view) EP.view.goToFraction(Math.min(1, Math.max(0, x))).catch(() => {}); }
+function epNum(){
+  const c = EP.cur, el = $('#rd-num');
+  if(el) el.textContent = c ? epPlace(c.chapter, c.pct) || '…' : '…';
+  const sl = $('#rd-slider'); if(sl && c && document.activeElement !== sl) sl.value = Math.round((c.fraction || 0) * 1000);
+}
+function epOnRelocate(ev){
+  const d = ev.detail || {};
+  EP.cur = {cfi: d.cfi || '', fraction: d.fraction || 0, pct: Math.round((d.fraction || 0) * 1000) / 10, chapter: (d.tocItem && d.tocItem.label) || '',
+    page: d.location ? d.location.current + 1 : 0, pages: d.location ? d.location.total : 0};
+  if(EP.cur.page) EP.seen.add(EP.cur.page);
+  epNum();
+  hpHide();
+  clearTimeout(EP.saveT); EP.saveT = setTimeout(() => epSave(false), 1500);
+}
+function epSave(leaving){
+  clearTimeout(EP.saveT);
+  const c = EP.cur; if(!c || !EP.bookId || !EP.view) return;
+  const body = {format: 'epub', pct: c.pct, pos: c.cfi, page: c.page || 1, pages: c.pages || 0, seen: [...EP.seen]};
+  EP.seen = new Set();
+  const id = EP.bookId, r = readOf(id, 'epub');
+  if(r && r.pos === body.pos && !body.seen.length) return;
+  if(leaving){
+    fetch(`/api/knigi/books/${id}/progress`, {method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json', Authorization: pb.authStore.token}, body: JSON.stringify(body)}).catch(() => {});
+    saveReading(id, 'epub', {...(r || {}), pct: body.pct, pos: body.pos, page: body.page, pages: body.pages, updated: ''});
+    return;
+  }
+  pb.send(`/api/knigi/books/${id}/progress`, {method: 'POST', body}).then(res => saveReading(id, 'epub', res)).catch(() => { body.seen.forEach(p => EP.seen.add(p)); });
+}
+function epToc(){
+  if(!EP.toc){ toast('В этой книге нет оглавления.'); return; }
+  const flat = [];
+  const walk = (items, lvl) => { for(const it of items){ flat.push({it, lvl}); if(it.subitems && it.subitems.length && lvl < 3) walk(it.subitems, lvl + 1); } };
+  walk(EP.toc, 1);
+  openForm({title: 'Оглавление', noSubmit: true, html: `<div class="toc">${flat.slice(0, 600).map((x, i) => `<button type="button" class="toc-row lvl${x.lvl}" data-dlg="toc" data-i="${i}">${esc(x.it.label || 'Без названия')}</button>`).join('')}</div>`,
+    async onClick(el){ const it = flat[+el.dataset.i].it; dlg.close(); if(it.href) EP.view.goTo(it.href).catch(() => toast('Не удалось открыть раздел.')); }});
+}
+// Страница книги загрузилась (каждая глава в своём фрейме): запреты для читателя, выделение, «Маркер», края для листания
+function epOnLoad(ev){
+  const {doc, index} = ev.detail;
+  EP.docs.set(doc, index);
+  if(!isAdmin()) for(const t of ['copy', 'cut', 'contextmenu', 'dragstart']) doc.addEventListener(t, noCopy);
+  doc.addEventListener('keydown', e => {
+    if((e.ctrlKey || e.metaKey) && /^[psPS]$/.test(e.key)){ e.preventDefault(); return; }
+    if(e.key === 'ArrowRight' || e.key === 'PageDown'){ e.preventDefault(); epGo(1); }
+    else if(e.key === 'ArrowLeft' || e.key === 'PageUp'){ e.preventDefault(); epGo(-1); }
+    else if(e.key === 'Escape') hpHide();
+  });
+  // мышь: выделили и отпустили → панель
+  doc.addEventListener('pointerup', e => { if(e.pointerType === 'mouse' && !EP.marker) setTimeout(() => epSelCheck(doc), 30); });
+  doc.addEventListener('selectionchange', () => { if(touchUI() && !EP.marker){ clearTimeout(selT); selT = setTimeout(() => epSelCheck(doc), 600); } });
+  // «Маркер»: свои касания, листание foliate в это время не получает событий
+  const stopTouch = e => { if(EP.marker){ e.stopPropagation(); if(e.cancelable) e.preventDefault(); } };
+  doc.addEventListener('touchstart', stopTouch, {capture: true, passive: false});
+  doc.addEventListener('touchmove', stopTouch, {capture: true, passive: false});
+  doc.addEventListener('touchend', stopTouch, {capture: true, passive: false});
+  doc.addEventListener('pointerdown', e => epMkDown(e, doc, index), true);
+  doc.addEventListener('pointermove', e => epMkMove(e, doc), true);
+  doc.addEventListener('pointerup', e => epMkUp(e, doc, index), true);
+  // нажатие по краю листает, в середине прячет панели
+  doc.addEventListener('click', e => {
+    if(EP.marker || e.target.closest('a[href]')) return;
+    const t = Date.now();
+    setTimeout(() => {
+      if(EP.annAt >= t - 5) return; // нажали на выделение
+      if(String(doc.getSelection() || '').trim()) return;
+      if(HP.el){ hpHide(); return; }
+      const fr = doc.defaultView.frameElement, st = $('#ep-stage');
+      if(!fr || !st) return;
+      const x0 = fr.getBoundingClientRect().left + e.clientX, sr = st.getBoundingClientRect(), x = (x0 - sr.left) / sr.width;
+      if(x < 0.28) epGo(-1); else if(x > 0.72) epGo(1);
+      else { RD.bars = !RD.bars; $('#reader').classList.toggle('bars-off', !RD.bars); }
+    }, 0);
   });
 }
-// Выделение в читалке запоминаем: нажатие на кнопку «Заметка» может его сбросить
-document.addEventListener('selectionchange', () => {
-  if(!RD.open) return;
-  const t = String(window.getSelection() || '').trim();
-  if(t) RD.sel = {text: t, at: Date.now()};
-});
-let rsT = 0;
-window.addEventListener('resize', () => { if(!RD.open || !RD.doc) return; clearTimeout(rsT); rsT = setTimeout(() => { RD.cache.clear(); rdGo(RD.page, true); }, 250); });
-document.addEventListener('fullscreenchange', () => { if(RD.open && RD.doc){ RD.cache.clear(); setTimeout(() => rdGo(RD.page, true), 150); } });
+// Прямоугольник из координат страницы книги (фрейм) в координаты экрана
+function epScreenRect(range){
+  const doc = range.startContainer.ownerDocument, fr = doc.defaultView.frameElement;
+  const f = fr ? fr.getBoundingClientRect() : {left: 0, top: 0};
+  const rects = [...range.getClientRects()].filter(r => r.width > 0 && r.height > 0);
+  if(!rects.length) return null;
+  return {rects: rects.map(r => ({left: r.left + f.left, top: r.top + f.top, width: r.width, height: r.height})),
+    box: {left: Math.min(...rects.map(r => r.left)) + f.left, right: Math.max(...rects.map(r => r.right)) + f.left, top: Math.min(...rects.map(r => r.top)) + f.top, bottom: Math.max(...rects.map(r => r.bottom)) + f.top}};
+}
+function epPending(range, index){
+  const quote = String(range.toString() || '').replace(/[­]/g, '').replace(/\s+/g, ' ').trim();
+  if(!quote || !EP.view) return null;
+  const cfi = EP.view.getCFI(index, range);
+  let chapter = EP.cur ? EP.cur.chapter : '';
+  try { const p = EP.view.getProgressOf(index, range); if(p && p.tocItem && p.tocItem.label) chapter = p.tocItem.label; } catch(e){}
+  const pct = EP.cur ? EP.cur.pct : 0;
+  const sr = epScreenRect(range);
+  return {quote, chapter, pct, anchor: {v: 1, cfi, pct, chapter}, rect: sr ? sr.box : null, range};
+}
+function epSelCheck(doc){
+  if(READER.mode !== 'epub' || EP.marker || HP.mode === 'edit') return;
+  const sel = doc.getSelection();
+  if(!sel || sel.isCollapsed || !sel.rangeCount){ if(HP.mode === 'new') hpHide(); return; }
+  const p = epPending(sel.getRangeAt(0).cloneRange(), EP.docs.get(doc));
+  if(p) hpShow({mode: 'new', pending: p, rect: p.rect});
+}
+function epDeselect(){ try { EP.view && EP.view.deselect(); } catch(e){} }
+// Буква под пальцем в странице книги: средствами браузера, иначе ближайшая буква вручную
+function epCaret(doc, x, y){
+  let node = null, offset = 0;
+  try {
+    if(doc.caretPositionFromPoint){ const p = doc.caretPositionFromPoint(x, y); if(p){ node = p.offsetNode; offset = p.offset; } }
+    else if(doc.caretRangeFromPoint){ const r = doc.caretRangeFromPoint(x, y); if(r){ node = r.startContainer; offset = r.startOffset; } }
+  } catch(e){}
+  if(node && node.nodeType === 3) return {node, offset};
+  const el = doc.elementFromPoint(x, y);
+  if(!el) return null;
+  const w = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const rg = doc.createRange();
+  let best = null, bd = Infinity, t;
+  while((t = w.nextNode())){
+    for(let i = 0; i < t.nodeValue.length; i++){
+      rg.setStart(t, i); rg.setEnd(t, i + 1);
+      const r = rg.getBoundingClientRect(); if(!r.width) continue;
+      const d = Math.abs(y - (r.top + r.bottom) / 2) * 3 + Math.abs(x - (r.left + r.right) / 2);
+      if(d < bd){ bd = d; best = {node: t, offset: x > (r.left + r.right) / 2 ? i + 1 : i}; }
+    }
+  }
+  return best;
+}
+function epMkDown(e, doc, index){
+  if(!EP.marker || !e.isPrimary) return;
+  e.preventDefault(); e.stopPropagation();
+  hpHide();
+  const c = epCaret(doc, e.clientX, e.clientY);
+  EP.mk = {doc, index, start: c, end: c, x: e.clientX, y: e.clientY, id: e.pointerId, moved: false};
+  try { doc.documentElement.setPointerCapture(e.pointerId); } catch(err){}
+}
+function epMkRange(m){
+  if(!m.start || !m.end) return null;
+  const r = m.doc.createRange();
+  r.setStart(m.start.node, m.start.offset); r.collapse(true);
+  if(r.comparePoint(m.end.node, m.end.offset) < 0){ r.setStart(m.end.node, m.end.offset); r.setEnd(m.start.node, m.start.offset); }
+  else r.setEnd(m.end.node, m.end.offset);
+  return r;
+}
+function epTmpDraw(rects){
+  const tmp = $('#ep-tmp'), st = $('#ep-stage'); if(!tmp || !st) return;
+  const s = st.getBoundingClientRect();
+  tmp.innerHTML = (rects || []).map(r => `<i class="hl-mark tmp" style="left:${r.left - s.left}px;top:${r.top - s.top}px;width:${r.width}px;height:${r.height}px;--hl:${HL.yellow[1]}"></i>`).join('');
+}
+function epMkMove(e, doc){
+  const m = EP.mk; if(!m || e.pointerId !== m.id) return;
+  e.preventDefault(); e.stopPropagation();
+  if(Math.hypot(e.clientX - m.x, e.clientY - m.y) > 6) m.moved = true;
+  const c = epCaret(doc, e.clientX, e.clientY);
+  if(!c) return;
+  if(!m.start) m.start = c;
+  m.end = c;
+  const r = epMkRange(m), sr = r && !r.collapsed ? epScreenRect(r) : null;
+  epTmpDraw(sr ? sr.rects : []);
+}
+function epMkUp(e, doc, index){
+  const m = EP.mk; if(!m || e.pointerId !== m.id) return;
+  e.preventDefault(); e.stopPropagation();
+  EP.mk = null;
+  if(!m.moved){
+    // нажатие без движения: может быть по готовому выделению (касания в «Маркере» foliate не видит)
+    epTmpDraw([]);
+    try {
+      const c = EP.view.renderer.getContents().find(x => x.doc === doc);
+      const [value, range] = c && c.overlayer ? c.overlayer.hitTest({x: e.clientX, y: e.clientY}) : [];
+      if(value) epShowAnn({value, range});
+    } catch(err){}
+    return;
+  }
+  const r = epMkRange(m);
+  const p = r && !r.collapsed ? epPending(r, index) : null;
+  if(!p){ epTmpDraw([]); return; }
+  hpShow({mode: 'new', pending: p, rect: p.rect});
+  const sr = epScreenRect(r); epTmpDraw(sr ? sr.rects : []);
+}
+function epMarkerState(){
+  const b = $('#rd-marker'); if(b){ b.setAttribute('aria-pressed', String(EP.marker)); b.classList.remove('off'); }
+  $('#reader').classList.toggle('marker', EP.marker);
+  hpHide();
+  epDeselect();
+  epStyle();
+}
+// Свои выделения этой книги в EPUB
+async function epLoadHls(){
+  const key = EP.key;
+  try {
+    const list = await pb.collection('notes').getFullList({filter: pb.filter('owner = {:u} && book = {:b} && kind = "highlight" && format = "epub"', {u: me().id, b: EP.bookId}), fields: hlFields});
+    if(EP.key !== key) return [];
+    EP.hls = list.filter(h => h.anchor && h.anchor.cfi);
+    for(const h of EP.hls) epAdd(h);
+    return EP.hls;
+  } catch(e){ return []; }
+}
+function epAdd(h){ if(EP.view && h.anchor && h.anchor.cfi) EP.view.addAnnotation({value: h.anchor.cfi, color: (HL[h.color] || HL.yellow)[1]}).catch(() => {}); }
+// Глава загрузилась: рисуем на ней выделения
+function epOverlay(){ for(const h of EP.hls) epAdd(h); }
+function epDrawHl(h, removed){
+  if(!EP.view || !h || !h.anchor || !h.anchor.cfi) return;
+  if(removed){ EP.view.deleteAnnotation({value: h.anchor.cfi}).catch(() => {}); return; }
+  epAdd(h);
+}
+function epShowAnn(d){
+  EP.annAt = Date.now();
+  if(EP.marker && EP.mk) return;
+  const h = EP.hls.find(x => x.anchor && x.anchor.cfi === d.value);
+  if(!h) return;
+  const sr = d.range ? epScreenRect(d.range) : null;
+  hpShow({mode: 'edit', h, rect: sr ? sr.box : null});
+}
+// Переход к заметке или выделению: его место из anchor (своё или общее)
+async function epNoteAnchor(id){
+  let n = EP.hls.find(x => x.id === id);
+  if(!n){ try { n = await pb.collection('notes').getOne(id, {fields: 'id,anchor,format,book'}); } catch(e){ n = null; } }
+  return n && n.anchor && n.anchor.cfi ? {cfi: n.anchor.cfi, id} : null;
+}
+async function epGoNote(id){
+  const a = await epNoteAnchor(id);
+  if(!a || !EP.view) return;
+  await EP.view.goTo(a.cfi).catch(() => {});
+  setTimeout(() => epFlash(id), 300);
+}
+// Мигнуть выделением: на миг рамка вместо заливки
+function epFlash(id){
+  const h = EP.hls.find(x => x.id === id);
+  if(!h || !EP.view) return;
+  const v = {value: h.anchor.cfi, color: '#C2410C', flash: true};
+  EP.view.addAnnotation(v).catch(() => {});
+  setTimeout(() => epAdd(h), 1600);
+}
+// Подпись читателя поверх страниц: холст на весь экран читалки, сквозь него нажатия проходят
+function epMarkDraw(){
+  const c = $('#ep-mark'), st = $('#ep-stage');
+  if(!c || !st) return;
+  const w = st.clientWidth, h = st.clientHeight, k = Math.min(window.devicePixelRatio || 1, 2);
+  c.width = Math.round(w * k); c.height = Math.round(h * k);
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, c.width, c.height);
+  if(!EP.mark) return;
+  rdWatermark(ctx, c.width, c.height, EP.mark);
+  if(isDark()){ ctx.globalCompositeOperation = 'source-in'; ctx.fillStyle = 'rgba(230, 224, 212, 0.16)'; ctx.fillRect(0, 0, c.width, c.height); ctx.globalCompositeOperation = 'source-over'; }
+}
+darkMQ.addEventListener && darkMQ.addEventListener('change', () => { if(READER.mode === 'epub' && EP.view){ epStyle(); epMarkDraw(); } });
 
 /* ---------- Вход и регистрация ---------- */
 let authMode = 'login', authInvite = '', authEmail = '', isFirstRun = false;
@@ -1986,6 +2994,9 @@ document.addEventListener('click', async e => {
       break;
     }
     case 'avatar': avatarMenu(a); break;
+    case 'card-fmt': UI.cardFmt[d.id] = d.f; render(true); break;
+    case 'hl-color': UI.hlColor = d.c; render(true); break;
+    case 'hl-more': { UI.hlOpen.has(d.id) ? UI.hlOpen.delete(d.id) : UI.hlOpen.add(d.id); render(true); break; }
     case 'note-full': setFull(!UI.fullNow); break;
     case 'edit-name': openForm({title: 'Имя', fields: [{key: 'name', label: 'Как вас называть', max: 100}], values: {name: me().name || ''},
       async onSave(v){ const rec = await pb.collection('users').update(me().id, {name: v.name}); pb.authStore.save(pb.authStore.token, rec); render(true); }}); break;
@@ -1998,6 +3009,7 @@ document.addEventListener('change', e => {
   if(t.id === 'books-sort'){ UI.booksSort = t.value; saveLS('booksSort', t.value); render(true); return; }
   if(t.id === 'books-fmt'){ UI.booksFmt = t.value; render(true); return; }
   if(t.id === 'books-scan'){ UI.booksScan = t.checked; render(true); return; }
+  if(t.id === 'hl-thought'){ UI.hlThought = t.checked; render(true); return; }
   if(t.id === 'log-user' || t.id === 'log-book' || t.id === 'log-days'){ UI.logQ[t.id.slice(4)] = t.value; UI.log = null; render(true); return; }
   if(t.id === 'note-files'){ const files = [...t.files]; t.value = ''; if(files.length) addUploads(files, 'file', t.dataset.note); return; }
 });
