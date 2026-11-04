@@ -53,10 +53,13 @@ const ICON = {
   log: sv('<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/>'),
   author: sv('<circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/>'),
   moon: sv('<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'),
+  expand: sv('<path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/>'),
+  collapse: sv('<path d="M20 4l-6 6M14 5v5h5M4 20l6-6M10 19v-5H5"/>'),
+  camera: sv('<path d="M4 8h3.5L9 5.5h6L16.5 8H20v11H4z"/><circle cx="12" cy="13" r="3.5"/>'),
 };
 
 /* ---------- Состояние ---------- */
-const S = {books:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], invites:[], loaded:false, disk:null};
+const S = {books:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], invites:[], users:[], owner:null, loaded:false, disk:null};
 const PBN = {books:'books', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files'};
 const KEYS = Object.keys(PBN);
 const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS})};
@@ -64,7 +67,8 @@ const loadLS = (k, d) => { try { const v = localStorage.getItem('kn_'+k); return
 const saveLS = (k, v) => { try { localStorage.setItem('kn_'+k, JSON.stringify(v)); } catch(e){} };
 const dropLS = k => { try { localStorage.removeItem('kn_'+k); } catch(e){} };
 const UI = {hops:0, q:'', reorder:'', booksView: loadLS('booksView', 'grid'), booksSort: loadLS('booksSort', 'title'), booksFmt:'', booksScan:false,
-  tab:'notes', notesQ:'', notesKind:'', notesHits:null, logQ:{days:7, user:'', book:''}, log:null, descOpen:false};
+  tab:'notes', notesQ:'', notesKind:'', notesHits:null, logQ:{days:7, user:'', book:''}, log:null, descOpen:false,
+  fullFor:'', fullNow:false, normalOnce:false};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
@@ -184,7 +188,7 @@ async function startApp(){
     await pb.send('/api/knigi/session', {});
     await loadAll();
     S.loaded = true; $('#notice').hidden = true; render(true);
-    if(isAdmin()) loadInvites();
+    if(isAdmin()){ loadInvites(); loadUsers(); } else loadOwner();
     subscribeAll().catch(() => {});
   } catch(e){
     showNotice('Не удалось загрузить данные. ' + errText(e));
@@ -230,7 +234,7 @@ const TABS = [['lib', '#/', 'Библиотека', 'library'], ['shelves', '#/s
 function buildNav(){
   const items = TABS.map(([k, h, l, ic]) => `<a href="${h}" class="tab" data-tab="${k}">${ICON[ic]}<span>${l}</span></a>`).join('');
   $('#tabbar').innerHTML = `<div class="tabbar-in">${items}</div>`;
-  $('#side').innerHTML = `<div class="side-brand"><span class="side-logo" aria-hidden="true"></span><b>Библиотека</b></div>${items}`;
+  $('#side').innerHTML = `<div class="side-brand"><span class="side-logo" aria-hidden="true"></span><b>Библиотека</b></div>${items}<a class="side-me" id="side-me" href="#/profile"></a>`;
 }
 
 /* ---------- Адреса экранов ----------
@@ -254,6 +258,8 @@ function render(force){
   const reading = r.name === 'read' || r.name === 'pdf';
   if(reading){ if(S.loaded) rdShow(r); return; }
   if(RD.open) rdClose();
+  noteFullSync(r);
+  sideMe();
   const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log'].includes(r.name) ? 'profile' : 'lib';
   $$('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   const m = $('#main');
@@ -306,7 +312,8 @@ function searchHits(q){
 }
 VIEWS.home = () => {
   const hits = searchHits(UI.q);
-  const head = `<header class="head"><h1>Библиотека</h1>${isAdmin() ? `<button type="button" class="btn primary sm" data-act="add-books">${ICON.upload}<span>Добавить книги</span></button>` : ''}</header>
+  const head = `<header class="head"><h1>Библиотека</h1><span class="row-acts">${isAdmin() ? `<button type="button" class="btn primary sm" data-act="add-books">${ICON.upload}<span>Добавить книги</span></button>` : ''}
+      <a class="me-link" href="#/profile" aria-label="Профиль">${faceHTML(me(), 'sm')}</a></span></header>
     <label class="search"><span class="sr">Поиск по названию и автору</span>${ICON.search}<input type="search" id="q" placeholder="Название или автор" value="${esc(UI.q)}" autocomplete="off" enterkeyhint="search"></label>`;
   if(hits){
     return head + `<section class="block">${hits.authors.length ? `<h2>Авторы</h2><div class="chips">${hits.authors.slice(0, 12).map(a => `<a class="chip" href="#/a/${a.id}">${ICON.author}${esc(a.name)}</a>`).join('')}</div>` : ''}
@@ -456,7 +463,7 @@ VIEWS.b = r => {
       ${isAdmin() ? `<div class="tabs" role="tablist"><a role="tab" href="#/b/${b.id}" aria-selected="${tab === 'notes'}">Заметки</a><a role="tab" href="#/b/${b.id}?tab=lessons" aria-selected="${tab === 'lessons'}">Уроки</a></div>` : '<h2>Заметки</h2>'}
       <div class="rows">${mine.map(n => noteRow(n, {noBook: true})).join('') || `<p class="empty">${tab === 'lessons' ? 'Уроков к этой книге пока нет.' : 'Заметок к этой книге пока нет.'}</p>`}</div>
       <a class="btn" href="#/note/new?book=${b.id}${tab === 'lessons' ? '&kind=lesson' : ''}">${ICON.plus}<span>${tab === 'lessons' ? 'Урок' : 'Заметка'}</span></a>
-      ${shared.length ? `<h3 class="sub-h">Заметки автора библиотеки</h3><div class="rows">${shared.map(n => noteRow(n, {noBook: true})).join('')}</div>` : ''}
+      ${shared.length ? `<h3 class="sub-h owner-h">${S.owner ? faceHTML(S.owner, 'xs') : ''}<span>Заметки автора библиотеки</span></h3><div class="rows">${shared.map(n => noteRow(n, {noBook: true})).join('')}</div>` : ''}
     </section>`;
 };
 
@@ -494,15 +501,200 @@ function notesSearch(){
   }, 300);
 }
 
+/* ---------- Фото профиля ---------- */
+// Фото защищённое: приложение получает его по маршруту с ключом входа и держит в памяти как blob-ссылку.
+// Своё фото видит каждый, все фото видит администратор, фото администратора видят все вошедшие.
+const AV = new Map();
+function avatarSrc(u){
+  if(!u || !u.avatar || !u.id) return '';
+  const k = u.id + '/' + u.avatar, v = AV.get(k);
+  if(v && v !== 'loading' && v !== 'err') return v;
+  if(!v){
+    AV.set(k, 'loading');
+    fetch(`/api/knigi/users/${encodeURIComponent(u.id)}/avatar?v=${encodeURIComponent(u.avatar)}`, {headers: {Authorization: pb.authStore.token}, cache: 'no-store'})
+      .then(r => { if(!r.ok) throw new Error(); return r.blob(); })
+      .then(b => { AV.set(k, URL.createObjectURL(b)); schedule(); }).catch(() => AV.set(k, 'err'));
+  }
+  return '';
+}
+const initial = u => (String((u && (u.name || u.email)) || '?').trim()[0] || '?').toUpperCase();
+function faceHTML(u, cls){
+  const src = avatarSrc(u);
+  return `<span class="face ${cls || ''}" aria-hidden="true">${src ? `<img src="${esc(src)}" alt="" draggable="false">` : esc(initial(u))}</span>`;
+}
+// Внизу бокового меню на компьютере: фото и имя
+function sideMe(){
+  const el = $('#side-me'); if(!el) return;
+  const u = me(), html = `${faceHTML(u, 'sm')}<span>${esc(u.name || u.email || 'Профиль')}</span>`;
+  if(el.innerHTML !== html) el.innerHTML = html;
+}
+function avatarMenu(btn){
+  const items = [{label: me().avatar ? 'Выбрать другое фото' : 'Выбрать фото', run: () => pickPhoto(f => cropPhoto(f))}];
+  if(me().avatar) items.push({label: 'Убрать фото', danger: true, run: () => openForm({title: 'Убрать фото?', text: 'Вместо фото будет первая буква имени.', submit: 'Убрать', danger: true,
+    async onSave(){ const rec = await pb.collection('users').update(me().id, {avatar: null}); pb.authStore.save(pb.authStore.token, rec); toast('Фото убрано'); render(true); }})});
+  openMenu(btn, items);
+}
+// Выбор фото: поле кладём в открытое окно, иначе на телефоне из окна оно не срабатывает
+function pickPhoto(cb){ pickFile('image/*,.heic,.heif', false, ([f]) => cb(f)); }
+
+// Окно обрезки по кругу: двигать пальцем или мышью, увеличивать ползунком, щипком или колесом.
+// На сервер уходит квадрат 512×512 JPEG (обычно 40-120 КБ).
+const AVATAR_SIZE = 512, PHOTO_MAX = 15 * MB;
+const cropDlg = $('#crop'), cropStage = $('#crop-stage'), cropImg = $('#crop-img');
+const CR = {img: null, W: 0, H: 0, cx: .5, cy: .5, z: 1, seq: 0, url: ''};
+const clampZ = z => Math.min(4, Math.max(1, +z || 1));
+function cropMsg(text){
+  const m = $('#crop-msg'); m.textContent = text || ''; m.hidden = !text;
+  cropImg.hidden = !!text; cropDlg.classList.toggle('no-img', !!text);
+  $('#crop-done').disabled = !!text;
+}
+function cropPhoto(file){
+  if(!cropDlg.open) cropDlg.showModal();
+  cropLoad(file);
+}
+async function cropLoad(file){
+  const seq = ++CR.seq;
+  CR.img = null; cropMsg('Открываю фото…');
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  if(file.size > PHOTO_MAX){ cropMsg('Фото больше 15 МБ. Выберите фото поменьше.'); return; }
+  let img = null;
+  try { img = await createImageBitmap(file); }
+  catch(e){
+    try { img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); }); }
+    catch(e2){ img = null; }
+  }
+  if(seq !== CR.seq) return;
+  if(!img){
+    cropMsg(['heic','heif'].includes(ext) ? 'Это фото в формате HEIC: этот браузер его не открывает. Выберите фото в формате JPG или PNG.' : 'Эту картинку не удалось открыть. Выберите фото в формате JPG, PNG или WEBP.');
+    return;
+  }
+  // большое фото уменьшаем до 2048 точек: так окно не тратит лишнюю память
+  const W = img.width || img.naturalWidth, H = img.height || img.naturalHeight;
+  const k = Math.min(1, 2048 / Math.max(W, H));
+  const cv = document.createElement('canvas'); cv.width = Math.round(W * k); cv.height = Math.round(H * k);
+  cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+  if(CR.url) URL.revokeObjectURL(CR.url);
+  const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', 0.9));
+  if(seq !== CR.seq) return;
+  CR.url = URL.createObjectURL(blob);
+  Object.assign(CR, {img: cv, W: cv.width, H: cv.height, cx: .5, cy: .5, z: 1});
+  cropImg.src = CR.url;
+  cropMsg('');
+  cropDraw();
+}
+const cropD = () => cropStage.clientWidth * 0.8;
+function cropClamp(){
+  const k = Math.min(CR.W, CR.H) / CR.z / 2;
+  CR.cx = Math.min(1 - k / CR.W, Math.max(k / CR.W, CR.cx));
+  CR.cy = Math.min(1 - k / CR.H, Math.max(k / CR.H, CR.cy));
+}
+let cropRaf = 0;
+function cropDraw(){
+  if(cropRaf) return;
+  cropRaf = requestAnimationFrame(() => {
+    cropRaf = 0;
+    if(!CR.img) return;
+    cropClamp();
+    const s = cropD() / Math.min(CR.W, CR.H) * CR.z, c = cropStage.clientWidth / 2;
+    cropImg.style.width = CR.W + 'px'; cropImg.style.height = CR.H + 'px';
+    cropImg.style.transform = `translate(${c - CR.cx * CR.W * s}px, ${c - CR.cy * CR.H * s}px) scale(${s})`;
+    $('#crop-z').value = CR.z;
+  });
+}
+const ptrs = new Map();
+cropStage.addEventListener('pointerdown', e => { if(!CR.img) return; try { cropStage.setPointerCapture(e.pointerId); } catch(err){} ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY}); });
+cropStage.addEventListener('pointermove', e => {
+  const p = ptrs.get(e.pointerId);
+  if(!p || !CR.img) return;
+  const before = [...ptrs.values()].map(q => ({...q}));
+  p.x = e.clientX; p.y = e.clientY;
+  const after = [...ptrs.values()];
+  const s = cropD() / Math.min(CR.W, CR.H) * CR.z;
+  let dx, dy;
+  if(after.length === 1){ dx = after[0].x - before[0].x; dy = after[0].y - before[0].y; }
+  else {
+    const mid = a => ({x: (a[0].x + a[1].x) / 2, y: (a[0].y + a[1].y) / 2});
+    const dist = a => Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) || 1;
+    dx = mid(after).x - mid(before).x; dy = mid(after).y - mid(before).y;
+    CR.z = clampZ(CR.z * dist(after) / dist(before));
+  }
+  CR.cx -= dx / (s * CR.W); CR.cy -= dy / (s * CR.H);
+  cropDraw();
+});
+const ptrEnd = e => ptrs.delete(e.pointerId);
+cropStage.addEventListener('pointerup', ptrEnd);
+cropStage.addEventListener('pointercancel', ptrEnd);
+cropStage.addEventListener('wheel', e => { if(!CR.img) return; e.preventDefault(); CR.z = clampZ(CR.z * Math.exp(-e.deltaY * 0.0015)); cropDraw(); }, {passive: false});
+$('#crop-z').addEventListener('input', e => { if(!CR.img) return; CR.z = clampZ(e.target.value); cropDraw(); });
+window.addEventListener('resize', () => { if(cropDlg.open) cropDraw(); });
+$('#crop-file').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if(f) cropLoad(f); });
+$('#crop-cancel').addEventListener('click', () => { CR.seq++; cropDlg.close(); });
+cropDlg.addEventListener('close', () => { CR.seq++; CR.img = null; ptrs.clear(); });
+$('#crop-done').addEventListener('click', async e => {
+  if(!CR.img) return;
+  const btn = e.currentTarget; btn.disabled = true;
+  try {
+    cropClamp();
+    const side = Math.min(CR.W, CR.H) / CR.z;
+    const cv = document.createElement('canvas'); cv.width = cv.height = AVATAR_SIZE;
+    const g = cv.getContext('2d'); g.imageSmoothingQuality = 'high';
+    g.drawImage(CR.img, CR.cx * CR.W - side / 2, CR.cy * CR.H - side / 2, side, side, 0, 0, AVATAR_SIZE, AVATAR_SIZE);
+    let blob = null;
+    for(const q of [0.86, 0.78, 0.68, 0.55]){ blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', q)); if(blob && blob.size <= 300 * 1024) break; }
+    if(!blob) throw new Error('Не удалось обработать фото.');
+    const rec = await pb.collection('users').update(me().id, {avatar: new File([blob], 'avatar.jpg', {type: 'image/jpeg'})});
+    pb.authStore.save(pb.authStore.token, rec);
+    if(isAdmin()) loadUsers();
+    cropDlg.close(); toast('Фото сохранено'); render(true);
+  } catch(err){ toast(errText(err)); }
+  finally { btn.disabled = false; }
+});
+
+/* ---------- Заметка на весь экран ---------- */
+// Режим внутри приложения: прячутся меню и всё лишнее, текст колонкой по центру. Выбор запоминается
+// на этом устройстве (kn_noteFull). Из читалки заметка всегда открывается в обычном виде.
+function noteFullSync(r){
+  if(r.name !== 'note'){ document.documentElement.classList.remove('note-full'); UI.fullFor = ''; return; }
+  const id = r.id === 'new' ? 'new:' + (ED.isNew ? ED.id : '') : r.id;
+  if(UI.fullFor !== id && !(ED.id && (id === ED.id || id === 'new:' + ED.id))){
+    UI.fullNow = UI.normalOnce ? false : !!loadLS('noteFull', false);
+    UI.normalOnce = false;
+  }
+  UI.fullFor = id;
+  document.documentElement.classList.toggle('note-full', UI.fullNow);
+}
+function fullBtnHTML(){
+  const on = UI.fullNow, t = on ? 'Свернуть' : 'На весь экран';
+  return `<button type="button" class="ed-full" data-act="note-full" title="${t}" aria-label="${t}" aria-pressed="${on}">${on ? ICON.collapse : ICON.expand}</button>`;
+}
+function setFull(on){
+  // место прокрутки: тот же абзац остаётся на той же высоте экрана
+  let anchor = null;
+  for(const el of $$('#main .ql-editor > *, #main .prose > *, #main .file-row, #main .note-meta')){
+    const r = el.getBoundingClientRect(); if(r.bottom > 70){ anchor = {el, top: r.top}; break; }
+  }
+  UI.fullNow = !!on; saveLS('noteFull', UI.fullNow);
+  document.documentElement.classList.toggle('note-full', UI.fullNow);
+  $$('#main .ed-full').forEach(b => { b.outerHTML = fullBtnHTML(); });
+  if(anchor && anchor.el.isConnected) window.scrollBy(0, anchor.el.getBoundingClientRect().top - anchor.top);
+}
+document.addEventListener('keydown', e => {
+  if(e.key !== 'Escape' || !UI.fullNow || route().name !== 'note' || dlg.open || cropDlg.open || menu || RD.open) return;
+  if(e.target.closest && e.target.closest('.ql-tooltip')) return;
+  setFull(false);
+});
+
 /* ---------- Профиль ---------- */
 VIEWS.profile = () => {
   const u = me();
   const inv = S.invites.slice().sort((a, b) => String(b.created).localeCompare(String(a.created)));
   const myNotes = S.notes.filter(n => n.owner === u.id).length;
+  const used = i => (i.used_by || []).map(id => S.users.find(x => x.id === id)).filter(Boolean);
   return `<header class="head"><h1>Профиль</h1></header>
-    <section class="card me-card"><span class="me" aria-hidden="true">${esc((String(u.name || u.email || '?').trim()[0] || '?').toUpperCase())}</span>
+    <section class="card me-card">
+      <button type="button" class="face-btn" data-act="avatar" aria-label="Фото профиля" aria-haspopup="menu" title="Фото профиля">${faceHTML(u, 'lg')}<span class="face-cam" aria-hidden="true">${ICON.camera}</span></button>
       <div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span><small>${isAdmin() ? 'Администратор библиотеки' : 'Читатель'}</small></div>
-      <button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя">${ICON.pen}</button></section>
+      <button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя" title="Изменить имя">${ICON.pen}</button></section>
     <section class="card"><h2>Оформление</h2>
       <div class="seg3" role="radiogroup" aria-label="Тема">${[['light','Светлая'],['dark','Тёмная'],['auto','Как в системе']].map(([k, l]) =>
         `<input type="radio" name="p-theme" id="p-theme-${k}" value="${k}"${themePref() === k ? ' checked' : ''}><label for="p-theme-${k}">${l}</label>`).join('')}</div></section>
@@ -517,7 +709,13 @@ VIEWS.profile = () => {
       <div class="field"><label for="i-exp">Действует до (необязательно)</label><input type="date" id="i-exp"></div>
       <button type="button" class="btn primary" data-act="new-invite">Создать и скопировать ссылку</button>
       <div>${inv.length ? inv.map(i => `<div class="inv"><code>${esc(i.code)}</code><span class="muted">${i.note ? esc(i.note) + ' · ' : ''}использовано ${i.uses || 0}${i.max_uses > 0 ? ' из ' + i.max_uses : ', без ограничения'}${i.expires ? ' · до ' + fmtDate(i.expires) : ''}</span>
+        ${used(i).length ? `<span class="inv-who">${used(i).map(x => `<span class="who-chip">${faceHTML(x, 'xs')}${esc(x.name || x.email)}</span>`).join('')}</span>` : ''}
         <div class="acts"><button type="button" class="btn sm" data-act="copy-invite" data-code="${esc(i.code)}">Скопировать ссылку</button><button type="button" class="btn sm ghost danger" data-act="del-invite" data-id="${esc(i.id)}">Удалить</button></div></div>`).join('') : '<p class="hint">Приглашений пока нет.</p>'}</div>
+    </div></details>
+    <details class="fold" id="users-fold"${UI.usersOpen ? ' open' : ''}><summary><span>Пользователи · ${S.users.length}</span>${ICON.chev}</summary><div class="fold-body">
+      ${S.users.map(x => `<div class="user-row">${faceHTML(x, 'md')}<span class="ur-t"><b>${esc(x.name || 'Без имени')}</b><small>${esc(x.email)}</small>
+        <small>${x.role === 'admin' ? 'администратор' : 'читатель'} · с ${esc(fmtDate(x.created))}</small></span></div>`).join('') || '<p class="hint">Пока никого.</p>'}
+      <p class="hint">Удалить пользователя можно в панели администратора: <a href="/_/" target="_blank" rel="noopener">${esc(location.host)}/_/</a>, коллекция users.</p>
     </div></details>` : ''}
     <details class="fold"><summary><span>Сменить пароль</span>${ICON.chev}</summary><div class="fold-body">
       <div class="field"><label for="p-old">Текущий пароль</label><input type="password" id="p-old" autocomplete="current-password"></div>
@@ -529,6 +727,8 @@ VIEWS.profile = () => {
     <p class="hint"><a href="/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a></p>`;
 };
 async function loadInvites(){ try { S.invites = await pb.collection('invites').getFullList(); schedule(); } catch(e){} }
+async function loadUsers(){ try { S.users = await pb.send('/api/knigi/admin/users', {}); schedule(); } catch(e){} }
+async function loadOwner(){ try { S.owner = await pb.send('/api/knigi/owner', {}); schedule(); } catch(e){} }
 async function loadDisk(){ try { S.disk = await pb.send('/api/knigi/disk', {}); schedule(); } catch(e){} }
 
 /* ---------- Журнал чтения (только администратор) ---------- */
@@ -617,7 +817,7 @@ VIEWS.note = r => {
   const pageLink = p => b && b.format === 'pdf' && p ? `<a class="page-link" href="#/read/${b.id}?p=${p}">с. ${p}</a>` : p ? `с. ${p}` : '';
   if(!own){
     return `${backLink(back, b ? b.title : 'Заметки')}
-      <article class="card note-view"><p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'} автора библиотеки</p>
+      <article class="card note-view"><div class="note-top">${S.owner ? faceHTML(S.owner, 'xs') : ''}<p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'} автора библиотеки</p><span class="ed-state"></span>${fullBtnHTML()}</div>
         <h1>${esc(n.title || 'Без заголовка')}</h1><p class="note-meta">${bookLine}${n.page ? ' · ' + pageLink(n.page) : ''} · изменено ${esc(fmtWhen(n.updated))}</p>
         <div class="prose" id="note-body"><p class="muted">Загружаю…</p></div></article>
       ${kind === 'lesson' ? filesBlock(n, false) : ''}`;
@@ -668,9 +868,10 @@ async function edMount(r){
   ED.quill = q;
   // русские подсказки на кнопках
   const tips = {'.ql-header[value="2"]': 'Заголовок', '.ql-header[value="3"]': 'Подзаголовок', '.ql-bold': 'Жирный', '.ql-italic': 'Курсив', '.ql-underline': 'Подчёркнутый',
-    '.ql-list[value="bullet"]': 'Маркированный список', '.ql-list[value="ordered"]': 'Нумерованный список', '.ql-blockquote': 'Цитата', '.ql-link': 'Ссылка', '.ql-undo': 'Отменить'};
+    '.ql-list[value="bullet"]': 'Список', '.ql-list[value="ordered"]': 'Нумерованный список', '.ql-blockquote': 'Цитата', '.ql-link': 'Ссылка', '.ql-undo': 'Отменить'};
   for(const [s, t] of Object.entries(tips)){ const el = box.querySelector(s); if(el){ el.title = t; el.setAttribute('aria-label', t); } }
-  const hb = box.querySelectorAll('.ql-header'); if(hb[0]) hb[0].innerHTML = '<b>З</b>'; if(hb[1]) hb[1].innerHTML = '<b>з</b>';
+  const hb = box.querySelectorAll('.ql-header'); if(hb[0]) hb[0].innerHTML = '<b class="h1">З1</b>'; if(hb[1]) hb[1].innerHTML = '<b class="h2">З2</b>';
+  const tb = box.querySelector('.ql-toolbar'); if(tb) tb.insertAdjacentHTML('beforeend', `<span class="ql-formats ed-full-wrap">${fullBtnHTML()}</span>`);
   const ub = box.querySelector('.ql-undo'); if(ub) ub.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 7L4 12l5 5"/><path d="M4 12h10a6 6 0 0 1 0 12h-2" transform="translate(0 -6)"/></svg>';
   let html = rec ? rec.body || '' : '';
   // новая заметка из читалки с выделенной цитатой
@@ -719,7 +920,7 @@ async function edSave(){
       const kind = isAdmin() && r.q.get('kind') === 'lesson' ? 'lesson' : 'note';
       rec = await pb.collection('notes').create({id, owner: me().id, kind, book: r.q.get('book') || '', ...d});
       ED.isNew = false;
-      if(route().name === 'note' && route().id === 'new') history.replaceState(null, '', '#/note/' + id);
+      if(route().name === 'note' && route().id === 'new'){ history.replaceState(null, '', '#/note/' + id); UI.fullFor = id; }
     } else {
       rec = await pb.collection('notes').update(id, d);
     }
@@ -743,6 +944,7 @@ function noteMenu(btn){
   const n = ED.rec; const own = !n || n.owner === me().id;
   if(!own) return;
   const items = [];
+  items.push({label: UI.fullNow ? 'Свернуть' : 'На весь экран', run: () => setFull(!UI.fullNow)});
   if(isAdmin()) items.push({label: 'Настройки', run: () => noteSettings()});
   items.push({label: n && n.book ? 'Сменить книгу' : 'Привязать к книге', run: () => pickBook(n)});
   if(n) items.push({label: n.kind === 'lesson' ? 'Удалить урок' : 'Удалить заметку', danger: true, run: () => openForm({title: n.kind === 'lesson' ? 'Удалить урок?' : 'Удалить заметку?',
@@ -1431,6 +1633,7 @@ function rdNote(){
   let sel = window.getSelection && String(window.getSelection() || '').trim();
   if(!sel && RD.sel && Date.now() - RD.sel.at < 15e3) sel = RD.sel.text;
   UI.quote = isAdmin() && sel ? sel.slice(0, 3000) : '';
+  UI.normalOnce = true;
   rdSave(false);
   go(`#/note/new?book=${RD.src.id}&page=${RD.page}`);
 }
@@ -1782,6 +1985,8 @@ document.addEventListener('click', async e => {
       try { await pb.collection('note_files').delete(f.id); removeLocal('nfiles', f.id); upPaint(); toast('Файл удалён'); } catch(err){ toast(errText(err)); }
       break;
     }
+    case 'avatar': avatarMenu(a); break;
+    case 'note-full': setFull(!UI.fullNow); break;
     case 'edit-name': openForm({title: 'Имя', fields: [{key: 'name', label: 'Как вас называть', max: 100}], values: {name: me().name || ''},
       async onSave(v){ const rec = await pb.collection('users').update(me().id, {name: v.name}); pb.authStore.save(pb.authStore.token, rec); render(true); }}); break;
     default: accountAction(a, d);
@@ -1802,7 +2007,8 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('toggle', e => {
   // событие приходит и при отрисовке уже раскрытого блока: реагируем только на настоящее изменение
-  if(e.target.id === 'inv-fold' && e.target.open !== UI.invOpen){ UI.invOpen = e.target.open; if(UI.invOpen && isAdmin()) loadInvites(); }
+  if(e.target.id === 'inv-fold' && e.target.open !== UI.invOpen){ UI.invOpen = e.target.open; if(UI.invOpen && isAdmin()){ loadInvites(); loadUsers(); } }
+  if(e.target.id === 'users-fold' && e.target.open !== UI.usersOpen){ UI.usersOpen = e.target.open; if(UI.usersOpen && isAdmin()) loadUsers(); }
   if(e.target.classList && e.target.classList.contains('desc')) UI.descOpen = e.target.open;
 }, true);
 window.addEventListener('hashchange', () => { if(route().name === 'profile' && isAdmin()) loadDisk(); });

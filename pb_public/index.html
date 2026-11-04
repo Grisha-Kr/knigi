@@ -13,9 +13,10 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="referrer" content="same-origin">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" href="/icons/favicon-64.png?v=1" type="image/png">
-<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=1">
-<link rel="stylesheet" href="/app.css?v=1">
+<link rel="icon" href="/icons/favicon-32.png?v=2" sizes="32x32" type="image/png">
+<link rel="icon" href="/icons/favicon-64.png?v=2" sizes="64x64" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=2">
+<link rel="stylesheet" href="/app.css?v=2">
 <script>try{var t=JSON.parse(localStorage.getItem('kn_theme')||'""');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
 </head>
 <body>
@@ -40,9 +41,22 @@
 <section class="reader" id="reader" hidden aria-label="Читалка"></section>
 
 <dialog id="dlg"><form id="dlg-form" novalidate></form></dialog>
+<dialog id="crop" aria-labelledby="crop-title">
+  <div class="crop-head"><button type="button" class="crop-link" id="crop-cancel">Отмена</button><h2 id="crop-title">Фото профиля</h2><button type="button" class="crop-link strong" id="crop-done">Готово</button></div>
+  <div class="crop-body">
+    <div class="crop-stage" id="crop-stage"><img id="crop-img" alt="Фото для обрезки"><span class="crop-ring" aria-hidden="true"></span><p class="crop-msg" id="crop-msg" hidden></p></div>
+    <p class="crop-hint">Передвиньте фото пальцем или мышью, чтобы лицо оказалось в круге. Увеличить можно ползунком, двумя пальцами или колесом мыши.</p>
+    <div class="crop-zoom">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M8 11h6M16 16l4 4"/></svg>
+      <label for="crop-z" class="sr">Увеличение</label><input type="range" id="crop-z" min="1" max="4" step="0.01" value="1">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M8 11h6M11 8v6M16 16l4 4"/></svg>
+    </div>
+    <label class="crop-link upload" for="crop-file">Выбрать другое фото<input type="file" id="crop-file" accept="image/*,.heic,.heif"></label>
+  </div>
+</dialog>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="/vendor/pocketbase.umd.js"></script>
-<script src="/app.js?v=1"></script>
+<script src="/app.js?v=2"></script>
 </body>
 </html>

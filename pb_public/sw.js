@@ -2,8 +2,8 @@
 // чтобы приложение быстро открывалось. Данные и файлы (/api/) никогда не кэшируются:
 // книги, их страницы, обложки и файлы уроков идут только через /api/, поэтому в памяти
 // телефона от них ничего не остаётся.
-const VERSION = 'knigi-v1';
-const SHELL = ['/', '/index.html', '/app.css?v=1', '/app.js?v=1', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=1'];
+const VERSION = 'knigi-v2';
+const SHELL = ['/', '/index.html', '/app.css?v=2', '/app.js?v=2', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

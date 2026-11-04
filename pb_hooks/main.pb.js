@@ -404,6 +404,38 @@ routerAdd("GET", "/api/knigi/admin/log", (e) => {
   });
 }, $apis.requireAuth("users"));
 
+/* ---------- Фото профиля (правки 1.1) ---------- */
+// Файл защищённый, а чужие записи users через API не читает никто, поэтому фото отдаёт этот маршрут:
+// своё фото каждому, любое фото администратору, фото администратора всем вошедшим
+// (оно стоит рядом с «Заметками автора библиотеки»). Чужое фото читателя другой читатель не получит.
+routerAdd("GET", "/api/knigi/users/{id}/avatar", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  let u = null;
+  try { u = $app.findRecordById("users", e.request.pathValue("id")); } catch (_) {}
+  const ok = u && (u.id === e.auth.id || lib.isAdmin(e.auth) || lib.isAdmin(u));
+  const name = ok ? u.getString("avatar") : "";
+  if (!name || $app.settings().s3.enabled) throw new NotFoundError("Фото нет.");
+  e.response.header().set("Cache-Control", "private, no-store");
+  e.response.header().set("X-Content-Type-Options", "nosniff");
+  return e.fileFS($os.dirFS($filepath.join($app.dataDir(), "storage", u.baseFilesPath())), name);
+}, $apis.requireAuth("users"));
+
+// Кто администратор библиотеки: имя и есть ли фото (для «Заметок автора библиотеки»).
+routerAdd("GET", "/api/knigi/owner", (e) => {
+  const list = $app.findRecordsByFilter("users", "role = 'admin'", "created", 1, 0);
+  if (!list.length) return e.json(200, {});
+  const u = list[0];
+  return e.json(200, { id: u.id, name: u.getString("name"), avatar: u.getString("avatar") });
+}, $apis.requireAuth("users"));
+
+// Все пользователи с фото (только администратору): раздел «Пользователи» и имена у приглашений.
+routerAdd("GET", "/api/knigi/admin/users", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const users = $app.findRecordsByFilter("users", "id != ''", "created", 0, 0);
+  return e.json(200, users.map((u) => ({ id: u.id, name: u.getString("name"), email: u.getString("email"), role: u.getString("role"),
+    avatar: u.getString("avatar"), created: u.getString("created") })));
+}, $apis.requireAuth("users"));
+
 /* ---------- Прочее ---------- */
 // Сведения для экрана входа и политики конфиденциальности.
 routerAdd("GET", "/api/knigi/setup", (e) => {
