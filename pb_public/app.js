@@ -76,7 +76,7 @@ const loadLS = (k, d) => { try { const v = localStorage.getItem('kn_'+k); return
 const saveLS = (k, v) => { try { localStorage.setItem('kn_'+k, JSON.stringify(v)); } catch(e){} };
 const dropLS = k => { try { localStorage.removeItem('kn_'+k); } catch(e){} };
 const UI = {hops:0, q:'', reorder:'', booksView: loadLS('booksView', 'grid'), booksSort: loadLS('booksSort', 'title'), booksFmt:'', booksScan:false,
-  tab:'notes', notesQ:'', notesKind:'', notesHits:null, logQ:{days:7, user:'', book:''}, log:null, descOpen:false,
+  tab:'notes', notesQ:'', notesKind:'', notesHits:null, cardFrom:{}, logQ:{days:7, user:'', book:''}, log:null, descOpen:false,
   cardFmt:{}, hlColor:'', hlThought:false, hlOpen:new Set(), noteCtx:null,
   fullFor:'', fullNow:false, normalOnce:false};
 const pb = new PocketBase(location.origin);
@@ -216,6 +216,7 @@ async function boot(){
 }
 async function startApp(){
   $('#auth').hidden = true; $('#app').hidden = false;
+  curRoute = route(); readerHistory(null);
   themeFromUser();
   buildNav();
   render(true);
@@ -285,7 +286,41 @@ function route(){
 }
 const go = (hash, replace) => { if(replace) location.replace(hash); else location.hash = hash; };
 function goBack(fallback){ if(UI.hops > 0) history.back(); else go(fallback, true); }
-window.addEventListener('hashchange', () => { UI.hops++; UI.reorder = ''; closeMenu(); render(true); if(route().name !== 'read' && route().name !== 'pdf') window.scrollTo(0, 0); });
+// История переходов для книги: читалка всегда стоит сразу после карточки этой книги.
+// Поэтому «Назад» в читалке, кнопка «Назад» браузера и жест назад на iPhone ведут в карточку,
+// а из карточки «Назад» ведёт туда, откуда пришли (главная, полка, автор, поиск), без петель.
+let curRoute = null;
+function readerHistory(prev){
+  const r = route();
+  if(r.name !== 'read' || !r.id) return;
+  if(history.state && history.state.kn) return; // вернулись на запись читалки, которая уже стоит после карточки
+  const h = location.hash;
+  if(prev && prev.name === 'b' && prev.id === r.id){ history.replaceState({kn: 1}, '', h); return; }
+  // открыли не из карточки (например, «Продолжить чтение» или ссылка из заметки): карточка встаёт перед читалкой
+  // knRoot: карточку вставили первой записью приложения, её «Назад» ведёт на главную, а не за пределы приложения
+  history.replaceState(prev ? null : {knRoot: 1}, '', '#/b/' + r.id);
+  history.pushState({kn: 1}, '', h);
+}
+// Откуда пришли в карточку книги: подпись и адрес её кнопки «Назад»
+function noteCardFrom(prev, cur){
+  if(cur.name !== 'b' || !prev || prev.name === 'read' || (prev.name === 'b' && prev.id === cur.id)) return;
+  UI.cardFrom[cur.id] = prev;
+}
+window.addEventListener('hashchange', () => {
+  const prev = curRoute; curRoute = route();
+  readerHistory(prev); noteCardFrom(prev, curRoute);
+  UI.hops++; UI.reorder = ''; closeMenu(); render(true); if(route().name !== 'read' && route().name !== 'pdf') window.scrollTo(0, 0);
+});
+// «Назад» из читалки книги: в карточку этой книги (шагом назад по истории, если карточка стоит перед читалкой)
+function readerBack(){
+  const r = route();
+  rdClose();
+  if(r.name === 'read' && r.id){
+    if(history.state && history.state.kn) history.back(); else go('#/b/' + r.id, true);
+    return;
+  }
+  goBack((READER.mode === 'epub' ? EP.back : RD.back) || '#/');
+}
 
 /* ---------- Отрисовка ---------- */
 const VIEWS = {};
@@ -540,7 +575,10 @@ VIEWS.b = r => {
   const tabs = [['notes', 'Заметки'], ...(isAdmin() ? [['lessons', 'Уроки']] : []), ['highlights', 'Выделения']];
   const emptyText = {notes: 'Заметок к этой книге пока нет.', lessons: 'Уроков к этой книге пока нет.',
     highlights: hlAll.length ? 'Под этот фильтр выделений нет.' : 'Выделений пока нет. Откройте книгу, выделите текст и выберите цвет. На телефоне нажмите «Маркер» и проведите пальцем по строкам.'}[tab];
-  return `${backLink('#/', 'Библиотека')}
+  const from = UI.cardFrom[b.id];
+  const fromText = !from ? 'Библиотека' : from.name === 'sh' ? ((byId('shelves', from.id) || {}).name || 'Полка') : from.name === 'a' ? ((byId('authors', from.id) || {}).name || 'Автор')
+    : {books: 'Все книги', notes: 'Заметки', note: 'Заметка', shelves: 'Полки', authors: 'Авторы', profile: 'Профиль', log: 'Журнал чтения'}[from.name] || 'Библиотека';
+  return `${backLink('#/', fromText)}
     <article class="book">
       <div class="book-cover">${coverHTML(b, 'lg')}</div>
       <div class="book-info">
@@ -1596,7 +1634,7 @@ function rdShell(){
   const box = $('#reader');
   const book = RD.src.kind === 'book';
   box.innerHTML = `<div class="rd-top"><button type="button" class="icon-btn" data-rd="close" aria-label="Закрыть книгу" title="Закрыть книгу">${ICON.back}</button>
-      <h1 class="rd-title" id="rd-title"></h1>
+      <h1 class="rd-title"><button type="button" class="rd-title-btn" data-rd="close" id="rd-title" title="Карточка книги"></button></h1>
       <button type="button" class="icon-btn" data-rd="toc" id="rd-toc" aria-label="Оглавление" title="Оглавление" hidden>${ICON.toc}</button>
       ${book ? markerBtn() + `<button type="button" class="btn sm" data-rd="note" title="Заметка к этой странице">${ICON.pen}<span>Заметка</span></button>` : ''}
       <button type="button" class="icon-btn" data-rd="menu" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button></div>
@@ -1615,6 +1653,7 @@ function rdShell(){
 }
 function rdReaderClasses(){
   const box = $('#reader');
+  RD.bars = true; box.classList.remove('bars-off');
   box.classList.toggle('reader-free', isAdmin());
   box.classList.toggle('touch', touchUI());
   box.classList.toggle('dark-pages', !!loadLS('darkPages', false));
@@ -1622,6 +1661,8 @@ function rdReaderClasses(){
   box.classList.remove('marker');
 }
 function rdOpenScreen(){
+  // при каждом открытии книги панели видны (спрятать их можно нажатием в середину страницы)
+  if(!RD.open){ RD.bars = true; $('#reader').classList.remove('bars-off'); }
   $('#app').hidden = true; $('#reader').hidden = false; RD.open = true;
   document.documentElement.classList.add('reading');
 }
@@ -1875,14 +1916,14 @@ function rdMenu(btn){
   if(READER.mode === 'epub'){
     openMenu(btn, [
       {label: 'Оглавление', run: epToc},
-      {label: 'Карточка книги', run: () => go('#/b/' + EP.bookId)},
+      {label: 'Карточка книги', run: readerBack},
     ]);
     return;
   }
   openMenu(btn, [
     {label: dark ? 'Обычные страницы' : 'Тёмные страницы', run: () => { saveLS('darkPages', !dark); $('#reader').classList.toggle('dark-pages', !dark); }},
     {label: 'Перейти к странице', run: rdGoto},
-    ...(RD.src.kind === 'book' ? [{label: 'Карточка книги', run: () => go('#/b/' + RD.src.id)}] : []),
+    ...(RD.src.kind === 'book' ? [{label: 'Карточка книги', run: readerBack}] : []),
   ]);
 }
 
@@ -1913,9 +1954,10 @@ function hpShow(o){
   HP.el = el;
   const r = o.rect || {left: innerWidth / 2, right: innerWidth / 2, top: innerHeight / 2, bottom: innerHeight / 2};
   const w = el.offsetWidth, h = el.offsetHeight;
-  let top = r.top - h - 12;
-  if(top < 64) top = r.bottom + 12;
-  if(top + h > innerHeight - 8) top = Math.max(8, innerHeight - h - 70);
+  // выделение в верхней половине экрана: панель под ним, в нижней: над ним (с запасом на ручки выделения)
+  const gap = touchUI() ? 26 : 12;
+  let top = (r.top + r.bottom) / 2 < innerHeight / 2 ? r.bottom + gap : r.top - h - gap;
+  top = Math.max(8, Math.min(top, innerHeight - h - 8));
   el.style.top = top + 'px';
   el.style.left = Math.max(8, Math.min((r.left + r.right) / 2 - w / 2, innerWidth - w - 8)) + 'px';
 }
@@ -2243,7 +2285,7 @@ $('#reader').addEventListener('click', e => {
   const a = b.dataset.rd;
   if(a !== 'marker') hpHide();
   const ep = READER.mode === 'epub';
-  if(a === 'close'){ rdClose(); goBack((ep ? EP.back : RD.back) || '#/'); }
+  if(a === 'close') readerBack();
   else if(a === 'prev') ep ? epGo(-1) : rdGo(RD.page - 1);
   else if(a === 'next') ep ? epGo(1) : rdGo(RD.page + 1);
   else if(a === 'zin') ep ? epFont(1) : rdZoom(1.25);
@@ -2267,6 +2309,7 @@ $('#reader').addEventListener('touchstart', e => {
   if(RD.marker){ if(e.touches.length === 1 && e.target.closest('.rd-page')) e.preventDefault(); return; }
   if(e.touches.length === 2){ TP.pinch = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); TP.z = 1; return; }
   const t = e.touches[0]; TP.x = t.clientX; TP.y = t.clientY; TP.t = Date.now(); TP.moved = false; TP.pinch = 0;
+  TP.sel = !!String(window.getSelection() || '').trim();
 }, {passive: false});
 $('#reader').addEventListener('touchmove', e => {
   if(READER.mode !== 'pdf') return;
@@ -2289,6 +2332,7 @@ $('#reader').addEventListener('touchend', e => {
     return;
   }
   if(!e.target.closest('#rd-stage') || !e.changedTouches.length) return;
+  if(TP.sel || String(window.getSelection() || '').trim()) return; // тянут выделение, а не листают
   const t = e.changedTouches[0], dx = t.clientX - TP.x, dy = t.clientY - TP.y;
   if(RD.zoom === 1 && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5 && Date.now() - TP.t < 900){ rdGo(RD.page + (dx < 0 ? 1 : -1)); TP.swiped = Date.now(); }
 });
@@ -2303,7 +2347,7 @@ $('#reader').addEventListener('click', e => {
   const r = st.getBoundingClientRect(), x = (e.clientX - r.left) / r.width;
   if(x < 0.28) rdGo(RD.page - 1);
   else if(x > 0.72) rdGo(RD.page + 1);
-  else { RD.bars = !RD.bars; $('#reader').classList.toggle('bars-off', !RD.bars); }
+  else toggleBars();
 });
 $('#reader').addEventListener('wheel', e => {
   if(READER.mode !== 'pdf' || !(e.ctrlKey || e.metaKey)) return;
@@ -2365,7 +2409,7 @@ const epClean = s => String(s)
   .replace(/((?:xlink:)?href|src)\s*=\s*(["'])\s*javascript:[^"']*\2/gi, '$1=$2#$2');
 function epShell(){
   $('#reader').innerHTML = `<div class="rd-top"><button type="button" class="icon-btn" data-rd="close" aria-label="Закрыть книгу" title="Закрыть книгу">${ICON.back}</button>
-      <h1 class="rd-title" id="rd-title"></h1>
+      <h1 class="rd-title"><button type="button" class="rd-title-btn" data-rd="close" id="rd-title" title="Карточка книги"></button></h1>
       <button type="button" class="icon-btn" data-rd="toc" id="rd-toc" aria-label="Оглавление" title="Оглавление" hidden>${ICON.toc}</button>
       ${markerBtn()}<button type="button" class="btn sm" data-rd="note" title="Заметка к этому месту">${ICON.pen}<span>Заметка</span></button>
       <button type="button" class="icon-btn" data-rd="menu" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button></div>
@@ -2458,6 +2502,7 @@ async function epShow(r, b, again){
     await view.init({lastLocation: start, showTextStart: !start});
     if(hl) setTimeout(() => epFlash(hl), 300);
     epMarkDraw();
+    if(!loadLS('epHint', false)){ saveLS('epHint', true); setTimeout(() => toast('Нажатие в середину страницы прячет и показывает панели. Кнопка «Маркер» вверху выделяет текст пальцем.'), 600); }
     void own;
   } catch(e){
     if(EP.key !== key) return;
@@ -2553,11 +2598,23 @@ function epOnLoad(ev){
   // мышь: выделили и отпустили → панель
   doc.addEventListener('pointerup', e => { if(e.pointerType === 'mouse' && !EP.marker) setTimeout(() => epSelCheck(doc), 30); });
   doc.addEventListener('selectionchange', () => { if(touchUI() && !EP.marker){ clearTimeout(selT); selT = setTimeout(() => epSelCheck(doc), 600); } });
-  // «Маркер»: свои касания, листание foliate в это время не получает событий
-  const stopTouch = e => { if(EP.marker){ e.stopPropagation(); if(e.cancelable) e.preventDefault(); } };
-  doc.addEventListener('touchstart', stopTouch, {capture: true, passive: false});
-  doc.addEventListener('touchmove', stopTouch, {capture: true, passive: false});
-  doc.addEventListener('touchend', stopTouch, {capture: true, passive: false});
+  // Пока на странице есть выделение или включён «Маркер», касания не доходят до листания foliate:
+  // палец и ручки выделения двигают только выделение, страница стоит. Место страницы запоминается
+  // в начале касания и после отпускания восстанавливается, если что-то её всё же сдвинуло.
+  const hasSel = () => { const sl = doc.getSelection(); return !!sl && !sl.isCollapsed && !!String(sl).trim(); };
+  const guard = e => {
+    if(e.type === 'touchstart') EP.hold = null;
+    if(!(EP.marker || hasSel() || EP.hold != null)) return;
+    if(EP.hold == null && EP.view && EP.view.renderer) EP.hold = EP.view.renderer.start;
+    e.stopPropagation();
+    if(EP.marker && e.cancelable) e.preventDefault(); // в «Маркере» и системное выделение не начинается
+    if(e.type === 'touchend' || e.type === 'touchcancel'){ const at = EP.hold; EP.hold = null; setTimeout(() => epHoldPage(at), 60); }
+  };
+  for(const t of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) doc.addEventListener(t, guard, {capture: true, passive: false});
+  // касания пальцем не считаются «выделением мышью»: иначе foliate сам листает, когда выделение доходит до края
+  const stopPtr = e => { if(e.pointerType !== 'mouse') e.stopPropagation(); };
+  doc.addEventListener('pointerdown', stopPtr, true);
+  doc.addEventListener('pointerup', stopPtr, true);
   doc.addEventListener('pointerdown', e => epMkDown(e, doc, index), true);
   doc.addEventListener('pointermove', e => epMkMove(e, doc), true);
   doc.addEventListener('pointerup', e => epMkUp(e, doc, index), true);
@@ -2573,9 +2630,29 @@ function epOnLoad(ev){
       if(!fr || !st) return;
       const x0 = fr.getBoundingClientRect().left + e.clientX, sr = st.getBoundingClientRect(), x = (x0 - sr.left) / sr.width;
       if(x < 0.28) epGo(-1); else if(x > 0.72) epGo(1);
-      else { RD.bars = !RD.bars; $('#reader').classList.toggle('bars-off', !RD.bars); }
+      else toggleBars();
     }, 0);
   });
+}
+// Страница EPUB возвращается ровно туда, где была в начале касания (если её сдвинули при выделении)
+function epHoldPage(at){
+  const r = EP.view && EP.view.renderer;
+  if(at == null || !r || r.scrolled) return;
+  try {
+    const d = at - r.start;
+    if(Math.abs(d) >= 0.5) r.scrollBy(d, 0);
+    const size = r.size, off = r.start % size;
+    if(size > 0 && off > 1 && off < size - 1) r.snap(0, 0); // на всякий случай: ровно на границу страницы
+  } catch(e){}
+}
+// Нажатие в середину страницы прячет и показывает верхнюю и нижнюю панели (первые разы с подсказкой)
+function toggleBars(){
+  RD.bars = !RD.bars;
+  $('#reader').classList.toggle('bars-off', !RD.bars);
+  if(!RD.bars){
+    const n = loadLS('barsHint', 0);
+    if(n < 3){ saveLS('barsHint', n + 1); toast('Панели спрятаны. Нажмите в середину страницы, чтобы вернуть их.'); }
+  }
 }
 // Прямоугольник из координат страницы книги (фрейм) в координаты экрана
 function epScreenRect(range){
@@ -2959,7 +3036,10 @@ document.addEventListener('click', async e => {
   }
   // «Назад»: по истории, если пришли изнутри приложения
   const bk = e.target.closest('#main a[data-back]');
-  if(bk && UI.hops > 0 && !e.metaKey && !e.ctrlKey){ e.preventDefault(); history.back(); return; }
+  if(bk && !e.metaKey && !e.ctrlKey){
+    if(history.state && history.state.knRoot){ e.preventDefault(); go(bk.dataset.back, true); return; }
+    if(UI.hops > 0){ e.preventDefault(); history.back(); return; }
+  }
   const up = e.target.closest('#uploads [data-act]');
   const a = up || e.target.closest('#main [data-act]');
   if(!a || !S.loaded) return;

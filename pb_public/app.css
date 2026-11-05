@@ -497,6 +497,8 @@ dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 32px)}
 .rd-top{padding-top:calc(4px + env(safe-area-inset-top,0px));border-bottom:1px solid var(--line)}
 .rd-bottom{padding-bottom:calc(4px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line)}
 .rd-title{flex:1;min-width:0;font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--f-body)}
+.rd-title-btn{appearance:none;border:0;background:none;padding:0 6px;margin:0;min-height:44px;max-width:100%;font:inherit;color:inherit;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left;display:block;border-radius:10px}
+.rd-title-btn:hover{background:color-mix(in srgb,var(--ink) 7%,transparent)}
 .rd-sp{flex:1}
 .rd-num{appearance:none;border:0;background:none;min-height:44px;min-width:96px;padding:0 10px;border-radius:10px;font-weight:600;font-variant-numeric:tabular-nums;cursor:pointer}
 .rd-num:hover{background:color-mix(in srgb,var(--ink) 7%,transparent)}
