@@ -187,8 +187,9 @@ function checkPlan(e) {
   const fmt = r.getString("format");
   let f = null;
   try { f = $app.findFirstRecordByFilter("book_files", "book = {:b} && format = {:f}", { b: gb.getString("book"), f: fmt }); } catch (_) {}
-  if (!f) throw new BadRequestError(`У книги нет файла ${fmt === "epub" ? "EPUB" : "PDF"}.`);
-  if (fmt === "pdf") {
+  const V = require(`${__hooks}/convert_lib.js`);
+  if (!f) throw new BadRequestError(`У книги нет файла ${V.FMT_NAME[fmt] || fmt}.`);
+  if (V.VIEW[fmt] === "pdf") {
     const p = r.getInt("page"), max = f.getInt("pages");
     if (p < 1 || (max && p > max)) throw new BadRequestError(max ? `Страница от 1 до ${max}.` : "Укажите страницу.");
     r.set("pct", 0);
@@ -225,7 +226,7 @@ function recordRead(userId, book, fmt, body, oldPct, newPct, pages) {
       .bind({ id: $security.randomStringWithAlphabet(15, "abcdefghijklmnopqrstuvwxyz0123456789"), u: userId, b: book.id, d: day, t }).execute();
     const row = $app.findFirstRecordByFilter("group_reads", "user = {:u} && book = {:b} && day = {:d}", { u: userId, b: book.id, d: day });
     const seen = (Array.isArray(body.seen) ? body.seen : []).map((x) => parseInt(x, 10)).filter((x) => x > 0 && (!pages || x <= pages)).slice(0, 500);
-    if (fmt === "pdf") {
+    if (require(`${__hooks}/convert_lib.js`).VIEW[fmt] === "pdf") {
       let list = [];
       try { list = JSON.parse(toString(row.get("pages")) || "[]"); } catch (_) { list = []; }
       if (!Array.isArray(list)) list = [];
@@ -264,10 +265,13 @@ function groupState(app, g, day, from) {
       if (read) u.days.push(r.getString("day"));
       if (r.getString("day") === day) u.today = { pages: r.getInt("pdf_n"), pct: growth, read };
     }
-    for (const r of app.findRecordsByFilter("reading", "book = {:b}", "", 0, 0, { b: bookId })) {
+    // pdf: читалка PDF (PDF, DjVu), epub: читалка EPUB (EPUB, FB2, MOBI, AZW3, TXT); если форматов одной
+    // читалки несколько, берётся самый свежий; f = какой именно формат
+    const VIEW = require(`${__hooks}/convert_lib.js`).VIEW;
+    for (const r of app.findRecordsByFilter("reading", "book = {:b}", "updated", 0, 0, { b: bookId })) {
       const u = out[r.getString("user")]; if (!u) continue;
-      if (r.getString("format") === "epub") u.epub = { pct: r.getFloat("pct"), at: r.getString("updated") };
-      else u.pdf = { page: r.getInt("page"), pages: r.getInt("pages"), at: r.getString("updated") };
+      if (VIEW[r.getString("format")] === "epub") u.epub = { pct: r.getFloat("pct"), at: r.getString("updated"), f: r.getString("format") };
+      else u.pdf = { page: r.getInt("page"), pages: r.getInt("pages"), at: r.getString("updated"), f: r.getString("format") || "pdf" };
     }
   }
   return { book: bookId, day, from, members: out };

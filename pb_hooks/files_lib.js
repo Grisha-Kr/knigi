@@ -254,10 +254,15 @@ function cleanLog() {
 // в конце склеивает. Так большой файл не упирается в ограничение времени одного запроса,
 // оборвавшийся кусок отправляется заново, а память сервера не расходуется.
 const CHUNK = 8 * MB;
+// Форматы книг (правки 3.1): PDF, EPUB, DjVu (переводится в PDF), FB2, MOBI, AZW3, TXT (переводятся в EPUB).
+// FB2 и TXT до 200 МБ: перевод держит текст в памяти, а больше текста в одной книге не бывает.
+const BOOK_EXTS = ["pdf", "epub", "djvu", "djv", "fb2", "fbz", "zip", "mobi", "azw3", "txt"];
+const BOOK_ABOUT = "PDF, EPUB, DjVu, FB2, MOBI, AZW3 или TXT до 500 МБ";
+const TEXT_MAX = 200 * MB;
 const KINDS = {
-  book: { exts: ["pdf", "epub", "djvu", "djv"], max: 500 * MB, about: "PDF, EPUB или DjVu до 500 МБ" },
+  book: { exts: BOOK_EXTS, max: 500 * MB, about: BOOK_ABOUT },
   // книга от читателя (правки 2.2): те же форматы и размер, попадает на проверку администратору
-  offer: { exts: ["pdf", "epub", "djvu", "djv"], max: 500 * MB, about: "PDF, EPUB или DjVu до 500 МБ" },
+  offer: { exts: BOOK_EXTS, max: 500 * MB, about: BOOK_ABOUT },
   file: { exts: ["pdf", "doc", "docx", "ppt", "pptx", "jpg", "jpeg", "png", "webp", "gif", "heic"], max: 50 * MB,
     about: "PDF, DOC, DOCX, PPT, PPTX или изображение до 50 МБ" },
 };
@@ -299,10 +304,14 @@ function startUpload(e, body) {
   const rule = KINDS[kind];
   const name = String(body.name || "").trim().slice(0, 300);
   const size = parseInt(body.size, 10) || 0;
+  const C = require(`${__hooks}/convert_lib.js`);
   const ext = extOf(name);
-  if (rule.exts.indexOf(ext) < 0) throw new BadRequestError(`Подходит ${rule.about}. Файл «${name}» не подходит.`);
+  const bookKind = kind === "book" || kind === "offer";
+  const bf = bookKind ? C.fmtOfName(name) : null;
+  if (rule.exts.indexOf(ext) < 0 || (bookKind && !bf.fmt)) throw new BadRequestError(`Подходит ${rule.about}. Файл «${name}» не подходит.`);
   if (size <= 0) throw new BadRequestError("Файл пустой.");
   if (size > rule.max) throw new BadRequestError(`Файл «${name}» больше, чем можно: ${rule.about}.`);
+  if (bookKind && (bf.fmt === "fb2" || bf.fmt === "txt") && size > TEXT_MAX) throw new BadRequestError(`Файл «${name}» слишком большой для ${C.FMT_NAME[bf.fmt]}: можно до 200 МБ.`);
   let note = "", book = "";
   if (kind === "offer") {
     // роль проверяет маршрут: предлагают читатели, администратор добавляет книги сам
@@ -314,9 +323,9 @@ function startUpload(e, body) {
     let b = null;
     try { b = $app.findRecordById("books", String(body.book)); } catch (_) {}
     if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
-    const fmt = ext === "djv" ? "djvu" : ext;
+    const fmt = bf.fmt;
     if ($app.countRecords("book_files", $dbx.hashExp({ book: b.id, format: fmt })) > 0) {
-      throw new BadRequestError(`У этой книги уже есть файл ${fmt.toUpperCase()}. Сначала уберите его, потом загрузите новый.`);
+      throw new BadRequestError(`У этой книги уже есть файл ${C.FMT_NAME[fmt]}. Сначала уберите его, потом загрузите новый.`);
     }
     book = b.id;
   }
@@ -331,7 +340,7 @@ function startUpload(e, body) {
   const up = $security.randomStringWithAlphabet(20, ID_ABC);
   const dir = $filepath.join(uploadsDir(), up);
   $os.mkdirAll(dir, 0o750);
-  const meta = { user: e.auth.id, kind, name, size, ext: ext === "djv" ? "djvu" : ext, note, book, chunks: Math.ceil(size / CHUNK), at: Date.now() };
+  const meta = { user: e.auth.id, kind, name, size, ext: bf ? bf.ext : ext, fmt: bf ? bf.fmt : "", note, book, chunks: Math.ceil(size / CHUNK), at: Date.now() };
   if (kind === "offer") meta.note = note;
   $os.writeFile($filepath.join(dir, "meta.json"), JSON.stringify(meta), 0o640);
   return { upload: up, chunk: CHUNK, chunks: meta.chunks };
@@ -410,11 +419,17 @@ function finishUpload(e, up) {
     return { id, kind: "file" };
   }
   // у первого файла новой книги тот же номер, что у книги (так было и на этапе 1)
+  const C = require(`${__hooks}/convert_lib.js`);
   const id = newId();
-  const fmt = meta.ext === "djvu" ? "djvu" : meta.ext;
-  const file = `${id}.${fmt}`;
+  const fmt = meta.fmt || C.fmtOfName(meta.name).fmt || meta.ext;
+  // файл лежит с расширением оригинала (ID.pdf, ID.djvu, ID.fbz …); обработка переведёт его для читалки
+  const file = `${id}.${meta.ext}`;
   joinChunks(up, meta, $filepath.join(booksDir(), file));
   dropUpload(up);
+  if ((fmt === "mobi" || fmt === "azw3") && C.kindleDrm($filepath.join(booksDir(), file))) {
+    rmFile(booksDir(), file);
+    throw new BadRequestError("Эта книга защищена Kindle, загрузите версию без защиты.");
+  }
   if (meta.kind === "offer") return finishOffer(e, meta, id, fmt, file);
   const fileRec = (bookId) => {
     const f = new Record($app.findCollectionByNameOrId("book_files"));
@@ -431,7 +446,7 @@ function finishUpload(e, up) {
     let b = null;
     try { b = $app.findRecordById("books", meta.book); } catch (_) {}
     if (!b) { rmFile(booksDir(), file); throw new NotFoundError("Книга не найдена: возможно, её удалили."); }
-    try { $app.save(fileRec(b.id)); } catch (err) { rmFile(booksDir(), file); throw new BadRequestError(`У этой книги уже есть файл ${fmt.toUpperCase()}.`); }
+    try { $app.save(fileRec(b.id)); } catch (err) { rmFile(booksDir(), file); throw new BadRequestError(`У этой книги уже есть файл ${C.FMT_NAME[fmt] || fmt}.`); }
     syncBook(b.id);
     return { id: b.id, file: id, kind: "book" };
   }
@@ -568,26 +583,29 @@ function rejectOffer(e, id, reason) {
 }
 
 /* ---------- Сводка книги по её файлам ---------- */
-const FMT_ORDER = { pdf: 0, epub: 1, djvu: 2 };
-const FMT_NAME = { pdf: "PDF", epub: "EPUB", djvu: "DjVu" };
+const FMT_ORDER = { pdf: 0, epub: 1, djvu: 2, fb2: 3, mobi: 4, azw3: 5, txt: 6 };
+const FMT_NAME = { pdf: "PDF", epub: "EPUB", djvu: "DjVu", fb2: "FB2", mobi: "MOBI", azw3: "AZW3", txt: "TXT" };
+const VIEW = { pdf: "pdf", djvu: "pdf", epub: "epub", fb2: "epub", mobi: "epub", azw3: "epub", txt: "epub" };
 function filesOf(bookId, app) {
   return (app || $app).findRecordsByFilter("book_files", "book = {:b}", "", 0, 0, { b: bookId })
     .sort((x, y) => (FMT_ORDER[x.getString("format")] ?? 9) - (FMT_ORDER[y.getString("format")] ?? 9));
 }
-// Форматы, состояние, страницы, есть ли текст и откуда он берётся (PDF с текстом, иначе EPUB).
+// Форматы, состояние, страницы, есть ли текст и откуда он берётся: PDF со своим текстом, иначе
+// книга для читалки EPUB (EPUB, FB2, MOBI, AZW3, TXT), иначе DjVu со спрятанным текстом или распознанный скан.
 function syncBook(bookId, app) {
   app = app || $app;
   let b = null;
   try { b = app.findRecordById("books", bookId); } catch (_) { return; }
   const list = filesOf(bookId, app);
   const st = list.map((f) => f.getString("status"));
-  const pdf = list.find((f) => f.getString("format") === "pdf");
-  const epub = list.find((f) => f.getString("format") === "epub");
-  const djvu = list.find((f) => f.getString("format") === "djvu");
-  const text = pdf && pdf.getBool("has_text") ? pdf : epub && epub.getBool("has_text") ? epub : null;
+  const ok = (f) => f.getBool("has_text") && f.getString("status") === "ready";
+  const isPdf = (f) => VIEW[f.getString("format")] === "pdf";
+  const text = list.find((f) => ok(f) && f.getString("format") === "pdf" && !f.getBool("ocr")) ||
+    list.find((f) => ok(f) && VIEW[f.getString("format")] === "epub") || list.find((f) => ok(f) && isPdf(f)) || null;
+  const pdf = list.find((f) => isPdf(f) && f.getInt("pages") > 0);
   b.set("formats", list.map((f) => f.getString("format")));
   b.set("status", !list.length ? "error" : st.indexOf("processing") >= 0 ? "processing" : st.every((x) => x === "error") ? "error" : "ready");
-  b.set("pages", pdf ? pdf.getInt("pages") : djvu ? djvu.getInt("pages") : 0);
+  b.set("pages", pdf ? pdf.getInt("pages") : 0);
   b.set("has_text", !!text);
   b.set("text_file", text ? text.id : "");
   b.set("file_size", list.reduce((n, f) => n + f.getInt("file_size"), 0));
@@ -603,7 +621,8 @@ function tryLock() {
   let got = false;
   $app.store().setFunc("kn_proc", (old) => {
     const now = Date.now();
-    if (old && now - old < 20 * 60e3) return old;
+    // перевод большого DjVu идёт долго; если сервер перезапустится, замок пропадёт сам (он в памяти)
+    if (old && now - old < 6 * 3600e3) return old;
     got = true;
     return now;
   });
@@ -851,29 +870,66 @@ function optimizePdf(path, pages) {
 // Обработка одного файла книги. Название и авторы из файла ставятся, только если файл у книги
 // единственный, администратор не правил название и имя файла не вида «Автор - Название».
 // Год и описание заполняются, если пусто. Обложка из файла ставится, только если у книги её нет.
+// Правки 3.1: DjVu сначала переводится в PDF, FB2, MOBI, AZW3 и TXT в EPUB (tools/knigi_convert.py),
+// дальше всё как у PDF и EPUB. Оригинал остаётся рядом (orig_file), отпечаток считается по оригиналу.
 function processFile(f) {
   const lib = require(`${__hooks}/lib.js`);
+  const C = require(`${__hooks}/convert_lib.js`);
   const id = f.id;
   const bookId = f.getString("book");
-  const path = $filepath.join(booksDir(), f.getString("file"));
-  if (!exists(path)) throw new Error("файл книги не найден на диске");
   const fmt = f.getString("format");
+  const view = VIEW[fmt] || fmt;
+  let path = $filepath.join(booksDir(), f.getString("file"));
   const fromName = fromFileName(f.getString("orig_name"));
   const book0 = $app.findRecordById("books", bookId);
   const needCover = !book0.getString("cover");
   let title = "", authors = [], year = "", pages = 0, cover = "", hasText = false, note = "", description = "";
+  let fileName = f.getString("file"), origFile = f.getString("orig_file"), origSize = f.getInt("orig_size"), ocr = f.getBool("ocr");
 
-  // отпечаток исходного файла: по нему видны повторы
+  // отпечаток оригинала: по нему видны повторы
   let hash = "";
-  try { hash = run(["sha256sum", path], 600).split(/\s+/)[0]; } catch (_) {}
+  if (view !== fmt) {
+    // перевод: из оригинала (при повторной обработке он лежит в orig_file) в ID.pdf или ID.epub
+    const srcName = origFile || fileName;
+    const src = $filepath.join(booksDir(), srcName);
+    if (!exists(src)) throw new Error("файл книги не найден на диске");
+    try { hash = run(["sha256sum", src], 600).split(/\s+/)[0]; } catch (_) {}
+    beat();
+    const outName = `${id}.${view}`;
+    const out = $filepath.join(booksDir(), outName);
+    const tmp = out + ".part";
+    try { $os.remove(tmp); } catch (_) {}
+    let res;
+    try {
+      res = C.convert(fmt, src, tmp, id, { title: fromName.title, author: fromName.authors });
+      if (fileSize(tmp) <= 0) throw new Error("пустой файл после перевода");
+      $os.rename(tmp, out);
+    } catch (err) {
+      try { $os.remove(tmp); } catch (_) {}
+      throw new Error(String(err && err.message || err).replace(/^Error:\s*/, ""));
+    }
+    beat();
+    origFile = srcName;
+    origSize = fileSize(src);
+    fileName = outName;
+    path = out;
+    ocr = false; // файл собран заново: распознанного слоя в нём больше нет
+  } else {
+    if (!exists(path)) throw new Error("файл книги не найден на диске");
+    try { hash = run(["sha256sum", path], 600).split(/\s+/)[0]; } catch (_) {}
+    // у распознанного скана файл уже не тот, что загружали: отпечаток оставляем от оригинала
+    if (ocr && f.getString("hash")) hash = f.getString("hash");
+  }
   beat();
-  if (fmt === "pdf") {
+  if (view === "pdf") {
     const info = pdfInfo(path);
     pages = info.pages;
     note += optimizePdf(path, pages);
     beat();
-    if (goodTitle(info.title)) title = info.title;
-    authors = lib.splitAuthors(info.author); // год создания файла обычно не год книги: его не берём
+    if (fmt === "pdf") {
+      if (goodTitle(info.title)) title = info.title;
+      authors = lib.splitAuthors(info.author); // год создания файла обычно не год книги: его не берём
+    }
     beat();
     if (needCover) { try { cover = pdfCover(path, bookId); } catch (err) { note += "Обложка не получилась. "; } }
     beat();
@@ -881,28 +937,25 @@ function processFile(f) {
     if (!pages) pages = tx.total;
     hasText = pages > 0 && tx.withText / pages >= 0.2;
     if (!hasText) note += tx.withText ? "Текста мало: похоже на скан. " : "Скан без текста. ";
-  } else if (fmt === "epub") {
+  } else if (view === "epub") {
     const m = epubMeta(path, bookId, needCover);
-    if (goodTitle(m.title)) title = m.title;
-    authors = m.authors.slice(0, 10);
+    if (goodTitle(m.title) && fmt !== "txt") title = m.title;
+    authors = fmt === "txt" ? [] : m.authors.slice(0, 10);
     year = m.year;
     cover = m.cover;
     description = m.description;
     beat();
     try { hasText = epubText(path, id) >= 500; } catch (err) { $app.logger().warn("Текст EPUB не извлечён", "file", id, "error", String(err)); }
     if (!hasText) note += "В файле почти нет текста. ";
-  } else if (fmt === "djvu") {
-    const m = djvuMeta(path, bookId, needCover);
-    pages = m.pages;
-    cover = m.cover;
   }
   beat();
 
   // свежие записи: пока шла обработка, администратор мог поправить данные
   const r = $app.findRecordById("books", bookId);
   const only = $app.countRecords("book_files", $dbx.hashExp({ book: bookId })) <= 1;
-  // имя файла вида «Автор - Название» надёжнее свойств файла: тогда оставляем его
-  const untouched = only && r.getString("title") === fromName.title.slice(0, 500) && (fmt === "epub" || !fromName.authors);
+  // имя файла вида «Автор - Название» надёжнее свойств PDF; у EPUB, FB2, MOBI свойства надёжнее имени
+  const metaFirst = view === "epub" && fmt !== "txt";
+  const untouched = only && r.getString("title") === fromName.title.slice(0, 500) && (metaFirst || !fromName.authors);
   if (title && untouched) r.set("title", title.slice(0, 500));
   if (authors.length && untouched) r.set("authors", authors.map((n) => lib.authorId($app, n)));
   if (year && !r.getInt("year")) r.set("year", parseInt(year, 10));
@@ -913,6 +966,10 @@ function processFile(f) {
   }
   $app.save(r);
   const fr = $app.findRecordById("book_files", id);
+  fr.set("file", fileName);
+  fr.set("orig_file", origFile === fileName ? "" : origFile);
+  fr.set("orig_size", origFile && origFile !== fileName ? origSize : 0);
+  fr.set("ocr", ocr && hasText);
   fr.set("pages", pages);
   const size = fileSize(path);
   if (size > 0) fr.set("file_size", size); // после пересборки размер чуть меняется
@@ -937,11 +994,14 @@ function processQueue() {
   let done = 0;
   try {
     ensureDirs();
+    let paused = false;
     for (let guard = 0; guard < 1000; guard++) {
       const list = $app.findRecordsByFilter("book_files", "status = 'processing'", "created", 1, 0);
       if (!list.length) break;
       const f = list[0];
       beat();
+      // распознавание стоит на паузе, пока переводится новая книга: тяжёлая работа идёт по одной
+      if (!paused) { try { require(`${__hooks}/convert_lib.js`).ocrPause(true); } catch (_) {} paused = true; }
       try {
         processFile(f);
       } catch (err) {
@@ -956,6 +1016,7 @@ function processQueue() {
       }
       done++;
     }
+    if (paused) { try { require(`${__hooks}/convert_lib.js`).ocrPause(false); } catch (_) {} }
   } finally {
     unlock();
   }
@@ -988,7 +1049,8 @@ function deleteBook(e, book, notesMode) {
   const lib = require(`${__hooks}/lib.js`);
   const title = book.getString("title");
   const authorIds = book.getStringSlice("authors");
-  const files = filesOf(book.id).map((f) => ({ id: f.id, file: f.getString("file") }));
+  const files = filesOf(book.id).map((f) => ({ id: f.id, file: f.getString("file"), orig: f.getString("orig_file") }));
+  for (const f of files) { try { require(`${__hooks}/convert_lib.js`).ocrCancelFile(f.id, "Книгу удалили."); } catch (_) {} }
   $app.runInTransaction((tx) => {
     for (const n of tx.findAllRecords("notes", $dbx.hashExp({ book: book.id }))) {
       if (n.getString("owner") === e.auth.id && notesMode === "delete") { tx.delete(n); continue; }
@@ -1003,7 +1065,7 @@ function deleteBook(e, book, notesMode) {
     tx.db().newQuery("UPDATE book_offers SET book = '' WHERE book = {:b}").bind({ b: book.id }).execute();
     tx.delete(book); // файлы книги, места на полках и прогресс удаляются каскадом
   });
-  for (const f of files) { rmFile(booksDir(), f.file); rmFile(textDir(), f.id + ".txt"); }
+  for (const f of files) { rmFile(booksDir(), f.file); rmFile(booksDir(), f.orig); rmFile(textDir(), f.id + ".txt"); }
   rmFile(coversDir(), book.getString("cover"));
   lib.dropLonelyAuthors($app, authorIds);
 }
@@ -1021,6 +1083,7 @@ function formatInfo(f) {
 function removeFormat(f) {
   const bookId = f.getString("book"), fmt = f.getString("format");
   if (formatInfo(f).last) throw new BadRequestError("Это последний формат книги. Чтобы убрать его, удалите книгу целиком.");
+  try { require(`${__hooks}/convert_lib.js`).ocrCancelFile(f.id, "Формат убрали из книги."); } catch (_) {}
   $app.runInTransaction((tx) => {
     const q = { b: bookId, f: fmt };
     tx.db().newQuery("DELETE FROM notes WHERE book = {:b} AND format = {:f} AND kind = 'highlight'").bind(q).execute();
@@ -1029,6 +1092,7 @@ function removeFormat(f) {
     tx.delete(tx.findRecordById("book_files", f.id));
   });
   rmFile(booksDir(), f.getString("file"));
+  rmFile(booksDir(), f.getString("orig_file"));
   rmFile(textDir(), f.id + ".txt");
   syncBook(bookId);
 }
@@ -1074,6 +1138,7 @@ function mergeBooks(book, other) {
     db.newQuery(`DELETE FROM group_reads WHERE book = {:b} AND EXISTS (SELECT 1 FROM group_reads a WHERE a.book = {:a} AND a."user" = group_reads."user" AND a.day = group_reads.day)`).bind(q).execute();
     db.newQuery("UPDATE group_reads SET book = {:a} WHERE book = {:b}").bind(q).execute();
     db.newQuery("UPDATE book_offers SET book = {:a} WHERE book = {:b}").bind(q).execute();
+    db.newQuery("UPDATE ocr_jobs SET book = {:a}, book_title = {:t} WHERE book = {:b}").bind(q).execute();
     // отметки «Читаю» и «Прочитано»: если у человека есть отметка у первой книги, вторая просто убирается
     db.newQuery(`DELETE FROM marks WHERE book = {:b} AND EXISTS (SELECT 1 FROM marks m WHERE m.book = {:a} AND m."user" = marks."user")`).bind(q).execute();
     db.newQuery("UPDATE marks SET book = {:a} WHERE book = {:b}").bind(q).execute();
@@ -1105,5 +1170,6 @@ module.exports = {
   MAX_SPAN, EPUB_MAX, parseRange, noStore, takeBytes, logBytes, logPages, cleanLog,
   CHUNK, KINDS, startUpload, saveChunk, finishUpload, dropUpload, uploadDir, uploadKind, cleanUploads, fromFileName,
   OFFER_MAX, approveOffer, rejectOffer,
-  processQueue, replaceCover, deleteBook, filesOf, syncBook, FMT_NAME, formatInfo, removeFormat, mergeInfo, mergeBooks, htmlText,
+  processQueue, replaceCover, deleteBook, filesOf, syncBook, FMT_NAME, VIEW, formatInfo, removeFormat, mergeInfo, mergeBooks, htmlText,
+  pdfInfo, optimizePdf, pdfText, fileSize, newId,
 };

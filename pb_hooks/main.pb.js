@@ -118,7 +118,7 @@ onRecordEnrich((e) => {
 // Служебные поля файла книги (имя на диске, исходное имя, отпечаток) видит только администратор.
 onRecordEnrich((e) => {
   const auth = e.requestInfo.auth;
-  if (!(auth && (auth.isSuperuser() || auth.getString("role") === "admin"))) e.record.hide("orig_name", "hash", "file");
+  if (!(auth && (auth.isSuperuser() || auth.getString("role") === "admin"))) e.record.hide("orig_name", "hash", "file", "orig_file");
   e.next();
 }, "book_files");
 
@@ -214,8 +214,9 @@ routerAdd("GET", "/api/knigi/f/cover/{id}", (e) => {
   return e.fileFS($os.dirFS(F.coversDir()), name);
 });
 
-// Ссылка на файл книги нужного формата (?f=pdf|epub, без f: PDF): на 2 часа и только вместе с кукой,
-// которую ставит этот же ответ. В ключе ссылки номер файла (book_files).
+// Ссылка на файл книги нужного формата (?f=pdf|epub|djvu|fb2|mobi|azw3|txt, без f: PDF): на 2 часа и только
+// вместе с кукой, которую ставит этот же ответ. В ключе ссылки номер файла (book_files). DjVu отдаётся
+// переведённым в PDF, FB2, MOBI, AZW3 и TXT переведёнными в EPUB (правки 3.1): view говорит, какой читалкой открывать.
 routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   let b = null;
@@ -223,16 +224,17 @@ routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
   if (b && b.getBool("pending") && !require(`${__hooks}/lib.js`).isAdmin(e.auth)) b = null;
   if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
   const fmt = String((e.requestInfo().query || {}).f || "pdf");
-  if (fmt !== "pdf" && fmt !== "epub") throw new BadRequestError("Читалка для этого формата появится позже.");
+  const view = F.VIEW[fmt];
+  if (!view) throw new BadRequestError("Такой формат читалка не открывает.");
   let f = null;
   try { f = $app.findFirstRecordByFilter("book_files", "book = {:b} && format = {:f}", { b: b.id, f: fmt }); } catch (_) {}
-  if (!f) throw new NotFoundError(`У этой книги нет файла ${fmt.toUpperCase()}.`);
+  if (!f) throw new NotFoundError(`У этой книги нет файла ${F.FMT_NAME[fmt]}.`);
   if (f.getString("status") === "processing") throw new BadRequestError("Книга ещё обрабатывается. Попробуйте через минуту.");
   const size = F.exists($filepath.join(F.booksDir(), f.getString("file"))) ? f.getInt("file_size") : 0;
   if (!size) throw new NotFoundError("Файл книги не найден на сервере.");
-  if (fmt === "epub" && size > F.EPUB_MAX) throw new BadRequestError("Этот EPUB слишком большой для читалки.");
+  if (view === "epub" && size > F.EPUB_MAX) throw new BadRequestError("Эта книга слишком большая для читалки.");
   return e.json(200, { url: F.makeLink(e, "book", f.id, e.auth.id), size, ttl: F.LINK_TTL, mark: F.watermarkFor(e.auth), chunk: 512 * 1024,
-    file: f.id, format: fmt, whole: fmt === "epub" });
+    file: f.id, format: fmt, view, whole: view === "epub" });
 }, $apis.requireAuth("users"));
 
 // Отдача файла книги (номер файла из book_files; у книг этапа 1 он совпадает с номером книги).
@@ -249,7 +251,7 @@ routerAdd("GET", "/api/knigi/f/book/{id}", (e) => {
   if (!f || !b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
   const name = f.getString("file");
   const size = f.getInt("file_size");
-  const whole = f.getString("format") === "epub" && !e.request.header.get("Range");
+  const whole = F.VIEW[f.getString("format")] === "epub" && !e.request.header.get("Range");
   if (whole && size > F.EPUB_MAX) throw new BadRequestError("Этот EPUB слишком большой для читалки.");
   const range = whole ? { start: 0, end: size - 1, len: size } : F.parseRange(e.request.header.get("Range"), size);
   if (!range) throw new BadRequestError("Книга открывается только в читалке приложения.");
@@ -328,17 +330,19 @@ routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
   if (b && b.getBool("pending") && e.auth.getString("role") !== "admin") b = null;
   if (!b) throw new NotFoundError("Книга не найдена.");
   const body = e.requestInfo().body || {};
-  // формат: PDF (страница) или EPUB (процент и место); старое приложение формат не присылает, это PDF
-  const fmt = body.format === "epub" ? "epub" : "pdf";
+  // формат файла; читалка PDF (страница: PDF, DjVu) или EPUB (процент и место: EPUB, FB2, MOBI, AZW3, TXT).
+  // Старое приложение формат не присылает, это PDF.
+  const fmt = F.VIEW[body.format] ? String(body.format) : "pdf";
+  const isEp = F.VIEW[fmt] === "epub";
   let f = null;
   try { f = $app.findFirstRecordByFilter("book_files", "book = {:b} && format = {:f}", { b: b.id, f: fmt }); } catch (_) {}
-  if (!f) throw new NotFoundError(`У этой книги нет файла ${fmt.toUpperCase()}.`);
-  const pages = (fmt === "pdf" && f.getInt("pages")) || Math.min(parseInt(body.pages, 10) || 0, 1000000);
+  if (!f) throw new NotFoundError(`У этой книги нет файла ${F.FMT_NAME[fmt]}.`);
+  const pages = (!isEp && f.getInt("pages")) || Math.min(parseInt(body.pages, 10) || 0, 1000000);
   let page = parseInt(body.page, 10) || 1;
   if (page < 1) page = 1;
   if (pages && page > pages) page = pages;
-  const pct = fmt === "epub" ? Math.min(100, Math.max(0, Math.round((parseFloat(body.pct) || 0) * 10) / 10)) : (pages ? Math.round(page / pages * 1000) / 10 : 0);
-  const pos = fmt === "epub" ? String(body.pos || "").slice(0, 2000) : "";
+  const pct = isEp ? Math.min(100, Math.max(0, Math.round((parseFloat(body.pct) || 0) * 10) / 10)) : (pages ? Math.round(page / pages * 1000) / 10 : 0);
+  const pos = isEp ? String(body.pos || "").slice(0, 2000) : "";
   const key = { u: e.auth.id, b: b.id, f: fmt };
   const fill = (r) => { r.set("page", page); r.set("pages", pages); r.set("pct", pct); r.set("pos", pos); };
   let r = null;
@@ -427,6 +431,7 @@ routerAdd("POST", "/api/knigi/books/{id}/reprocess", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   const b = $app.findRecordById("books", e.request.pathValue("id"));
   for (const f of F.filesOf(b.id)) {
+    require(`${__hooks}/convert_lib.js`).ocrCancelFile(f.id, "Книгу обработали заново.");
     f.set("status", "processing");
     f.set("status_note", "");
     $app.save(f);
@@ -564,11 +569,51 @@ routerAdd("GET", "/api/knigi/setup", (e) => {
   });
 });
 
+/* ---------- Распознавание текста в сканах (правки 3.1, только администратор) ---------- */
+// Очередь, ход работы текущей книги, готовые и ошибки, сколько сканов ещё не распознано и сколько это займёт.
+routerAdd("GET", "/api/knigi/ocr", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  return e.json(200, require(`${__hooks}/convert_lib.js`).ocrState());
+}, $apis.requireAuth("users"));
+// Распознать сканы одной книги (кнопка «Распознать текст» в карточке)
+routerAdd("POST", "/api/knigi/books/{id}/ocr", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const C = require(`${__hooks}/convert_lib.js`);
+  let b = null;
+  try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
+  if (!b) throw new NotFoundError("Книга не найдена.");
+  const n = C.ocrBook(b);
+  C.ocrTick();
+  return e.json(200, { added: n, state: C.ocrState() });
+}, $apis.requireAuth("users"));
+// «Распознать все сканы»
+routerAdd("POST", "/api/knigi/ocr/all", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const C = require(`${__hooks}/convert_lib.js`);
+  const n = C.ocrAll();
+  C.ocrTick();
+  return e.json(200, { added: n, state: C.ocrState() });
+}, $apis.requireAuth("users"));
+// «Отменить»: книга остаётся как была
+routerAdd("POST", "/api/knigi/ocr/{id}/cancel", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const C = require(`${__hooks}/convert_lib.js`);
+  C.ocrCancel(e.request.pathValue("id"), "");
+  C.ocrTick();
+  return e.json(200, { state: C.ocrState() });
+}, $apis.requireAuth("users"));
+
 // Обработка книг раз в минуту (если после загрузки её не запустили сразу) и уборка раз в сутки.
 cronAdd("knigi_process", "* * * * *", () => {
   require(`${__hooks}/files_lib.js`).processQueue();
 });
+// Очередь распознавания: раз в минуту смотрит ход работы, запускает следующую книгу,
+// после перезапуска сервера продолжает прерванную.
+cronAdd("knigi_ocr", "* * * * *", () => {
+  try { require(`${__hooks}/convert_lib.js`).ocrTick(); } catch (err) { $app.logger().error("Очередь распознавания", "error", String(err)); }
+});
 cronAdd("knigi_clean", "17 4 * * *", () => {
+  try { require(`${__hooks}/convert_lib.js`).ocrCleanDirs(); } catch (err) { $app.logger().error("Уборка папок распознавания", "error", String(err)); }
   const F = require(`${__hooks}/files_lib.js`);
   try { F.cleanLog(); } catch (err) { $app.logger().error("Уборка журнала", "error", String(err)); }
   try { F.cleanUploads(); } catch (err) { $app.logger().error("Уборка загрузок", "error", String(err)); }

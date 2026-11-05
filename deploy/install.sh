@@ -48,10 +48,13 @@ echo "  Книги займут 10-13 ГБ. Приложение не приме
 
 say "1/8. Устанавливаю нужные программы"
 # poppler-utils: обложка, число страниц и текст PDF; qpdf: пересборка PDF для быстрого открытия;
-# djvulibre-bin: число страниц и обложка DjVu; unzip: обложка и данные EPUB.
+# djvulibre-bin и jbig2: перевод DjVu в PDF; unzip: обложка и данные EPUB;
+# ocrmypdf и tesseract-ocr (русский, английский): распознавание текста в сканах;
+# python3-venv: отдельная папка для модуля книг Kindle (MOBI, AZW3); fonts-dejavu-core: обложка для TXT.
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq git unzip curl ufw openssl ca-certificates caddy poppler-utils qpdf djvulibre-bin >/dev/null
+apt-get install -y -qq --no-install-recommends jbig2 ocrmypdf tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng python3-venv fonts-dejavu-core >/dev/null
 
 say "2/8. Проверяю общие настройки Caddy"
 # Общий Caddyfile не трогаем: он обслуживает и другие сайты сервера.
@@ -123,6 +126,15 @@ add_setting MAX_MB_PER_HOUR 200 "Сколько мегабайт книг в ч�
 add_setting GROUP_MAX_PER_USER 5 "Группы чтения: в скольких группах может состоять один человек (вместе с теми, что он создал)."
 add_setting GROUP_MAX_MEMBERS 25 "Группы чтения: сколько участников может быть в одной группе."
 add_setting GROUP_PLAN 1 "Группы чтения: план чтения у создателя группы. 1 включён, 0 спрятан (этапы в базе сохраняются)."
+add_setting OCR_LANGS rus+eng "Распознавание текста в сканах: языки через +. Например rus+eng+grc (древнегреческий). Для нового языка запустите обновление: оно поставит пакет tesseract-ocr-ЯЗЫК."
+
+# Модуль для книг Kindle (MOBI, AZW3): pip в отдельную папку venv, системный Python не трогается
+if ! "$APP_DIR/venv/bin/python3" -c "import mobi, ocrmypdf" >/dev/null 2>&1; then
+  rm -rf "$APP_DIR/venv"
+  python3 -m venv --system-site-packages "$APP_DIR/venv" >/dev/null 2>&1 && \
+    "$APP_DIR/venv/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir "mobi==0.3.3" >/dev/null 2>&1 || \
+    echo "  Модуль для MOBI и AZW3 не установился (нет доступа к pypi.org?). Запустите позже: bash $APP_DIR/src/deploy/update.sh"
+fi
 
 # Папки книг и файлов уроков лежат рядом с pb_data, а не внутри: ежедневная копия базы
 # не разрастается на гигабайты.

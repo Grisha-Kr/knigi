@@ -14,3 +14,9 @@ files/
 superuser.txt
 pocketbase
 .DS_Store
+*.fb2
+*.fbz
+*.mobi
+*.azw3
+*.azw
+__pycache__/

@@ -844,3 +844,17 @@ dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 32px)}
   .reader.in-group .rd-gline{display:block;flex:none;background:var(--reader-bar);border-bottom:1px solid var(--line);padding:3px 12px 4px;font-size:12px;font-weight:700;color:var(--ochre-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;z-index:2}
   .reader.in-group.bars-off .rd-gline{display:none}
 }
+
+/* ---------- Распознавание текста (правки 3.1) ---------- */
+.ocr-box{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin:10px 0 4px}
+.ocr-box .hint{margin:0}
+.ocr-box .prog.wide{max-width:320px}
+.ocr-note{margin:4px 0 0;font-size:12.5px}
+.ocr-card .btn{margin-top:8px}
+.ocr-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+.rows .ocr-row:first-child{border-top:0}
+.ocr-t{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ocr-t a,.ocr-t>span{font-weight:600;text-decoration:none;color:var(--ink);overflow-wrap:anywhere}
+.ocr-t small{font-size:12.5px;color:var(--muted)}
+.ocr-t small.form-err{color:var(--danger);margin:0}
+.ocr-row .btn{flex:none}

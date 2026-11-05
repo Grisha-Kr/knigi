@@ -12,10 +12,21 @@ const READER_TEXT_LAYER = true;
 const CHUNK_PDF = 512 * 1024;      // кусок книги, который читалка просит у сервера
 const MAX_REQ = 4 * CHUNK_PDF;     // не больше 2 МБ за один запрос
 const MB = 1024 * 1024;
-const FORMATS = {pdf: 'PDF', epub: 'EPUB', djvu: 'DjVu'};
-const FMT_ORDER = ['pdf', 'epub', 'djvu'];
+const FORMATS = {pdf: 'PDF', epub: 'EPUB', djvu: 'DjVu', fb2: 'FB2', mobi: 'MOBI', azw3: 'AZW3', txt: 'TXT'};
+const FMT_ORDER = ['pdf', 'epub', 'djvu', 'fb2', 'mobi', 'azw3', 'txt'];
+// Какой читалкой открывается формат (правки 3.1): DjVu сервер переводит в PDF, FB2, MOBI, AZW3 и TXT в EPUB.
+// Такая же таблица VIEW на сервере (convert_lib.js).
+const VIEW = {pdf: 'pdf', djvu: 'pdf', epub: 'epub', fb2: 'epub', mobi: 'epub', azw3: 'epub', txt: 'epub'};
+const viewOf = fmt => VIEW[fmt] || 'pdf';
+const isEpView = fmt => VIEW[fmt] === 'epub';
+// «DjVu, открывается как PDF»: подпись исходного формата в карточке
+const fmtLong = fmt => fmt && VIEW[fmt] && VIEW[fmt] !== fmt ? `${FORMATS[fmt]}, открывается как ${FORMATS[VIEW[fmt]]}` : (FORMATS[fmt] || fmt);
+// Расширения книг для выбора файла и проверки
+const BOOK_ACCEPT = '.pdf,.epub,.djvu,.djv,.fb2,.fbz,.zip,.mobi,.azw3,.txt,application/pdf,application/epub+zip,text/plain';
+const BOOK_RE = /\.(pdf|epub|djvu|djv|fb2|fbz|fb2\.zip|mobi|azw3|txt)$/i;
+const BOOK_TYPES = 'PDF, EPUB, DjVu, FB2, MOBI, AZW3 и TXT';
 const BOOK_FIELDS = 'id,title,authors,year,description,formats,file_size,pages,has_text,text_file,status,status_note,cover,search,created,updated';
-const BFILE_FIELDS = 'id,book,format,file_size,pages,has_text,status,status_note,created';
+const BFILE_FIELDS = 'id,book,format,file_size,orig_size,ocr,pages,has_text,status,status_note,created';
 const NOTE_FIELDS = 'id,owner,book,book_title,kind,title,page,shared,group,quote,color,format,place,created,updated,body_text:excerpt(400,true)';
 // Цвета выделений: в базе слово, на экране полупрозрачная заливка под текстом
 const HL = {yellow: ['Жёлтый', '#F7D53E'], green: ['Зелёный', '#7DD87A'], blue: ['Голубой', '#6DB9F2'], pink: ['Розовый', '#F38DC3']};
@@ -32,6 +43,7 @@ const ICON = {
   more: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="fill" cx="5" cy="12" r="1.8"/><circle class="fill" cx="12" cy="12" r="1.8"/><circle class="fill" cx="19" cy="12" r="1.8"/></svg>',
   plus: sv('<path d="M12 5v14M5 12h14"/>'),
   search: sv('<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>'),
+  ocr: sv('<path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><path d="M8.5 9h7M12 9v7"/>'),
   chev: '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
   up: sv('<path d="M6 15l6-6 6 6"/>'),
   down: sv('<path d="M6 9l6 6 6-6"/>'),
@@ -75,7 +87,8 @@ const ICON = {
 // группы (этап 3): groups, gmembers (участники), gbooks (книги групп), gplan (этапы плана), comments (комментарии),
 // people (участники общих групп: имя и фото), gcfg (лимиты и включён ли план), gcount (сколько групп, только администратору)
 const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], marks:[], offers:[], pbooks:[], invites:[], users:[], owner:null, loaded:false, disk:null, mail:null,
-  groups:[], gmembers:[], gbooks:[], gplan:[], comments:[], people:[], gcfg:{maxPerUser: 5, maxMembers: 25, plan: true}, gcount:null};
+  groups:[], gmembers:[], gbooks:[], gplan:[], comments:[], people:[], gcfg:{maxPerUser: 5, maxMembers: 25, plan: true}, gcount:null,
+  ocr:null}; // ocr: очередь распознавания (правки 3.1, только администратору, GET /api/knigi/ocr)
 const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files', marks:'marks', offers:'book_offers', pbooks:'books',
   groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users'};
 const KEYS = Object.keys(PBN);
@@ -151,25 +164,29 @@ const fmtSort = (a, b) => FMT_ORDER.indexOf(a) - FMT_ORDER.indexOf(b);
 const filesOfBook = id => S.bfiles.filter(f => f.book === id).sort((a, b) => fmtSort(a.format, b.format));
 const fileOf = (id, fmt) => S.bfiles.find(f => f.book === id && f.format === fmt);
 const bookFormats = b => ((b.formats && b.formats.length) ? [...b.formats] : filesOfBook(b.id).map(f => f.format)).sort(fmtSort);
-const canRead = f => !!f && (f.format === 'pdf' || f.format === 'epub') && f.status === 'ready';
+const canRead = f => !!f && !!VIEW[f.format] && f.status === 'ready';
 const readFmt = r => r.format || 'pdf';
 const readsOf = id => S.reading.filter(r => r.book === id && fileOf(id, readFmt(r)));
 const readOf = (id, fmt) => S.reading.find(r => r.book === id && readFmt(r) === fmt);
 // Последнее чтение этой книги (любой формат): для «Продолжить чтение» и полоски на обложке
 const readingOf = id => readsOf(id).sort((a, b) => String(b.updated).localeCompare(String(a.updated)))[0];
-const progPct = r => !r ? 0 : readFmt(r) === 'epub' ? Math.min(100, Math.round(r.pct || 0)) : r.pages ? Math.min(100, Math.round(r.page / r.pages * 100)) : 0;
-const progText = r => readFmt(r) === 'epub' ? `${Math.round(r.pct || 0)}%` : `с. ${r.page}${r.pages ? ' из ' + r.pages : ''}`;
-// Какой формат открывает «Читать»: тот, что этот человек читал последним, иначе PDF с текстом, иначе EPUB, иначе первый
+const progPct = r => !r ? 0 : isEpView(readFmt(r)) ? Math.min(100, Math.round(r.pct || 0)) : r.pages ? Math.min(100, Math.round(r.page / r.pages * 100)) : 0;
+const progText = r => isEpView(readFmt(r)) ? `${Math.round(r.pct || 0)}%` : `с. ${r.page}${r.pages ? ' из ' + r.pages : ''}`;
+// Какой формат открывает «Читать»: тот, что этот человек читал последним, иначе PDF с текстом,
+// иначе книга для читалки EPUB (EPUB, FB2, MOBI, AZW3, TXT), иначе любой, что открывается
 function defaultFormat(b){
   const last = readingOf(b.id);
   if(last && canRead(fileOf(b.id, readFmt(last)))) return readFmt(last);
-  const pdf = fileOf(b.id, 'pdf'), epub = fileOf(b.id, 'epub');
-  if(pdf && pdf.has_text && canRead(pdf)) return 'pdf';
-  if(canRead(epub)) return 'epub';
-  if(canRead(pdf)) return 'pdf';
-  return bookFormats(b)[0] || 'pdf';
+  const files = filesOfBook(b.id).filter(canRead);
+  const pick = files.find(f => f.format === 'pdf' && f.has_text) || files.find(f => isEpView(f.format) && f.has_text) ||
+    files.find(f => viewOf(f.format) === 'pdf' && f.has_text) || files.find(f => isEpView(f.format)) || files[0];
+  return pick ? pick.format : (bookFormats(b)[0] || 'pdf');
 }
-const isScan = b => { const f = fileOf(b.id, 'pdf'); return !!f && f.status === 'ready' && !f.has_text; };
+// Скан без текста: файл для читалки PDF (PDF или DjVu), готовый, без текстового слоя
+const scanFile = f => !!f && viewOf(f.format) === 'pdf' && f.status === 'ready' && !f.has_text;
+const isScan = b => filesOfBook(b.id).some(scanFile) && !filesOfBook(b.id).some(f => f.has_text && f.status === 'ready');
+// Файл книги со страницами (PDF, иначе DjVu): к нему относится «страница» у заметки
+const pageFileOf = id => filesOfBook(id).find(f => viewOf(f.format) === 'pdf' && canRead(f));
 const readHref = (bookId, fmt, extra) => `#/read/${bookId}?f=${fmt}${extra || ''}`;
 const myShelf = s => !s.common && s.owner === me().id;
 const canEditShelf = s => s && (s.common ? isAdmin() : s.owner === me().id);
@@ -249,7 +266,7 @@ async function startApp(){
     await pb.send('/api/knigi/session', {});
     await Promise.all([loadAll(), loadGroupCfg()]);
     S.loaded = true; $('#notice').hidden = true; render(true);
-    if(isAdmin()){ loadInvites(); loadUsers(); } else loadOwner();
+    if(isAdmin()){ loadInvites(); loadUsers(); loadOcr(); } else loadOwner();
     subscribeAll().catch(() => {});
     if(route().name === 'g') gVisit(route().id);
     if(route().name === 'profile' && isAdmin()) loadGCount();
@@ -569,7 +586,7 @@ VIEWS.a = r => {
 // Где в книге: «PDF, с. 45» или «EPUB, Глава 3 · 41%». Формат пишем, только если у книги их несколько.
 function placeText(n, b){
   const fmt = n.format || (n.page ? 'pdf' : '');
-  const where = fmt === 'epub' ? (n.place || '') : n.page ? 'с. ' + n.page : '';
+  const where = isEpView(fmt) ? (n.place || '') : n.page ? 'с. ' + n.page : '';
   if(!where) return '';
   return (b && bookFormats(b).length > 1 && fmt ? FORMATS[fmt] + ', ' : '') + where;
 }
@@ -579,9 +596,9 @@ function noteHref(n, gid){
   if(!b) return '';
   const fmt = n.format || (n.page ? 'pdf' : '');
   const gq = gid ? '&g=' + gid : '';
-  if(fmt === 'pdf' && canRead(fileOf(b.id, 'pdf'))) return readHref(b.id, 'pdf', (n.page ? '&p=' + n.page : '') + (n.kind === 'highlight' ? '&hl=' + n.id : '') + gq);
-  if(fmt === 'epub' && canRead(fileOf(b.id, 'epub'))) return readHref(b.id, 'epub', '&hl=' + n.id + gq);
-  return '';
+  if(!fmt || !canRead(fileOf(b.id, fmt))) return '';
+  if(viewOf(fmt) === 'pdf') return readHref(b.id, fmt, (n.page ? '&p=' + n.page : '') + (n.kind === 'highlight' ? '&hl=' + n.id : '') + gq);
+  return readHref(b.id, fmt, '&hl=' + n.id + gq);
 }
 function noteRow(n, opts){
   opts = opts || {};
@@ -635,16 +652,17 @@ VIEWS.b = r => {
   const hlAll = mine;
   if(kind === 'highlight') mine = mine.filter(n => (!UI.hlColor || n.color === UI.hlColor) && (!UI.hlThought || n.body_text));
   const shared = isAdmin() ? [] : notesOfBook(b.id).filter(n => n.owner !== me().id && n.shared).sort((x, y) => (x.kind === 'highlight') - (y.kind === 'highlight') || hlOrder(x, y));
+  const ep = isEpView(fmt);
   const readBtn = !f ? '<p class="soon">Файла книги нет.</p>'
-    : f.format === 'djvu' ? '<p class="soon">DjVu: читалка появится позже.</p>'
-    : f.status === 'processing' ? '<p class="soon">Книга обрабатывается: через минуту её можно будет открыть.</p>'
+    : f.status === 'processing' ? `<p class="soon">${VIEW[fmt] !== fmt ? `${FORMATS[fmt]} переводится для читалки ${FORMATS[VIEW[fmt]]}: это идёт в фоне, большая книга может занять несколько минут.` : 'Книга обрабатывается: через минуту её можно будет открыть.'}</p>`
     : f.status === 'error' ? '<p class="soon">Этот файл не открывается: при обработке была ошибка.</p>'
-    : `<a class="btn primary big" href="${readHref(b.id, fmt)}">${ICON.book}<span>${rd && (fmt === 'epub' ? rd.pct >= 1 : rd.page > 1) ? (fmt === 'epub' ? `Продолжить, ${Math.round(rd.pct)}%` : 'Продолжить со с. ' + rd.page) : 'Читать'}</span></a>`;
+    : `<a class="btn primary big" href="${readHref(b.id, fmt)}">${ICON.book}<span>${rd && (ep ? rd.pct >= 1 : rd.page > 1) ? (ep ? `Продолжить, ${Math.round(rd.pct)}%` : 'Продолжить со с. ' + rd.page) : 'Читать'}</span></a>`;
   const pend = !!b.pending;
   const offerer = isAdmin() && b.offered_by ? (S.users.find(u => u.id === b.offered_by) || {}) : null;
-  const seg = fmts.length > 1 ? `<div class="fmt-seg" role="radiogroup" aria-label="Формат">${fmts.map(x => `<button type="button" role="radio" data-act="card-fmt" data-id="${b.id}" data-f="${x}" aria-checked="${x === fmt}">${FORMATS[x]}${x === 'djvu' ? '<small>читалка позже</small>' : ''}</button>`).join('')}</div>` : '';
-  const facts = [b.year ? b.year + ' г.' : '', f && f.pages ? `${f.pages} ${plural(f.pages, PAGES_W)}` : '', fmts.length > 1 ? '' : FORMATS[fmt], isAdmin() && b.file_size ? fsize(b.file_size) : '',
-    fmt === 'pdf' && isScan(b) ? 'скан без текста' : ''].filter(Boolean);
+  const seg = fmts.length > 1 ? `<div class="fmt-seg" role="radiogroup" aria-label="Формат">${fmts.map(x => `<button type="button" role="radio" data-act="card-fmt" data-id="${b.id}" data-f="${x}" aria-checked="${x === fmt}">${FORMATS[x]}</button>`).join('')}</div>` : '';
+  const facts = [b.year ? b.year + ' г.' : '', f && f.pages ? `${f.pages} ${plural(f.pages, PAGES_W)}` : '', fmts.length > 1 && VIEW[fmt] === fmt ? '' : fmtLong(fmt),
+    isAdmin() && b.file_size ? fsize(b.file_size) : '', scanFile(f) ? 'скан без текста' : ''].filter(Boolean);
+  const ocrLine = f && f.ocr && f.has_text ? '<p class="hint ocr-note">Текст распознан автоматически, возможны ошибки.</p>' : '';
   const adminNotes = isAdmin() ? files.filter(x => x.status !== 'error' && x.status_note).map(x => `<p class="hint">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note)}</p>`).join('') : '';
   const errors = files.filter(x => x.status === 'error').map(x => `<p class="form-err">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note || 'Файл не удалось обработать.')}</p>`).join('');
   const tabs = [['notes', 'Заметки'], ...(isAdmin() ? [['lessons', 'Уроки']] : []), ['highlights', 'Цитаты']];
@@ -665,11 +683,12 @@ VIEWS.b = r => {
         ${seg}
         <p class="facts">${facts.map(esc).join(' · ')}</p>
         ${b.status === 'processing' && !(f && f.status === 'processing') ? '<p class="tag wait">Обрабатывается</p>' : ''}
-        ${errors}${adminNotes}
+        ${ocrLine}${errors}${adminNotes}
         <div class="book-acts">${readBtn}
           ${pend ? '' : `<button type="button" class="btn" data-act="to-shelf" data-id="${b.id}">${ICON.shelves}<span>На полку</span></button>`}
           ${isAdmin() ? `<button type="button" class="icon-btn" data-act="book-menu" data-id="${b.id}" aria-label="Действия с книгой" aria-haspopup="menu" title="Действия с книгой">${ICON.more}</button>` : ''}</div>
         ${pend ? '' : markRow(b)}
+        ${isAdmin() && !pend ? ocrCardHTML(b, f) : ''}
         ${offerer ? `<p class="hint offered">Предложил: ${esc(offerer.name || offerer.email || 'читатель')}</p>` : ''}
         ${shelves.length ? `<p class="on-shelves">На полках: ${shelves.map(s => `<a class="chip sm" href="#/sh/${s.id}">${esc(shelfPath(s).map(p => p.name).join(' › '))}</a>`).join(' ')}</p>` : ''}
         ${inGroups.length ? `<p class="on-shelves">Читаем в группе: ${inGroups.map(g => `<a class="chip sm" href="#/g/${g.id}">${ICON.people}${esc(g.name)}</a>`).join(' ')}</p>` : ''}
@@ -994,14 +1013,14 @@ function offerForm(){
   if(offerBusy() >= OFFER_MAX){ info('Пока нельзя', `На проверке уже ${OFFER_MAX} ваши книги. Дождитесь решения по ним, потом предложите следующую.`); return; }
   let file = null;
   const fileLine = () => file ? `<b>${esc(file.name)}</b><small>${fsize(file.size)}</small>` : '<small>Файл не выбран</small>';
-  openForm({title: 'Предложить книгу', text: 'Администратор посмотрит книгу и добавит её в библиотеку. Подходят PDF, EPUB и DjVu до 500 МБ.',
+  openForm({title: 'Предложить книгу', text: `Администратор посмотрит книгу и добавит её в библиотеку. Подходят ${BOOK_TYPES} до 500 МБ.`,
     html: `<div class="offer-file"><button type="button" class="btn" data-dlg="pick">${ICON.file}<span>Выбрать файл</span></button><span class="of-name" id="of-name">${fileLine()}</span></div>`,
     fields: [{key: 'note', label: 'Пара слов о книге (необязательно)', type: 'textarea', rows: 3, max: 1000, placeholder: 'Например: почему её стоит добавить'}],
     submit: 'Отправить',
     async onClick(el){
       if(el.dataset.dlg !== 'pick') return;
-      pickFile('.pdf,.epub,.djvu,.djv,application/pdf,application/epub+zip', false, ([f]) => {
-        if(!UP_EXT.offer.test(f.name)){ formErr('Подходят только PDF, EPUB и DjVu.'); return; }
+      pickFile(BOOK_ACCEPT, false, ([f]) => {
+        if(!UP_EXT.offer.test(f.name)){ formErr(`Подходят только ${BOOK_TYPES}.`); return; }
         if(f.size > UP_MAX.offer){ formErr('Файл больше 500 МБ.'); return; }
         formErr(''); file = f; const n = $('#of-name'); if(n) n.innerHTML = fileLine();
       });
@@ -1214,9 +1233,12 @@ function gBookCard(g){
 function stageStatus(st, u){
   const p = u && u.pdf, e = u && u.epub;
   const pdfPct = p && p.pages ? p.page / p.pages * 100 : null;
-  if(st.format === 'pdf'){
-    const pf = fileOf(curBookOfStage(st), 'pdf'), pages = (pf && pf.pages) || (p && p.pages) || 0;
-    if(p && p.page >= st.page) return {done: true};
+  if(viewOf(st.format) === 'pdf'){
+    // этап по страницам (PDF или DjVu); другой файл той же читалки и EPUB сравниваются по проценту
+    const pf = fileOf(curBookOfStage(st), st.format), pages = (pf && pf.pages) || (p && p.pages) || 0;
+    const same = p && (p.f || 'pdf') === st.format;
+    if(same && p.page >= st.page) return {done: true};
+    if(p && !same && pdfPct != null && pages && pdfPct >= st.page / pages * 100) return {done: true};
     if(e && pages && e.pct >= st.page / pages * 100) return {done: true};
     if(p) return {text: `читает (с. ${p.page})`};
     if(e) return {text: `читает (${Math.round(e.pct)}%)`};
@@ -1229,7 +1251,7 @@ function stageStatus(st, u){
   return {text: 'не начинал'};
 }
 const curBookOfStage = st => (S.gbooks.find(x => x.id === st.gbook) || {}).book || '';
-const stageTarget = st => st.format === 'pdf' ? `До с. ${st.page}` : `До ${st.chapter ? '«' + st.chapter + '», ' : ''}${String(Math.round(st.pct * 10) / 10).replace('.', ',')}%`;
+const stageTarget = st => viewOf(st.format) === 'pdf' ? `До с. ${st.page}` : `До ${st.chapter ? '«' + st.chapter + '», ' : ''}${String(Math.round(st.pct * 10) / 10).replace('.', ',')}%`;
 function planBlock(g, state){
   if(!planOn()) return '';
   const stages = planOf(g);
@@ -1271,23 +1293,24 @@ function openPlan(g){
 }
 function stageForm(g, s){
   const b = byId('books', g.book); if(!b){ info('Нет книги', 'У группы сейчас нет книги.'); return; }
-  const fmts = ['pdf', 'epub'].filter(f => fileOf(b.id, f));
-  if(!fmts.length){ info('План не получится', 'У книги нет файла PDF или EPUB.'); return; }
-  const pdf = fileOf(b.id, 'pdf');
+  const fmts = bookFormats(b).filter(f => canRead(fileOf(b.id, f)));
+  if(!fmts.length){ info('План не получится', 'У книги нет файла, который открывается в читалке.'); return; }
+  const pdf = filesOfBook(b.id).find(f => viewOf(f.format) === 'pdf' && f.pages);
   const fmt0 = s ? s.format : (fmts.includes(defaultFormat(b)) ? defaultFormat(b) : fmts[0]);
   const fields = [];
   if(fmts.length > 1) fields.push({key: 'format', type: 'select', label: 'Формат', options: fmts.map(f => [f, FORMATS[f]]), hint: 'Участник, который читает другой формат, тоже получит «дошёл»: сравнение по проценту книги.'});
   fields.push({key: 'page', type: 'number', label: `До какой страницы${pdf && pdf.pages ? ` (из ${pdf.pages})` : ''}`});
   fields.push({key: 'pct', type: 'number', label: 'До какого процента книги'}, {key: 'chapter', label: 'Глава (необязательно, для подписи)', max: 200, placeholder: 'Например: Глава 5'});
   fields.push({key: 'due', type: 'date', label: 'К какой дате', required: true});
-  const show = f => { form.querySelectorAll('#fld-page, #fld-pct, #fld-chapter').forEach(el => { const box = el.closest('.field'); if(box) box.hidden = (el.id === 'fld-page') !== (f === 'pdf'); }); };
+  const show = f => { form.querySelectorAll('#fld-page, #fld-pct, #fld-chapter').forEach(el => { const box = el.closest('.field'); if(box) box.hidden = (el.id === 'fld-page') !== (viewOf(f) === 'pdf'); }); };
   openForm({title: s ? 'Этап плана' : 'Новый этап', fields, values: {format: fmt0, page: s && s.page || '', pct: s && s.pct || '', chapter: s ? s.chapter : '', due: s ? s.due : addDays(todayStr(), 7)},
     onChange(el){ if(el.id === 'fld-format') show(el.value); },
     async onSave(v){
       const f = v.format || fmt0;
-      const data = {format: f, due: v.due, page: f === 'pdf' ? +v.page || 0 : 0, pct: f === 'epub' ? +String(v.pct).replace(',', '.') || 0 : 0, chapter: f === 'epub' ? v.chapter : ''};
-      if(f === 'pdf' && !(data.page >= 1)) throw {message: 'Укажите страницу.'};
-      if(f === 'epub' && !(data.pct > 0 && data.pct <= 100)) throw {message: 'Укажите процент от 1 до 100.'};
+      const byPage = viewOf(f) === 'pdf';
+      const data = {format: f, due: v.due, page: byPage ? +v.page || 0 : 0, pct: !byPage ? +String(v.pct).replace(',', '.') || 0 : 0, chapter: !byPage ? v.chapter : ''};
+      if(byPage && !(data.page >= 1)) throw {message: 'Укажите страницу.'};
+      if(!byPage && !(data.pct > 0 && data.pct <= 100)) throw {message: 'Укажите процент от 1 до 100.'};
       const rec = s ? await pb.collection('group_plan').update(s.id, data) : await pb.collection('group_plan').create({...data, group: g.id});
       upsert('gplan', rec); toast(s ? 'Этап изменён' : 'Этап добавлен');
       thenOpen(() => openPlan(byId('groups', g.id) || g));
@@ -1664,6 +1687,7 @@ VIEWS.profile = () => {
       ${isAdmin() ? `<a href="#/log">${ICON.log}Журнал чтения${ICON.chev}</a>` : ''}
     </nav>
     ${isAdmin() ? `<p class="hint">Групп в библиотеке: ${S.gcount == null ? '…' : S.gcount}</p>` : ''}
+    ${isAdmin() ? ocrSection() : ''}
     ${isAdmin() ? `<details class="fold" id="inv-fold"${UI.invOpen ? ' open' : ''}><summary><span>Приглашения</span>${ICON.chev}</summary><div class="fold-body">
       <p class="hint">Новый человек может зарегистрироваться только по приглашению. Создайте его и отправьте ссылку.</p>
       <div class="field"><label for="i-note">Для кого (заметка)</label><input type="text" id="i-note" placeholder="Например: мама"></div>
@@ -1694,6 +1718,98 @@ async function loadGroupCfg(){ try { S.gcfg = await pb.send('/api/knigi/group-co
 async function loadGCount(){ if(!isAdmin()) return; try { S.gcount = (await pb.send('/api/knigi/admin/groups-count', {})).count; schedule(); } catch(e){} }
 async function loadOwner(){ try { S.owner = await pb.send('/api/knigi/owner', {}); schedule(); } catch(e){} }
 async function loadDisk(){ if(!isAdmin()) return; try { S.disk = await pb.send('/api/knigi/disk', {}); schedule(); } catch(e){} }
+
+/* ---------- Распознавание текста в сканах (правки 3.1, только администратор) ---------- */
+// Очередь живёт на сервере. Пока открыт профиль или карточка книги, а в очереди что-то есть,
+// приложение раз в 6 секунд спрашивает, как идут дела: страница и примерное время до конца.
+async function loadOcr(){ if(!isAdmin()) return; try { S.ocr = await pb.send('/api/knigi/ocr', {}); schedule(); } catch(e){} }
+const ocrActive = () => !!(S.ocr && S.ocr.jobs.some(j => j.status === 'queued' || j.status === 'running'));
+setInterval(() => {
+  if(!S.loaded || !isAdmin() || document.visibilityState !== 'visible' || !ocrActive()) return;
+  const n = route().name;
+  if(n === 'profile' || n === 'b') loadOcr();
+}, 6000);
+// «примерно 1 ч 20 мин»
+function durText(sec){
+  sec = Math.max(0, Math.round(sec));
+  if(sec < 90) return 'меньше 2 минут';
+  const m = Math.round(sec / 60);
+  if(m < 60) return `${m} мин`;
+  const h = Math.floor(m / 60), mm = m % 60;
+  if(h < 48) return `${h} ч${mm ? ' ' + mm + ' мин' : ''}`;
+  return `${Math.round(h / 24)} ${plural(Math.round(h / 24), ['день', 'дня', 'дней'])}`;
+}
+const OCR_LANG = {rus: 'русский', eng: 'английский', grc: 'древнегреческий', ell: 'греческий', deu: 'немецкий', fra: 'французский', ukr: 'украинский', lat: 'латынь', heb: 'иврит'};
+// «примерно 20 мин» или «меньше 2 минут»
+const aboutDur = sec => sec < 90 ? 'меньше 2 минут' : 'примерно ' + durText(sec);
+const ocrJobOf = fileId => S.ocr && S.ocr.jobs.find(j => j.file === fileId && (j.status === 'queued' || j.status === 'running'));
+// Сколько осталось у текущей книги: по скорости этой книги, а пока её нет, по средней
+function ocrLeft(j){
+  const sec = j.sec_page || (S.ocr && S.ocr.sec_page) || 10;
+  return Math.max(0, (j.pages || 0) - (j.done || 0)) * sec;
+}
+function ocrProgress(j){
+  if(j.status === 'queued') return 'В очереди на распознавание';
+  if(S.ocr && S.ocr.paused) return `Пауза: сервер обрабатывает новую книгу. Готово ${j.done} из ${j.pages} стр.`;
+  if(j.stage === 'merge') return 'Почти готово: собираю файл книги';
+  return `Распознаётся: стр. ${j.done} из ${j.pages}${j.done ? ', осталось ' + aboutDur(ocrLeft(j)) : ''}`;
+}
+// В карточке: кнопка у скана без текста или ход работы
+function ocrCardHTML(b, f){
+  if(!scanFile(f)) return '';
+  const j = ocrJobOf(f.id);
+  if(j) return `<div class="ocr-box"><p class="hint">${esc(ocrProgress(j))}</p>${j.status === 'running' && j.pages ? `<span class="prog wide"><i style="width:${Math.round(j.done / j.pages * 100)}%"></i></span>` : ''}
+    <button type="button" class="btn sm ghost" data-act="ocr-cancel" data-id="${j.id}">Отменить</button></div>`;
+  if(S.ocr && !S.ocr.available) return '<p class="hint">Распознавание текста недоступно: на сервере не установлена программа. Запустите обновление приложения.</p>';
+  const sec = (S.ocr && S.ocr.sec_page) || 10;
+  return `<div class="ocr-box"><button type="button" class="btn" data-act="ocr-book" data-id="${b.id}">${ICON.ocr}<span>Распознать текст</span></button>
+    <p class="hint">После распознавания в книге можно будет сохранять цитаты и искать текст. ${f.pages ? `Займёт ${aboutDur(f.pages * sec)}.` : ''}</p></div>`;
+}
+function ocrSection(){
+  const st = S.ocr;
+  if(!st) return '<section class="card"><h2>Распознавание текста</h2><p class="hint">Загружаю…</p></section>';
+  const run = st.jobs.filter(j => j.status === 'running'), queue = st.jobs.filter(j => j.status === 'queued');
+  const past = st.jobs.filter(j => j.status !== 'running' && j.status !== 'queued');
+  const titleOf = j => { const b = byId('books', j.book); return b ? `<a href="#/b/${b.id}">${esc(b.title)}</a>` : `<span>${esc(j.title || 'Книга удалена')}</span>`; };
+  const rowRun = j => `<div class="ocr-row"><div class="ocr-t">${titleOf(j)}<small>${esc(ocrProgress(j))}</small>
+      ${j.pages ? `<span class="prog wide"><i style="width:${Math.round(j.done / j.pages * 100)}%"></i></span>` : ''}</div>
+    <button type="button" class="btn sm ghost" data-act="ocr-cancel" data-id="${j.id}">Отменить</button></div>`;
+  const rowQ = j => `<div class="ocr-row"><div class="ocr-t">${titleOf(j)}<small>В очереди · ${j.pages} ${plural(j.pages, PAGES_W)}</small></div>
+    <button type="button" class="btn sm ghost" data-act="ocr-cancel" data-id="${j.id}">Отменить</button></div>`;
+  const rowPast = j => `<div class="ocr-row"><div class="ocr-t">${titleOf(j)}<small class="${j.status === 'error' ? 'form-err' : ''}">${
+    j.status === 'done' ? `Готово ${esc(fmtDate(j.finished_at))} · ${j.pages} ${plural(j.pages, PAGES_W)}` :
+    j.status === 'error' ? `Ошибка ${esc(fmtDate(j.finished_at))}: ${esc(j.error || 'причина неизвестна')}` :
+    `Отменено ${esc(fmtDate(j.finished_at))}${j.error ? ': ' + esc(j.error) : ''}`}</small></div></div>`;
+  const waitPages = queue.reduce((n, j) => n + (j.pages || 0), 0);
+  const total = run.reduce((n, j) => n + ocrLeft(j), 0) + waitPages * (st.sec_page || 10);
+  return `<section class="card ocr-card"><h2>Распознавание текста</h2>
+    ${!st.available ? '<p class="form-err">На сервере не установлена программа распознавания. Запустите обновление приложения (update.sh).</p>' : ''}
+    <p class="hint">Сканы без текста превращаются в книги с текстом: в них можно сохранять цитаты, их найдёт поиск и Claude. Работа идёт в фоне по одной книге. Языки: ${esc(st.langs.split('+').map(l => OCR_LANG[l] || l).join(', '))}.</p>
+    ${run.length || queue.length ? `<div class="rows">${run.map(rowRun).join('')}${queue.map(rowQ).join('')}</div>
+      ${queue.length ? `<p class="hint">Вся очередь займёт ${aboutDur(total)}.</p>` : ''}` : ''}
+    ${st.scans.count ? `<button type="button" class="btn" data-act="ocr-all">${ICON.ocr}<span>Распознать все сканы · ${st.scans.count}</span></button>`
+      : !run.length && !queue.length ? '<p class="hint">Сканов без текста, которые ждут распознавания, нет.</p>' : ''}
+    ${past.length ? `<details class="fold"${UI.ocrPast ? ' open' : ''} id="ocr-past"><summary><span>Готовые и ошибки · ${past.length}</span>${ICON.chev}</summary><div class="fold-body rows">${past.map(rowPast).join('')}</div></details>` : ''}
+  </section>`;
+}
+async function ocrBook(id){
+  try { const r = await pb.send(`/api/knigi/books/${id}/ocr`, {method: 'POST'}); S.ocr = r.state; toast('Книга встала в очередь на распознавание'); render(); }
+  catch(e){ toast(errText(e)); }
+}
+function ocrAllAsk(){
+  const st = S.ocr; if(!st) return;
+  const n = st.scans.count, pages = st.scans.pages;
+  openForm({title: 'Распознать все сканы?', text: `В очередь ${plural(n, ['встанет', 'встанут', 'встанут'])} ${n} ${plural(n, BOOKS_W)} без текста, всего ${pages} ${plural(pages, PAGES_W)}. Это займёт ${aboutDur(pages * (st.sec_page || 10))}: сервер распознаёт по одной книге в фоне с низким приоритетом, остальные приложения не тормозят. Любую книгу можно отменить.`,
+    submit: 'Распознать', async onSave(){
+      const r = await pb.send('/api/knigi/ocr/all', {method: 'POST'});
+      S.ocr = r.state; toast(r.added ? `В очереди: ${r.added} ${plural(r.added, BOOKS_W)}` : 'Новых сканов для очереди нет'); render();
+    }});
+}
+async function ocrCancel(id, btn){
+  if(btn && !arm(btn, 'Точно отменить?')) return;
+  try { const r = await pb.send(`/api/knigi/ocr/${id}/cancel`, {method: 'POST'}); S.ocr = r.state; toast('Распознавание отменено, книга осталась как была'); render(); }
+  catch(e){ toast(errText(e)); }
+}
 
 /* ---------- Журнал чтения (только администратор) ---------- */
 VIEWS.log = () => {
@@ -1781,12 +1897,15 @@ VIEWS.note = r => {
   if(!isNew && n.kind === 'highlight') return hlPage(n, b, own, back, backText);
   const page = isNew ? (+r.q.get('page') || '') : (n.page || '');
   const ctx = isNew && UI.noteCtx && UI.noteCtx.book === bookId ? UI.noteCtx : null;
-  const fmt = isNew ? (ctx ? ctx.format : (b && fileOf(b.id, 'pdf') ? 'pdf' : '')) : (n.format || (n.page ? 'pdf' : ''));
+  const pf0 = b ? pageFileOf(b.id) : null;
+  const fmt = isNew ? (ctx ? ctx.format : (pf0 ? pf0.format : '')) : (n.format || (n.page ? (pf0 ? pf0.format : 'pdf') : ''));
   const bookLine = b ? `<a href="#/b/${b.id}">${esc(b.title)}</a>` : n && n.book_title ? `${esc(n.book_title)} <span class="muted">(книга удалена)</span>` : '<span class="muted">Без книги</span>';
-  const pdfOk = b && canRead(fileOf(b.id, 'pdf'));
-  const pageLink = p => pdfOk && p ? `<a class="page-link" href="${readHref(b.id, 'pdf', '&p=' + p)}">с. ${p}</a>` : p ? `с. ${p}` : '';
-  const epubPlace = fmt === 'epub' ? (isNew ? (ctx && ctx.place) : n.place) || '' : '';
-  const epubHref = !isNew && fmt === 'epub' ? noteHref(n) : '';
+  // страница относится к PDF или DjVu этой заметки, иначе к первому файлу со страницами
+  const pageFmt = b && viewOf(fmt) === 'pdf' && fmt && canRead(fileOf(b.id, fmt)) ? fmt : pf0 ? pf0.format : '';
+  const pdfOk = !!(b && pageFmt);
+  const pageLink = p => pdfOk && p ? `<a class="page-link" href="${readHref(b.id, pageFmt, '&p=' + p)}">с. ${p}</a>` : p ? `с. ${p}` : '';
+  const epubPlace = isEpView(fmt) ? (isNew ? (ctx && ctx.place) : n.place) || '' : '';
+  const epubHref = !isNew && isEpView(fmt) ? noteHref(n) : '';
   if(!own){
     // заметка участника группы или общая заметка автора библиотеки
     const grpNote = n.group && !n.shared;
@@ -1807,8 +1926,8 @@ VIEWS.note = r => {
         <span class="ed-state" id="ed-state" role="status">${esc(ED.state)}</span>
         <button type="button" class="icon-btn" data-act="note-menu" aria-label="Действия с заметкой" aria-haspopup="menu">${ICON.more}</button></div>
       <label class="sr" for="ed-title">Заголовок</label><input type="text" id="ed-title" class="ed-title" maxlength="300" placeholder="Заголовок" value="${esc(n ? n.title : '')}">
-      <div class="note-meta">${bookLine}${epubPlace || fmt === 'epub' ? `<span class="ed-place">EPUB, ${esc(epubPlace || 'место не указано')}</span>${epubHref ? `<a class="btn sm ghost" href="${esc(epubHref)}">Открыть книгу</a>` : ''}`
-        : `<label class="ed-page">страница <input type="number" id="ed-page" min="0" max="99999" inputmode="numeric" value="${esc(page)}"></label>${pdfOk ? `<a class="btn sm ghost" id="ed-open" href="${readHref(b.id, 'pdf', page ? '&p=' + page : '')}">Открыть книгу</a>` : ''}`}</div>
+      <div class="note-meta">${bookLine}${epubPlace || isEpView(fmt) ? `<span class="ed-place">${esc(FORMATS[fmt] || 'EPUB')}, ${esc(epubPlace || 'место не указано')}</span>${epubHref ? `<a class="btn sm ghost" href="${esc(epubHref)}">Открыть книгу</a>` : ''}`
+        : `<label class="ed-page">страница <input type="number" id="ed-page" min="0" max="99999" inputmode="numeric" value="${esc(page)}"></label>${pdfOk ? `<a class="btn sm ghost" id="ed-open" data-f="${pageFmt}" href="${readHref(b.id, pageFmt, page ? '&p=' + page : '')}">Открыть книгу</a>` : ''}`}</div>
       <div id="ed-box" class="ed-box"><p class="muted">Загружаю редактор…</p></div>
     </article>
     ${kind === 'lesson' && n ? filesBlock(n, true) : kind === 'lesson' ? '<p class="hint">Файлы можно будет прикрепить, когда в уроке появится текст или заголовок.</p>' : ''}${n ? commentsHTML(n) : ''}`;
@@ -1908,7 +2027,7 @@ function edChanged(){
   saveLS(draftKey(ED.id), {...d, at: Date.now()});
   edState('Есть несохранённые изменения');
   clearTimeout(ED.timer); ED.timer = setTimeout(edSave, 1500);
-  const o = $('#ed-open'); if(o && o.href){ const r = route(); const bid = ED.rec ? ED.rec.book : r.q.get('book'); if(bid) o.href = readHref(bid, 'pdf', d.page ? '&p=' + d.page : ''); }
+  const o = $('#ed-open'); if(o && o.href){ const r = route(); const bid = ED.rec ? ED.rec.book : r.q.get('book'); if(bid) o.href = readHref(bid, o.dataset.f || 'pdf', d.page ? '&p=' + d.page : ''); }
 }
 async function edSave(){
   clearTimeout(ED.timer);
@@ -1927,7 +2046,8 @@ async function edSave(){
       const book = r.q.get('book') || '';
       // заметка из читалки: формат и место в книге (у EPUB глава и процент)
       const ctx = UI.noteCtx && UI.noteCtx.book === book ? UI.noteCtx : null;
-      const extra = ctx ? {format: ctx.format, place: ctx.place || '', anchor: ctx.anchor || null} : book && fileOf(book, 'pdf') && d.page ? {format: 'pdf'} : {};
+      const pfb = book ? pageFileOf(book) : null;
+      const extra = ctx ? {format: ctx.format, place: ctx.place || '', anchor: ctx.anchor || null} : pfb && d.page ? {format: pfb.format} : {};
       const ge = $('#ed-group'), group = kind === 'note' && ge && ge.checked ? ge.value : '';
       rec = await pb.collection('notes').create({id, owner: me().id, kind, book, ...extra, ...d, ...(group ? {group} : {})});
       UI.noteCtx = null;
@@ -2184,7 +2304,7 @@ function openShelfBooks(s){
 function bookMenu(btn, b){
   const fmts = bookFormats(b);
   const items = [{label: 'Изменить данные', run: () => openBookForm(b)}, {label: 'Заменить обложку', run: () => pickCover(b)}];
-  if(fmts.length < 3 && !b.pending) items.push({label: 'Добавить формат', run: () => addFormat(b)});
+  if(fmts.length < FMT_ORDER.length && !b.pending) items.push({label: 'Добавить формат', run: () => addFormat(b)});
   if(!b.pending) items.push({label: 'Объединить с другой книгой', run: () => mergeBook(b)});
   if(fmts.length > 1) items.push({label: 'Убрать формат', run: () => removeFormat(b)});
   if(b.status !== 'processing') items.push({label: 'Обработать заново', run: async () => {
@@ -2195,9 +2315,9 @@ function bookMenu(btn, b){
 // Ещё один формат к этой книге: обычная загрузка, обработка в фоне
 function addFormat(b){
   const have = bookFormats(b);
-  const exts = {pdf: '.pdf,application/pdf', epub: '.epub,application/epub+zip', djvu: '.djvu,.djv'};
+  const exts = {pdf: '.pdf,application/pdf', epub: '.epub,application/epub+zip', djvu: '.djvu,.djv', fb2: '.fb2,.fbz,.zip', mobi: '.mobi', azw3: '.azw3', txt: '.txt,text/plain'};
   const free = FMT_ORDER.filter(f => !have.includes(f));
-  if(!free.length){ info('Все форматы уже есть', 'У книги уже есть PDF, EPUB и DjVu.'); return; }
+  if(!free.length){ info('Все форматы уже есть', `У книги уже есть ${BOOK_TYPES}.`); return; }
   pickFile(free.map(f => exts[f]).join(','), false, files => { loadDisk(); addUploads(files, 'book', '', b.id); });
 }
 // Объединить: поиск второй книги, предпросмотр (что куда перейдёт), подтверждение
@@ -2266,7 +2386,7 @@ function openBookForm(b){
     {key: 'year', label: 'Год издания', type: 'number'},
     {key: 'description', label: 'Описание', type: 'textarea', rows: 6, max: 20000}],
     values: {title: b.title, authors: (b.authors || []).map(authorName).filter(Boolean).join(', '), year: b.year || '', description: b.description || ''},
-    html: dl + filesOfBook(b.id).map(f => `<p class="hint">${FORMATS[f.format]}: ${esc(f.orig_name || '')}, ${fsize(f.file_size || 0)}</p>`).join(''),
+    html: dl + filesOfBook(b.id).map(f => `<p class="hint">${esc(fmtLong(f.format))}: ${esc(f.orig_name || '')}, ${fsize(f.orig_size || f.file_size || 0)}</p>`).join(''),
     async onSave(v){
       const ids = await authorIds(v.authors);
       upsert(bookKey(b.id), await pb.collection('books').update(b.id, {title: v.title, authors: ids, year: +v.year || 0, description: v.description}, {fields: BOOK_FIELDS + ',offered_by,pending'}));
@@ -2310,13 +2430,13 @@ function confirmDeleteBook(b){
 /* ---------- Загрузка книг и файлов уроков (только администратор) ---------- */
 // Файл идёт кусками по 8 МБ, по одному файлу за раз. Оборвавшийся кусок отправляется заново.
 const UP = {items: [], running: false, hidden: false};
-const UP_EXT = {book: /\.(pdf|epub|djvu|djv)$/i, offer: /\.(pdf|epub|djvu|djv)$/i, file: /\.(pdf|docx?|pptx?|jpe?g|png|webp|gif|heic)$/i};
+const UP_EXT = {book: BOOK_RE, offer: BOOK_RE, file: /\.(pdf|docx?|pptx?|jpe?g|png|webp|gif|heic)$/i};
 const UP_MAX = {book: 500 * MB, offer: 500 * MB, file: 50 * MB};
 const upShown = u => u.kind === 'book' || u.kind === 'offer'; // в панели загрузок: книги и предложенные книги
 function addUploads(files, kind, note, book){
   for(const f of files){
     const it = {id: newId(), file: f, kind, note: note || '', book: book || '', state: 'wait', pct: 0, msg: '', bookId: ''};
-    if(!UP_EXT[kind].test(f.name)){ it.state = 'err'; it.msg = kind !== 'file' ? 'Подходят только PDF, EPUB и DjVu.' : 'Этот вид файла не подходит.'; }
+    if(!UP_EXT[kind].test(f.name)){ it.state = 'err'; it.msg = kind !== 'file' ? `Подходят только ${BOOK_TYPES}.` : 'Этот вид файла не подходит.'; }
     else if(f.size > UP_MAX[kind]){ it.state = 'err'; it.msg = `Больше ${UP_MAX[kind] / MB} МБ.`; }
     else if(kind === 'book' && S.bfiles.some(x => x.orig_name === f.name && x.file_size === f.size)){ it.state = 'skip'; it.msg = 'Такой файл уже есть в библиотеке.'; }
     UP.items.push(it);
@@ -2431,7 +2551,7 @@ function renderUploadsPanel(){
 // Текстовый слой есть у всех (READER_TEXT_LAYER), у читателей копирование, контекстное меню и перетаскивание выключены.
 // Выделения рисуются отдельным слоем под текстовым (.hl-layer), подпись остаётся на холсте.
 const READER = {mode: ''}; // 'pdf' или 'epub': какая читалка сейчас на экране
-const RD = {open: false, key: '', src: null, doc: null, lib: null, link: null, linkAt: 0, mark: '', title: '', page: 1, pages: 0, zoom: 1,
+const RD = {open: false, key: '', fmt: 'pdf', src: null, doc: null, lib: null, link: null, linkAt: 0, mark: '', title: '', page: 1, pages: 0, zoom: 1,
   cache: new Map(), seq: 0, seen: new Set(), saveT: 0, pending: [], pause: 0, bars: true, outline: null, back: '#/',
   hls: [], marker: false, mk: null, flash: '', group: null, ghls: [], focusO: ''};
 const rdText = () => isAdmin() || READER_TEXT_LAYER;
@@ -2445,7 +2565,7 @@ function loadPdfjs(){
 async function rdGetLink(force){
   if(!force && RD.link && Date.now() - RD.linkAt < (RD.link.ttl - 600) * 1000) return RD.link;
   const s = RD.src;
-  RD.link = await pb.send(s.kind === 'book' ? `/api/knigi/books/${s.id}/link?f=pdf` : `/api/knigi/files/${s.id}/link`, {});
+  RD.link = await pb.send(s.kind === 'book' ? `/api/knigi/books/${s.id}/link?f=${RD.fmt}` : `/api/knigi/files/${s.id}/link`, {});
   RD.linkAt = Date.now();
   return RD.link;
 }
@@ -2561,13 +2681,14 @@ async function rdShow(r){
   if(r.name === 'read'){
     const b = byId('books', r.id);
     fmt = r.q.get('f') || (b ? defaultFormat(b) : 'pdf');
-    if(b && fmt !== 'pdf' && fmt !== 'epub'){ READER.mode = ''; RD.back = '#/b/' + b.id; rdFail('Читалка для этого формата появится позже.'); return; }
-    if(fmt === 'epub') return epShow(r, b);
+    if(b && !VIEW[fmt]){ READER.mode = ''; RD.back = '#/b/' + b.id; rdFail('Такой формат читалка не открывает.'); return; }
+    // FB2, MOBI, AZW3, TXT сервер перевёл в EPUB, DjVu в PDF: открываются этими читалками
+    if(isEpView(fmt)) return epShow(r, b);
   }
   if(READER.mode === 'epub') epDispose();
   READER.mode = 'pdf';
   const src = r.name === 'read' ? {kind: 'book', id: r.id} : {kind: 'file', id: r.id};
-  const key = src.kind + ':' + src.id;
+  const key = src.kind + ':' + src.id + (src.kind === 'book' ? ':' + fmt : '');
   const want = +r.q.get('p') || 0;
   RD.flash = r.q.get('hl') || '';
   RD.focusO = RD.flash;
@@ -2582,13 +2703,13 @@ async function rdShow(r){
   }
   // другая книга: прежнюю закрываем
   rdDispose();
-  RD.key = key; RD.src = src; RD.zoom = 1; RD.seen = new Set(); RD.pause = 0; RD.pending = []; RD.hls = []; RD.ghls = [];
+  RD.key = key; RD.src = src; RD.fmt = src.kind === 'book' ? fmt : 'pdf'; RD.zoom = 1; RD.seen = new Set(); RD.pause = 0; RD.pending = []; RD.hls = []; RD.ghls = [];
   if(src.kind === 'book'){
     const b = byId('books', src.id);
     if(!b){ RD.key = ''; rdFail('Книга не найдена.'); return; }
     RD.title = b.title; RD.back = '#/b/' + b.id;
-    const f = fileOf(b.id, 'pdf');
-    if(!f){ RD.key = ''; rdFail('У этой книги нет файла PDF.'); return; }
+    const f = fileOf(b.id, RD.fmt);
+    if(!f){ RD.key = ''; rdFail(`У этой книги нет файла ${FORMATS[RD.fmt] || RD.fmt}.`); return; }
     if(f.status === 'processing'){ RD.key = ''; rdFail('Книга ещё обрабатывается. Попробуйте через минуту.'); return; }
   } else {
     const f = byId('nfiles', src.id);
@@ -2608,7 +2729,7 @@ async function rdShow(r){
     if(RD.key !== key){ doc.destroy(); return; }
     RD.doc = doc; RD.pages = doc.numPages;
     rdMsg('');
-    const rd = src.kind === 'book' ? readOf(src.id, 'pdf') : null;
+    const rd = src.kind === 'book' ? readOf(src.id, RD.fmt) : null;
     const start = Math.min(RD.pages, Math.max(1, want || (rd ? rd.page : 1)));
     $('#rd-slider').max = RD.pages;
     if(src.kind === 'book'){ rdLoadHls(); rdLoadGHls(); }
@@ -2747,17 +2868,18 @@ function saveReading(id, fmt, res){
 function rdSave(leaving){
   clearTimeout(RD.saveT);
   if(!RD.src || RD.src.kind !== 'book' || !RD.doc) return;
-  const body = {format: 'pdf', page: RD.page, pages: RD.pages, seen: [...RD.seen], day: todayStr()};
+  const fmt = RD.fmt;
+  const body = {format: fmt, page: RD.page, pages: RD.pages, seen: [...RD.seen], day: todayStr()};
   RD.seen = new Set();
   const id = RD.src.id;
-  const r = readOf(id, 'pdf');
+  const r = readOf(id, fmt);
   if(r && r.page === body.page && !body.seen.length) return;
   if(leaving){
     fetch(`/api/knigi/books/${id}/progress`, {method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json', Authorization: pb.authStore.token}, body: JSON.stringify(body)}).catch(() => {});
-    if(r) saveReading(id, 'pdf', {...r, page: body.page, updated: ''});
+    if(r) saveReading(id, fmt, {...r, page: body.page, updated: ''});
     return;
   }
-  pb.send(`/api/knigi/books/${id}/progress`, {method: 'POST', body}).then(res => saveReading(id, 'pdf', res))
+  pb.send(`/api/knigi/books/${id}/progress`, {method: 'POST', body}).then(res => saveReading(id, fmt, res))
     .catch(() => { body.seen.forEach(p => RD.seen.add(p)); });
 }
 function rdZoom(k){
@@ -2801,12 +2923,12 @@ function rdNote(){
   hpHide();
   if(READER.mode === 'epub'){
     const c = EP.cur || {};
-    UI.noteCtx = {book: EP.bookId, format: 'epub', place: epPlace(c.chapter, c.pct), anchor: c.cfi ? {v: 1, cfi: c.cfi, pct: c.pct, chapter: c.chapter || ''} : null};
+    UI.noteCtx = {book: EP.bookId, format: EP.fmt, place: epPlace(c.chapter, c.pct), anchor: c.cfi ? {v: 1, cfi: c.cfi, pct: c.pct, chapter: c.chapter || ''} : null};
     epSave(false);
     go(`#/note/new?book=${EP.bookId}${EP.group ? '&g=' + EP.group.id : ''}`);
     return;
   }
-  UI.noteCtx = {book: RD.src.id, format: 'pdf', place: 'с. ' + RD.page};
+  UI.noteCtx = {book: RD.src.id, format: RD.fmt, place: 'с. ' + RD.page};
   rdSave(false);
   go(`#/note/new?book=${RD.src.id}&page=${RD.page}${RD.group ? '&g=' + RD.group.id : ''}`);
 }
@@ -2839,7 +2961,7 @@ async function rdLoadGHls(){
   const g = RD.group, key = RD.key;
   if(!g || !RD.src || RD.src.kind !== 'book'){ RD.ghls = []; rdDrawAll(); return; }
   try {
-    const list = await pb.collection('notes').getFullList({filter: pb.filter('book = {:b} && kind = "highlight" && group = {:g} && owner != {:u} && format = "pdf"', {b: RD.src.id, g: g.id, u: me().id}), fields: hlFields});
+    const list = await pb.collection('notes').getFullList({filter: pb.filter('book = {:b} && kind = "highlight" && group = {:g} && owner != {:u} && format = {:f}', {b: RD.src.id, g: g.id, u: me().id, f: RD.fmt}), fields: hlFields});
     if(RD.key !== key || !RD.group || RD.group.id !== g.id) return;
     RD.ghls = list; rdDrawAll(); rdFlash();
   } catch(e){}
@@ -2848,8 +2970,8 @@ async function rdLoadGHls(){
 function ghlLive(r, deleted){
   if(r.kind !== 'highlight' || r.owner === me().id) return;
   const upd = list => { const i = list.findIndex(x => x.id === r.id); if(deleted || !r.group){ if(i >= 0) list.splice(i, 1); } else if(r.anchor){ if(i >= 0) list[i] = {...r}; else list.push({...r}); } };
-  if(RD.group && RD.src && RD.src.kind === 'book' && RD.src.id === r.book && (deleted || r.format === 'pdf') && (deleted || r.group === RD.group.id)){ upd(RD.ghls); rdDrawAll(); }
-  if(EP.group && EP.view && EP.bookId === r.book && (deleted || r.format === 'epub') && (deleted || r.group === EP.group.id)){
+  if(RD.group && RD.src && RD.src.kind === 'book' && RD.src.id === r.book && (deleted || r.format === RD.fmt) && (deleted || r.group === RD.group.id)){ upd(RD.ghls); rdDrawAll(); }
+  if(EP.group && EP.view && EP.bookId === r.book && (deleted || r.format === EP.fmt) && (deleted || r.group === EP.group.id)){
     const old = EP.ghls.find(x => x.id === r.id);
     if(old) epDelOther(old);
     upd(EP.ghls);
@@ -2924,7 +3046,7 @@ function hpHide(){
 async function hlCreate(color){
   const p = HP.pending; if(!p) return null;
   const isEpub = READER.mode === 'epub', g = rdGroup();
-  const data = {id: newId(), owner: me().id, kind: 'highlight', book: isEpub ? EP.bookId : RD.src.id, format: isEpub ? 'epub' : 'pdf',
+  const data = {id: newId(), owner: me().id, kind: 'highlight', book: isEpub ? EP.bookId : RD.src.id, format: isEpub ? EP.fmt : RD.fmt,
     quote: p.quote.slice(0, 20000), color, page: isEpub ? 0 : p.n, place: isEpub ? epPlace(p.chapter, p.pct) : 'с. ' + p.n, anchor: p.anchor, body: '',
     ...(g && HP.grp !== false ? {group: g.id} : {})};
   hpHide();
@@ -2939,8 +3061,8 @@ async function hlCreate(color){
 // Свои выделения открытой книги и общий список заметок
 function hlLocal(rec, deleted){
   // список открытой в памяти книги меняется, только если цитата из неё (правка с экрана цитаты бывает и при другой книге в читалке)
-  const epub = rec.format === 'epub';
-  const open = epub ? EP.bookId === rec.book : !!(RD.src && RD.src.kind === 'book' && RD.src.id === rec.book);
+  const epub = isEpView(rec.format);
+  const open = epub ? EP.bookId === rec.book && EP.fmt === rec.format : !!(RD.src && RD.src.kind === 'book' && RD.src.id === rec.book && RD.fmt === rec.format);
   const list = !open ? [] : epub ? EP.hls : RD.hls;
   const i = list.findIndex(x => x.id === rec.id);
   if(deleted){ if(i >= 0) list.splice(i, 1); removeLocal('notes', rec.id); }
@@ -2951,12 +3073,12 @@ function hlLocal(rec, deleted){
 // Живое обновление (другая вкладка или устройство): своё выделение в открытой книге
 function hlLive(r, deleted){
   if(r.kind !== 'highlight' || r.owner !== me().id) return;
-  if(r.format === 'pdf' && RD.src && RD.src.kind === 'book' && RD.src.id === r.book){
+  if(r.format === RD.fmt && RD.src && RD.src.kind === 'book' && RD.src.id === r.book){
     const i = RD.hls.findIndex(x => x.id === r.id);
     if(deleted){ if(i >= 0) RD.hls.splice(i, 1); } else if(r.anchor){ if(i >= 0) RD.hls[i] = {...r}; else RD.hls.push({...r}); }
     rdDrawAll();
   }
-  if(r.format === 'epub' && EP.bookId === r.book && EP.view){
+  if(r.format === EP.fmt && EP.bookId === r.book && EP.view){
     const i = EP.hls.findIndex(x => x.id === r.id);
     const old = i >= 0 ? EP.hls[i] : null;
     if(deleted){ if(i >= 0) EP.hls.splice(i, 1); epDrawHl(old || r, true); }
@@ -3030,7 +3152,7 @@ const clientBox = r => ({left: r.left, right: r.right, top: r.top, bottom: r.bot
 async function rdLoadHls(){
   const key = RD.key, id = RD.src.id;
   try {
-    const list = await pb.collection('notes').getFullList({filter: pb.filter('owner = {:u} && book = {:b} && kind = "highlight" && format = "pdf"', {u: me().id, b: id}), fields: hlFields});
+    const list = await pb.collection('notes').getFullList({filter: pb.filter('owner = {:u} && book = {:b} && kind = "highlight" && format = {:f}', {u: me().id, b: id, f: RD.fmt}), fields: hlFields});
     if(RD.key !== key) return;
     RD.hls = list; rdDrawAll(); rdFlash();
   } catch(e){}
@@ -3130,7 +3252,7 @@ function hlBox(id){
 // по текстовому слою: ближайший кусок строки и ближайшая буква в нём (по ширине букв).
 function rdMarkerState(){
   const b = $('#rd-marker'); if(!b) return;
-  const f = RD.src && RD.src.kind === 'book' ? fileOf(RD.src.id, 'pdf') : null;
+  const f = RD.src && RD.src.kind === 'book' ? fileOf(RD.src.id, RD.fmt) : null;
   const noText = !!f && !f.has_text;
   b.classList.toggle('off', noText);
   b.setAttribute('aria-pressed', String(RD.marker));
@@ -3138,8 +3260,8 @@ function rdMarkerState(){
 }
 function toggleMarker(){
   if(READER.mode === 'epub'){ EP.marker = !EP.marker; epMarkerState(); toast(EP.marker ? 'Маркер: проведите пальцем по строкам. Листание выключено.' : 'Маркер выключен'); return; }
-  const f = RD.src && RD.src.kind === 'book' ? fileOf(RD.src.id, 'pdf') : null;
-  if(f && !f.has_text){ toast('В этой книге нет текстового слоя, выделять нельзя.'); return; }
+  const f = RD.src && RD.src.kind === 'book' ? fileOf(RD.src.id, RD.fmt) : null;
+  if(f && !f.has_text){ toast(isAdmin() ? 'В этом скане нет текста, выделять нельзя. Распознать текст можно в карточке книги.' : 'В этой книге нет текстового слоя, выделять нельзя.'); return; }
   RD.marker = !RD.marker; hpHide();
   try { window.getSelection().removeAllRanges(); } catch(e){}
   rdMarkerState();
@@ -3373,7 +3495,7 @@ document.addEventListener('fullscreenchange', () => { if(RD.open && READER.mode 
 // (overlayer), место в книге хранится как EPUB CFI. Файл приходит целиком по той же защищённой ссылке,
 // что и PDF, считается в лимите и журнале и лежит только в памяти вкладки (fetch без кэша).
 // Скрипты из книги не загружаются и вырезаются из страниц. Подпись читателя рисуется холстом поверх страницы.
-const EP = {key: '', bookId: '', fid: '', view: null, lib: null, title: '', back: '', mark: '', cur: null, hls: [], marker: false, group: null, ghls: [], focusO: '',
+const EP = {key: '', bookId: '', fid: '', fmt: 'epub', view: null, lib: null, title: '', back: '', mark: '', cur: null, hls: [], marker: false, group: null, ghls: [], focusO: '',
   saveT: 0, seen: new Set(), docs: new Map(), mk: null, flash: '', toc: null, annAt: 0};
 const EP_FONT = [90, 100, 115, 130];
 let foliateLoad = null;
@@ -3423,9 +3545,11 @@ async function epShow(r, b, again){
   if(RD.doc) rdSave(true);
   RD.flash = '';
   if(!b){ rdFail('Книга не найдена.'); return; }
-  const f = fileOf(b.id, 'epub');
+  let fmt = r.q.get('f');
+  if(!isEpView(fmt)) fmt = isEpView(defaultFormat(b)) ? defaultFormat(b) : 'epub';
+  const f = fileOf(b.id, fmt);
   EP.back = '#/b/' + b.id;
-  if(!f){ rdFail('У этой книги нет файла EPUB.'); return; }
+  if(!f){ rdFail(`У этой книги нет файла ${FORMATS[fmt] || fmt}.`); return; }
   if(f.status !== 'ready'){ rdFail(f.status === 'processing' ? 'Книга ещё обрабатывается. Попробуйте через минуту.' : 'Этот файл не открывается: при обработке была ошибка.'); return; }
   const hl = r.q.get('hl') || '';
   const grp = readerGroup(r, b.id), grpChanged = (EP.group && EP.group.id) !== (grp && grp.id);
@@ -3439,17 +3563,17 @@ async function epShow(r, b, again){
   }
   epDispose();
   const key = f.id;
-  Object.assign(EP, {key, bookId: b.id, fid: f.id, title: b.title, hls: [], ghls: [], seen: new Set(), cur: null, flash: hl, docs: new Map(), toc: null});
+  Object.assign(EP, {key, bookId: b.id, fid: f.id, fmt, title: b.title, hls: [], ghls: [], seen: new Set(), cur: null, flash: hl, docs: new Map(), toc: null});
   epShell(); rdHeader(); epMarkerState();
   rdMsg('Открываю…');
   try {
-    const [lib, link] = await Promise.all([loadFoliate(), pb.send(`/api/knigi/books/${b.id}/link?f=epub`, {})]);
+    const [lib, link] = await Promise.all([loadFoliate(), pb.send(`/api/knigi/books/${b.id}/link?f=${fmt}`, {})]);
     if(EP.key !== key) return;
     EP.lib = lib; EP.mark = link.mark || '';
     let blob;
     try { blob = await epFetch(link); }
     catch(err){
-      if(err && err.status === 401){ blob = await epFetch(await pb.send(`/api/knigi/books/${b.id}/link?f=epub`, {})); }
+      if(err && err.status === 401){ blob = await epFetch(await pb.send(`/api/knigi/books/${b.id}/link?f=${fmt}`, {})); }
       else throw err;
     }
     if(EP.key !== key) return;
@@ -3486,7 +3610,7 @@ async function epShow(r, b, again){
     if(EP.key !== key) return;
     let start = null;
     if(hl){ const n = await epNoteAnchor(hl); if(n) start = n.cfi; }
-    if(!start){ const rd = readOf(b.id, 'epub'); if(rd && rd.pos) start = rd.pos; }
+    if(!start){ const rd = readOf(b.id, fmt); if(rd && rd.pos) start = rd.pos; }
     rdMsg('');
     await view.init({lastLocation: start, showTextStart: !start});
     if(hl) setTimeout(() => epFlash(hl), 300);
@@ -3555,16 +3679,17 @@ function epOnRelocate(ev){
 function epSave(leaving){
   clearTimeout(EP.saveT);
   const c = EP.cur; if(!c || !EP.bookId || !EP.view) return;
-  const body = {format: 'epub', pct: c.pct, pos: c.cfi, page: c.page || 1, pages: c.pages || 0, seen: [...EP.seen], day: todayStr()};
+  const fmt = EP.fmt;
+  const body = {format: fmt, pct: c.pct, pos: c.cfi, page: c.page || 1, pages: c.pages || 0, seen: [...EP.seen], day: todayStr()};
   EP.seen = new Set();
-  const id = EP.bookId, r = readOf(id, 'epub');
+  const id = EP.bookId, r = readOf(id, fmt);
   if(r && r.pos === body.pos && !body.seen.length) return;
   if(leaving){
     fetch(`/api/knigi/books/${id}/progress`, {method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json', Authorization: pb.authStore.token}, body: JSON.stringify(body)}).catch(() => {});
-    saveReading(id, 'epub', {...(r || {}), pct: body.pct, pos: body.pos, page: body.page, pages: body.pages, updated: ''});
+    saveReading(id, fmt, {...(r || {}), pct: body.pct, pos: body.pos, page: body.page, pages: body.pages, updated: ''});
     return;
   }
-  pb.send(`/api/knigi/books/${id}/progress`, {method: 'POST', body}).then(res => saveReading(id, 'epub', res)).catch(() => { body.seen.forEach(p => EP.seen.add(p)); });
+  pb.send(`/api/knigi/books/${id}/progress`, {method: 'POST', body}).then(res => saveReading(id, fmt, res)).catch(() => { body.seen.forEach(p => EP.seen.add(p)); });
 }
 function epToc(){
   if(!EP.toc){ toast('В этой книге нет оглавления.'); return; }
@@ -3757,7 +3882,7 @@ function epMarkerState(){
 async function epLoadHls(){
   const key = EP.key;
   try {
-    const list = await pb.collection('notes').getFullList({filter: pb.filter('owner = {:u} && book = {:b} && kind = "highlight" && format = "epub"', {u: me().id, b: EP.bookId}), fields: hlFields});
+    const list = await pb.collection('notes').getFullList({filter: pb.filter('owner = {:u} && book = {:b} && kind = "highlight" && format = {:f}', {u: me().id, b: EP.bookId, f: EP.fmt}), fields: hlFields});
     if(EP.key !== key) return [];
     EP.hls = list.filter(h => h.anchor && h.anchor.cfi);
     for(const h of EP.hls) epAdd(h);
@@ -3800,7 +3925,7 @@ async function epLoadGHls(){
   EP.ghls = [];
   if(!g || !EP.bookId) return;
   try {
-    const list = await pb.collection('notes').getFullList({filter: pb.filter('book = {:b} && kind = "highlight" && group = {:g} && owner != {:u} && format = "epub"', {b: EP.bookId, g: g.id, u: me().id}), fields: hlFields});
+    const list = await pb.collection('notes').getFullList({filter: pb.filter('book = {:b} && kind = "highlight" && group = {:g} && owner != {:u} && format = {:f}', {b: EP.bookId, g: g.id, u: me().id, f: EP.fmt}), fields: hlFields});
     if(EP.key !== key || !EP.group || EP.group.id !== g.id) return;
     EP.ghls = list.filter(h => h.anchor && h.anchor.cfi);
     epGroupDraw();
@@ -4099,12 +4224,15 @@ document.addEventListener('click', async e => {
     case 'mark-finish': markFinish(d.id); break;
     case 'mark-again': markAgain(d.id); break;
     case 'fin-all': UI.finAll = !UI.finAll; render(true); break;
+    case 'ocr-book': ocrBook(d.id); break;
+    case 'ocr-all': ocrAllAsk(); break;
+    case 'ocr-cancel': ocrCancel(d.id, a); break;
     case 'offer-book': offerForm(); break;
     case 'rev-edit': { const b = byId('books', d.id); if(b) openBookForm(b); break; }
     case 'rev-cover': { const b = byId('books', d.id); if(b) pickCover(b); break; }
     case 'rev-ok': reviewApprove(d.id, a); break;
     case 'rev-no': reviewReject(d.id); break;
-    case 'add-books': pickFile('.pdf,.epub,.djvu,.djv,application/pdf,application/epub+zip', true, files => { loadDisk(); addUploads(files, 'book'); }); break;
+    case 'add-books': pickFile(BOOK_ACCEPT, true, files => { loadDisk(); addUploads(files, 'book'); }); break;
     case 'up-close': UP.hidden = true; if(!UP.items.some(u => ['wait','up','proc'].includes(u.state))) UP.items = UP.items.filter(u => !upShown(u)); renderUploadsPanel(); break;
     case 'up-cancel': { const it = UP.items.find(u => u.id === d.id); if(!it) return; if(it.state === 'wait'){ it.state = 'err'; it.msg = 'отменено'; } else it.cancel = true; renderUploadsPanel(); break; }
     case 'up-force': { const it = UP.items.find(u => u.id === d.id); if(it){ it.state = 'wait'; it.msg = ''; runUploads(); renderUploadsPanel(); } break; }
@@ -4202,8 +4330,12 @@ document.addEventListener('toggle', e => {
   if(e.target.id === 'inv-fold' && e.target.open !== UI.invOpen){ UI.invOpen = e.target.open; if(UI.invOpen && isAdmin()){ loadInvites(); loadUsers(); } }
   if(e.target.id === 'users-fold' && e.target.open !== UI.usersOpen){ UI.usersOpen = e.target.open; if(UI.usersOpen && isAdmin()) loadUsers(); }
   if(e.target.classList && e.target.classList.contains('desc')) UI.descOpen = e.target.open;
+  if(e.target.id === 'ocr-past') UI.ocrPast = e.target.open;
 }, true);
-window.addEventListener('hashchange', () => { if(route().name === 'profile' && isAdmin()){ loadDisk(); loadGCount(); } });
+window.addEventListener('hashchange', () => {
+  if(route().name === 'profile' && isAdmin()){ loadDisk(); loadGCount(); loadOcr(); }
+  if(route().name === 'b' && isAdmin()){ const b = byId('books', route().id); if(b && isScan(b)) loadOcr(); }
+});
 
 /* ---------- Профиль: пароль, приглашения, выход ---------- */
 const INV_ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -4247,7 +4379,10 @@ async function accountAction(a, d){
 }
 
 let tt = 0;
-function toast(msg){ const el = $('#toast'); const host = dlg.open ? dlg : RD.open ? $('#reader') : document.body; if(el.parentNode !== host) host.appendChild(el); el.textContent = msg; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2800); }
+function toast(msg){
+  // подсказка могла уйти вместе с читалкой, когда её содержимое собрали заново: создаём снова
+  let el = $('#toast');
+  if(!el){ el = document.createElement('div'); el.className = 'toast'; el.id = 'toast'; el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite'); } const host = dlg.open ? dlg : RD.open ? $('#reader') : document.body; if(el.parentNode !== host) host.appendChild(el); el.textContent = msg; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2800); }
 
 boot();
 })();
