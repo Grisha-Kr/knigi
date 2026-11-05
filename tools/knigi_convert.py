@@ -1567,7 +1567,9 @@ def cmd_ocr(src, dst, work, langs):
         ocr_progress.CALLBACK["fn"] = cb
         tmp = part + ".part"
         try:
-            ocrmypdf.ocr(cin, tmp, language=langs.split("+"), jobs=1, output_type="pdf", optimize=0,
+            # oversample: страница для распознавания рисуется не меньше чем в 300 точек на дюйм (у PDF из DjVu
+            # фон хранится в 100-150 точек, и без этого tesseract видел бы мелкий текст размытым)
+            ocrmypdf.ocr(cin, tmp, language=langs.split("+"), jobs=1, output_type="pdf", optimize=0, oversample=300,
                          skip_text=True, pdf_renderer="sandwich", tesseract_timeout=600, progress_bar=True,
                          plugins=["ocr_progress"])  # по имени модуля: тот же объект, что импортирован выше
         except Exception as e:
