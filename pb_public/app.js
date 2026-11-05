@@ -16,7 +16,7 @@ const FORMATS = {pdf: 'PDF', epub: 'EPUB', djvu: 'DjVu'};
 const FMT_ORDER = ['pdf', 'epub', 'djvu'];
 const BOOK_FIELDS = 'id,title,authors,year,description,formats,file_size,pages,has_text,text_file,status,status_note,cover,search,created,updated';
 const BFILE_FIELDS = 'id,book,format,file_size,pages,has_text,status,status_note,created';
-const NOTE_FIELDS = 'id,owner,book,book_title,kind,title,page,shared,quote,color,format,place,created,updated,body_text:excerpt(400,true)';
+const NOTE_FIELDS = 'id,owner,book,book_title,kind,title,page,shared,group,quote,color,format,place,created,updated,body_text:excerpt(400,true)';
 // Цвета выделений: в базе слово, на экране полупрозрачная заливка под текстом
 const HL = {yellow: ['Жёлтый', '#F7D53E'], green: ['Зелёный', '#7DD87A'], blue: ['Голубой', '#6DB9F2'], pink: ['Розовый', '#F38DC3']};
 const HL_KEYS = Object.keys(HL);
@@ -55,6 +55,7 @@ const ICON = {
   eyeOff: sv('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/>'),
   check: sv('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
   people: sv('<circle cx="9" cy="8" r="3"/><path d="M3 19c0-3 2.7-5 6-5s6 2 6 5"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14c2.8 0 5 1.7 5 4.5"/>'),
+  chat: sv('<path d="M4 5h16v11H9l-5 4z"/>'),
   log: sv('<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/>'),
   author: sv('<circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/>'),
   moon: sv('<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'),
@@ -71,19 +72,24 @@ const ICON = {
 /* ---------- Состояние ---------- */
 // marks: отметки «Читаю» и «Прочитано» (у каждого свои); offers: предложенные книги (у читателя свои, у администратора все);
 // pbooks: книги на проверке (только у администратора, в общих списках их нет)
-const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], marks:[], offers:[], pbooks:[], invites:[], users:[], owner:null, loaded:false, disk:null, mail:null};
-const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files', marks:'marks', offers:'book_offers', pbooks:'books'};
+// группы (этап 3): groups, gmembers (участники), gbooks (книги групп), gplan (этапы плана), comments (комментарии),
+// people (участники общих групп: имя и фото), gcfg (лимиты и включён ли план), gcount (сколько групп, только администратору)
+const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], marks:[], offers:[], pbooks:[], invites:[], users:[], owner:null, loaded:false, disk:null, mail:null,
+  groups:[], gmembers:[], gbooks:[], gplan:[], comments:[], people:[], gcfg:{maxPerUser: 5, maxMembers: 25, plan: true}, gcount:null};
+const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files', marks:'marks', offers:'book_offers', pbooks:'books',
+  groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users'};
 const KEYS = Object.keys(PBN);
 const loadKeys = () => KEYS.filter(k => k !== 'pbooks' || isAdmin());
 const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS + (isAdmin() ? ',offered_by' : ''), filter: 'pending = false'}), pbooks: () => ({fields: BOOK_FIELDS + ',offered_by,pending', filter: 'pending = true'}),
-  bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS})};
+  bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS}), people: () => ({fields: 'id,name,avatar'})};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('kn_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('kn_'+k, JSON.stringify(v)); } catch(e){} };
 const dropLS = k => { try { localStorage.removeItem('kn_'+k); } catch(e){} };
 const UI = {hops:0, reorder:'', revShelves:{}, finAll:false, booksView: loadLS('booksView', 'grid'), booksSort: loadLS('booksSort', 'title'), booksFmt:'', booksScan:false,
   tab:'notes', notesQ:'', notesKind:'', notesHits:null, cardFrom:{}, logQ:{days:7, user:'', book:''}, log:null, descOpen:false,
   cardFmt:{}, hlColor:'', hlThought:false, hlOpen:new Set(), noteCtx:null,
-  fullFor:'', fullNow:false, normalOnce:false};
+  fullFor:'', fullNow:false, normalOnce:false,
+  gState:{}, gPrev:{}, gBanner:{}, gFeed:{}, cmDraft:{}, cmEdit:'', join:null};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
@@ -198,13 +204,17 @@ async function subscribeAll(){
   for(const k of KEYS){
     if(k === 'pbooks') continue; // книги на проверке приходят вместе с books
     await pb.collection(PBN[k]).subscribe('*', e => {
-      if(e.action === 'delete'){ removeLocal(k, e.record.id); if(k === 'books') removeLocal('pbooks', e.record.id); if(k === 'notes') hlLive(e.record, true); }
+      // состав групп поменялся: от него зависят права на заметки, комментарии и фото
+      if((k === 'groups' || k === 'gmembers') && e.action !== 'update') refreshGroups();
+      if(k === 'people' && e.record.id === me().id) return; // своя запись приходит отдельной подпиской
+      if(e.action === 'delete'){ removeLocal(k, e.record.id); if(k === 'books') removeLocal('pbooks', e.record.id); if(k === 'notes'){ hlLive(e.record, true); ghlLive(e.record, true); } }
       else {
         const r = e.record;
         // книга ушла на проверку или её одобрили: переносим между списками
         if(k === 'books'){ if(r.pending){ S.books = S.books.filter(x => x.id !== r.id); upsert('pbooks', r); } else { S.pbooks = S.pbooks.filter(x => x.id !== r.id); upsert('books', r); } return; }
         // заметки: в общем списке без текста, только начало для подписи
-        if(k === 'notes'){ hlLive(r); r.body_text = String(r.body_text || '').slice(0, 400); delete r.body; delete r.search; delete r.anchor; }
+        if(k === 'notes'){ hlLive(r); ghlLive(r); r.body_text = String(r.body_text || '').slice(0, 400); delete r.body; delete r.search; delete r.anchor; }
+        if(k === 'groups' && e.action === 'update'){ const old = byId('groups', r.id); if(old && old.book !== r.book) loadAll(['gbooks', 'gplan', 'gmembers']).catch(() => {}); }
         upsert(k, r);
       }
     });
@@ -215,10 +225,13 @@ async function subscribeAll(){
 async function boot(){
   if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   const qs = new URLSearchParams(location.search);
-  const invite = qs.get('invite');
+  const invite = qs.get('invite'), join = qs.get('group');
   const mail = MAIL_LINKS.find(k => qs.get(k));
+  // ссылка в группу (?group=КОД): код запоминаем. Без входа сначала вход, после него сразу вступление;
+  // если человек уже вошёл, приложение покажет приглашение с кнопкой «Вступить».
+  if(join) saveLS('join', {code: join.trim(), auto: !pb.authStore.isValid});
   // ключ из письма или приглашения сразу убираем из адресной строки и истории
-  if(invite || mail) history.replaceState(null, '', location.pathname + location.hash);
+  if(invite || mail || join) history.replaceState(null, '', location.pathname + location.hash);
   if(mail){ showMailLink(mail, qs.get(mail).trim()); return; }
   if(!pb.authStore.isValid){ showAuth(invite ? 'register' : 'login', invite); return; }
   try { await pb.collection('users').authRefresh(); }
@@ -234,10 +247,19 @@ async function startApp(){
   try {
     // кука для обложек и файлов книг: ставит сервер, странице она недоступна
     await pb.send('/api/knigi/session', {});
-    await loadAll();
+    await Promise.all([loadAll(), loadGroupCfg()]);
     S.loaded = true; $('#notice').hidden = true; render(true);
     if(isAdmin()){ loadInvites(); loadUsers(); } else loadOwner();
     subscribeAll().catch(() => {});
+    if(route().name === 'g') gVisit(route().id);
+    if(route().name === 'profile' && isAdmin()) loadGCount();
+    // пришли по ссылке в группу
+    const join = loadLS('join', null);
+    if(join && join.code){
+      dropLS('join');
+      if(join.auto) joinGroup(join.code).catch(() => go('#/join/' + encodeURIComponent(join.code)));
+      else go('#/join/' + encodeURIComponent(join.code));
+    }
   } catch(e){
     showNotice('Не удалось загрузить данные. ' + errText(e));
   }
@@ -280,7 +302,7 @@ function showNotice(text){ $('#notice-text').textContent = text; $('#notice').hi
 /* ---------- Меню разделов: внизу на телефоне, сбоку на компьютере ---------- */
 // Разделы. Новый раздел (например, «Группы») добавляется строкой сюда: [ключ, адрес, подпись, значок].
 // Профиль открывается фото: в шапке на телефоне, внизу бокового меню на компьютере.
-const TABS = [['lib', '#/', 'Библиотека', 'library'], ['shelves', '#/shelves', 'Полки', 'shelves'], ['notes', '#/notes', 'Заметки', 'notes']];
+const TABS = [['lib', '#/', 'Библиотека', 'library'], ['shelves', '#/shelves', 'Полки', 'shelves'], ['notes', '#/notes', 'Заметки', 'notes'], ['groups', '#/groups', 'Группы', 'people']];
 function buildNav(){
   const items = TABS.map(([k, h, l, ic]) => `<a href="${h}" class="tab" data-tab="${k}">${ICON[ic]}<span>${l}</span></a>`).join('');
   $('#tabbar').innerHTML = `<div class="tabbar-in">${items}</div>`;
@@ -315,6 +337,8 @@ function readerHistory(prev){
   const h = location.hash;
   // из карточки этой книги или с экрана проверки: «Назад» в читалке ведёт туда же
   if(prev && ((prev.name === 'b' && prev.id === r.id) || (prev.name === 'review' && prev.id === r.id))){ history.replaceState({kn: 1}, '', h); return; }
+  // из группы (кнопка «Читать в группе», ссылка «с. 45» в ленте) или с экрана заметки: «Назад» туда же
+  if(prev && (prev.name === 'g' || prev.name === 'note') && r.q.get('g')){ history.replaceState({kn: 1}, '', h); return; }
   // открыли не из карточки (например, «Продолжить чтение» или ссылка из заметки): карточка встаёт перед читалкой
   // knRoot: карточку вставили первой записью приложения, её «Назад» ведёт на главную, а не за пределы приложения
   history.replaceState(prev ? null : {knRoot: 1}, '', '#/b/' + r.id);
@@ -328,7 +352,8 @@ function noteCardFrom(prev, cur){
 window.addEventListener('hashchange', () => {
   const prev = curRoute; curRoute = route();
   readerHistory(prev); noteCardFrom(prev, curRoute);
-  UI.hops++; UI.reorder = ''; closeMenu(); render(true);
+  UI.hops++; UI.reorder = ''; UI.cmEdit = ''; closeMenu(); render(true);
+  if(S.loaded && curRoute.name === 'g' && !curRoute.q.get('gb') && !(prev && prev.name === 'g' && prev.id === curRoute.id)) gVisit(curRoute.id);
   // к результатам поиска «Назад» возвращает на то же место прокрутки (оно хранится в записи истории)
   if(route().name !== 'read' && route().name !== 'pdf') window.scrollTo(0, (route().name === 'home' && history.state && history.state.sy) || 0);
 });
@@ -368,14 +393,17 @@ function render(force){
   if(RD.open) rdClose();
   noteFullSync(r);
   sideMe();
-  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
+  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : (r.name === 'note' && r.q.get('g')) || ['groups','g','join'].includes(r.name) ? 'groups' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
   $$('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
+  // точка на «Группы»: новые заметки, комментарии или новая книга с прошлого захода
+  const gnew = S.loaded && anyGroupNew();
+  $$('.tab[data-tab="groups"]').forEach(t => { t.classList.toggle('dot', gnew); t.setAttribute('aria-label', 'Группы' + (gnew ? ', есть новое' : '')); });
   const sm = $('#side-me'); if(sm) sm.setAttribute('aria-current', tab === 'profile' ? 'page' : 'false');
   const rv = $('#side-rev'); if(rv) rv.textContent = reviewCount() || '';
   const m = $('#main');
   if(!S.loaded){ m.innerHTML = '<div class="loading">Загружаю…</div>'; return; }
   // экран заметки не перерисовывается от живых обновлений, пока в нём редактор: иначе сбился бы ввод
-  if(r.name === 'note' && !force && ED.quill && ED.id) { renderUploadsPanel(); return; }
+  if(r.name === 'note' && !force && ED.quill && ED.id) { renderUploadsPanel(); cmPaint(); return; }
   // поле поиска не теряет фокус при перерисовке
   const focus = document.activeElement && document.activeElement.id && m.contains(document.activeElement) ? document.activeElement.id : '';
   const sel = focus && document.activeElement.selectionStart;
@@ -545,13 +573,14 @@ function placeText(n, b){
   if(!where) return '';
   return (b && bookFormats(b).length > 1 && fmt ? FORMATS[fmt] + ', ' : '') + where;
 }
-// Ссылка в читалку на место заметки или выделения
-function noteHref(n){
+// Ссылка в читалку на место заметки или цитаты (gid: открыть в групповом режиме)
+function noteHref(n, gid){
   const b = n.book ? byId('books', n.book) : null;
   if(!b) return '';
   const fmt = n.format || (n.page ? 'pdf' : '');
-  if(fmt === 'pdf' && canRead(fileOf(b.id, 'pdf'))) return readHref(b.id, 'pdf', (n.page ? '&p=' + n.page : '') + (n.kind === 'highlight' ? '&hl=' + n.id : ''));
-  if(fmt === 'epub' && canRead(fileOf(b.id, 'epub'))) return readHref(b.id, 'epub', '&hl=' + n.id);
+  const gq = gid ? '&g=' + gid : '';
+  if(fmt === 'pdf' && canRead(fileOf(b.id, 'pdf'))) return readHref(b.id, 'pdf', (n.page ? '&p=' + n.page : '') + (n.kind === 'highlight' ? '&hl=' + n.id : '') + gq);
+  if(fmt === 'epub' && canRead(fileOf(b.id, 'epub'))) return readHref(b.id, 'epub', '&hl=' + n.id + gq);
   return '';
 }
 function noteRow(n, opts){
@@ -562,9 +591,9 @@ function noteRow(n, opts){
   return `<a class="note-row" href="#/note/${n.id}">${n.kind === 'lesson' ? ICON.lesson : ICON.notes}
     <span class="nr-t"><b>${esc(n.title || 'Без заголовка')}</b>${n.body_text ? `<span class="nr-x">${esc(n.body_text.slice(0, 160))}</span>` : ''}
       <small>${[where, esc(placeText(n, b)), fmtWhen(n.updated)].filter(Boolean).join(' · ')}</small></span>
-    ${n.shared && n.owner === me().id ? '<span class="tag">Видна всем</span>' : ''}${ICON.chev}</a>`;
+    ${n.shared && n.owner === me().id ? '<span class="tag">Видна всем</span>' : ''}${n.group && n.owner === me().id ? '<span class="tag grp">Видно группе</span>' : ''}${ICON.chev}</a>`;
 }
-// Выделение в списке: цветная полоска, текст (до 3 строк, дальше «ещё»), мысль, место и дата
+// Цитата в списке: цветная полоска, текст (до 3 строк, дальше «ещё»), мысль, место и дата
 function hlRow(n, opts){
   opts = opts || {};
   const b = n.book ? byId('books', n.book) : null;
@@ -575,12 +604,12 @@ function hlRow(n, opts){
   const inner = `<span class="hl-q${open ? ' open' : ''}">${esc(n.quote || '')}</span>${n.body_text ? `<span class="hl-t">${esc(n.body_text)}</span>` : ''}<small>${meta}</small>`;
   return `<div class="hl-row" style="--hl:${(HL[n.color] || HL.yellow)[1]}">${href ? `<a class="hl-main" href="${esc(href)}">${inner}</a>` : `<span class="hl-main">${inner}</span>`}
     <span class="hl-side">${long ? `<button type="button" class="linkbtn sm" data-act="hl-more" data-id="${n.id}">${open ? 'свернуть' : 'ещё'}</button>` : ''}
-    ${n.shared && n.owner === me().id ? '<span class="tag">Видна всем</span>' : ''}</span></div>`;
+    ${n.shared && n.owner === me().id ? '<span class="tag">Видна всем</span>' : ''}${n.group && n.owner === me().id ? `<a class="tag grp" href="#/note/${n.id}${byId('groups', n.group) ? '?g=' + n.group : ''}">Видно группе</a>` : ''}</span></div>`;
 }
 function hlFilters(list){
   const colors = HL_KEYS.filter(c => list.some(n => n.color === c));
   if(list.length < 2) return '';
-  return `<div class="hl-filters" role="group" aria-label="Фильтр выделений">
+  return `<div class="hl-filters" role="group" aria-label="Фильтр цитат">
     <button type="button" class="hl-chip all" data-act="hl-color" data-c="" aria-pressed="${!UI.hlColor}">Все</button>
     ${colors.map(c => `<button type="button" class="hl-chip" data-act="hl-color" data-c="${c}" aria-pressed="${UI.hlColor === c}" aria-label="${HL[c][0]}" title="${HL[c][0]}"><i style="--hl:${HL[c][1]}"></i></button>`).join('')}
     <label class="check-chip sm"><input type="checkbox" id="hl-thought"${UI.hlThought ? ' checked' : ''}><span>Только с мыслями</span></label></div>`;
@@ -618,9 +647,10 @@ VIEWS.b = r => {
     fmt === 'pdf' && isScan(b) ? 'скан без текста' : ''].filter(Boolean);
   const adminNotes = isAdmin() ? files.filter(x => x.status !== 'error' && x.status_note).map(x => `<p class="hint">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note)}</p>`).join('') : '';
   const errors = files.filter(x => x.status === 'error').map(x => `<p class="form-err">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note || 'Файл не удалось обработать.')}</p>`).join('');
-  const tabs = [['notes', 'Заметки'], ...(isAdmin() ? [['lessons', 'Уроки']] : []), ['highlights', 'Выделения']];
+  const tabs = [['notes', 'Заметки'], ...(isAdmin() ? [['lessons', 'Уроки']] : []), ['highlights', 'Цитаты']];
   const emptyText = {notes: 'Заметок к этой книге пока нет.', lessons: 'Уроков к этой книге пока нет.',
-    highlights: hlAll.length ? 'Под этот фильтр выделений нет.' : 'Выделений пока нет. Откройте книгу, выделите текст и выберите цвет. На телефоне нажмите «Маркер» и проведите пальцем по строкам.'}[tab];
+    highlights: hlAll.length ? 'Под этот фильтр цитат нет.' : 'Цитат пока нет. Откройте книгу, выделите текст и выберите цвет: так сохраняется цитата. На телефоне нажмите «Маркер» и проведите пальцем по строкам.'}[tab];
+  const inGroups = groupsOfBook(b.id);
   const from = UI.cardFrom[b.id];
   const fromText = !from ? 'Библиотека' : from.name === 'sh' ? ((byId('shelves', from.id) || {}).name || 'Полка') : from.name === 'a' ? ((byId('authors', from.id) || {}).name || 'Автор')
     : from.name === 'home' && from.q.get('q') ? 'Поиск'
@@ -642,6 +672,7 @@ VIEWS.b = r => {
         ${pend ? '' : markRow(b)}
         ${offerer ? `<p class="hint offered">Предложил: ${esc(offerer.name || offerer.email || 'читатель')}</p>` : ''}
         ${shelves.length ? `<p class="on-shelves">На полках: ${shelves.map(s => `<a class="chip sm" href="#/sh/${s.id}">${esc(shelfPath(s).map(p => p.name).join(' › '))}</a>`).join(' ')}</p>` : ''}
+        ${inGroups.length ? `<p class="on-shelves">Читаем в группе: ${inGroups.map(g => `<a class="chip sm" href="#/g/${g.id}">${ICON.people}${esc(g.name)}</a>`).join(' ')}</p>` : ''}
         ${b.description ? `<details class="desc"${UI.descOpen ? ' open' : ''}><summary>Описание</summary><p>${esc(b.description).replace(/\n/g, '<br>')}</p></details>` : ''}
       </div>
     </article>
@@ -656,10 +687,10 @@ VIEWS.b = r => {
 
 /* ---------- Мои заметки ---------- */
 VIEWS.notes = () => {
-  const kinds = isAdmin() ? [['', 'Все'], ['note', 'Заметки'], ['lesson', 'Уроки'], ['highlight', 'Выделения']]
-    : [['', 'Все мои'], ['note', 'Заметки'], ['highlight', 'Выделения'], ['shared', 'От автора библиотеки']];
+  const kinds = isAdmin() ? [['', 'Все'], ['note', 'Заметки'], ['lesson', 'Уроки'], ['highlight', 'Цитаты']]
+    : [['', 'Все мои'], ['note', 'Заметки'], ['highlight', 'Цитаты'], ['shared', 'От автора библиотеки']];
   let list = S.notes.filter(n => {
-    if(UI.notesKind === 'shared') return n.owner !== me().id;
+    if(UI.notesKind === 'shared') return n.owner !== me().id && n.shared;
     if(n.owner !== me().id) return false;
     return !UI.notesKind || n.kind === UI.notesKind;
   });
@@ -667,7 +698,7 @@ VIEWS.notes = () => {
   list.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
   return `<header class="head head-wrap"><h1>Заметки</h1>${meLink()}
       <span class="row-acts"><a class="btn sm" href="#/note/new">${ICON.plus}<span>Заметка</span></a>${isAdmin() ? `<a class="btn sm" href="#/note/new?kind=lesson">${ICON.plus}<span>Урок</span></a>` : ''}</span></header>
-    <label class="search"><span class="sr">Поиск по тексту заметок и выделений</span>${ICON.search}<input type="search" id="nq" placeholder="Поиск по тексту, цитатам и мыслям" value="${esc(UI.notesQ)}" autocomplete="off"></label>
+    <label class="search"><span class="sr">Поиск по тексту заметок и цитат</span>${ICON.search}<input type="search" id="nq" placeholder="Поиск по тексту, цитатам и мыслям" value="${esc(UI.notesQ)}" autocomplete="off"></label>
     <div class="seg" role="radiogroup" aria-label="Что показать">${kinds.map(([k, l]) => `<button type="button" role="radio" data-act="notes-kind" data-k="${k}" aria-checked="${UI.notesKind === k}">${l}</button>`).join('')}</div>
     ${UI.notesQ && !UI.notesHits ? '<p class="hint">Ищу…</p>' : ''}
     <div class="rows">${list.map(n => noteRow(n)).join('') || `<p class="empty">${UI.notesQ ? 'Ничего не нашлось.' : 'Здесь появятся заметки ко всем книгам. Новую заметку можно начать в карточке книги или прямо в читалке.'}</p>`}</div>`;
@@ -1079,6 +1110,527 @@ function reviewReject(id){
     }});
 }
 
+/* ---------- Группы чтения (этап 3) ---------- */
+// Группа читает одну книгу: кто сегодня читал и сколько, неделя кружками, план (по желанию создателя),
+// цитаты и заметки участников с комментариями. Всё, что видно в группе, видят только её участники.
+const MEMBERS_W = ['участник', 'участника', 'участников'], GROUPS_W = ['группе', 'группах', 'группах'];
+const byCreated = (a, b) => String(a.created).localeCompare(String(b.created));
+const myGroups = () => S.groups.filter(g => S.gmembers.some(m => m.group === g.id && m.user === me().id)).sort((a, b) => collator.compare(a.name || '', b.name || '') || byCreated(a, b));
+const membersOf = gid => S.gmembers.filter(m => m.group === gid).sort(byCreated);
+const isMemberOf = (gid, uid) => S.gmembers.some(m => m.group === gid && m.user === uid);
+const myMember = gid => S.gmembers.find(m => m.group === gid && m.user === me().id);
+const isGroupOwner = g => !!g && g.owner === me().id;
+const person = uid => uid === me().id ? me() : S.people.find(u => u.id === uid) || S.users.find(u => u.id === uid) || {id: uid, name: ''};
+const nameOf = u => (u && u.name) || 'Без имени';
+// Группы, которые сейчас читают эту книгу (в них можно отправить заметку или цитату)
+const groupsOfBook = bookId => bookId ? myGroups().filter(g => g.book === bookId) : [];
+const gbooksOf = gid => S.gbooks.filter(x => x.group === gid).sort((a, b) => String(b.started_at || b.created).localeCompare(String(a.started_at || a.created)));
+const curGBook = g => gbooksOf(g.id).find(x => !x.finished_at);
+const planOn = () => !!S.gcfg.plan;
+const planOf = g => { const gb = curGBook(g); return gb ? S.gplan.filter(p => p.gbook === gb.id).sort((a, b) => String(a.due).localeCompare(String(b.due)) || byCreated(a, b)) : []; };
+const groupNotes = (gid, bookId) => S.notes.filter(n => n.group === gid && n.book === bookId && (n.kind === 'note' || n.kind === 'highlight'));
+const commentsOf = noteId => S.comments.filter(c => c.note === noteId).sort(byCreated);
+const groupLink = g => `${location.origin}/?group=${g.invite_code || ''}`;
+const groupGone = () => `${backLink('#/groups', 'Группы')}<div class="card"><p>Группа не найдена: возможно, её удалили или вас из неё исключили.</p><a class="btn" href="#/groups">К группам</a></div>`;
+// Новое с прошлого захода: заметки и цитаты других участников и комментарии к заметкам группы
+function groupNew(g){
+  const m = myMember(g.id); if(!m) return false;
+  const seen = String(m.last_seen || '');
+  if(S.notes.some(n => n.group === g.id && n.owner !== me().id && String(n.created) > seen)) return true;
+  return S.comments.some(c => c.group === g.id && c.user !== me().id && String(c.created) > seen && S.notes.some(n => n.id === c.note && n.group === g.id));
+}
+const newBook = g => { const m = myMember(g.id); return !!(m && m.book_seen && g.book && m.book_seen !== g.book); };
+const anyGroupNew = () => myGroups().some(g => groupNew(g) || newBook(g));
+const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+const weekStart = () => { const d = new Date(); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return ymd(d); };
+const addDays = (s, k) => { const d = new Date(s + 'T12:00:00'); d.setDate(d.getDate() + k); return ymd(d); };
+const WD_LETTER = ['П', 'В', 'С', 'Ч', 'П', 'С', 'В'];
+const WD_TO = ['понедельнику', 'вторнику', 'среде', 'четвергу', 'пятнице', 'субботе', 'воскресенью'];
+// «к пятнице, 7 ноября»
+function dueText(s){ const d = new Date(s + 'T12:00:00'); if(isNaN(d)) return ''; return `к ${WD_TO[(d.getDay() + 6) % 7]}, ${d.getDate()} ${MONF[d.getMonth()]}${d.getFullYear() !== new Date().getFullYear() ? ' ' + d.getFullYear() : ''}`; }
+// «2 ч назад», дальше дата
+function agoText(s){
+  const d = dateOf(s); if(isNaN(d)) return '';
+  const min = Math.floor((Date.now() - d.getTime()) / 60e3);
+  if(min < 1) return 'только что';
+  if(min < 60) return `${min} мин назад`;
+  if(min < 24 * 60) return `${Math.floor(min / 60)} ч назад`;
+  return fmtDate(s);
+}
+// Текст комментария: без оформления, ссылки кликабельны
+function linkify(t){
+  return esc(t).replace(/https?:\/\/[^\s<]+/g, u => { const m = /[.,!?;:)»]+$/.exec(u); const tail = m ? m[0] : ''; const url = tail ? u.slice(0, -tail.length) : u;
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>${tail}`; });
+}
+
+// Состояние группы с сервера: кто сегодня читал, неделя, где каждый в книге (обновляется при заходе, не чаще раза в 30 с)
+async function loadGState(gid, force){
+  const st = UI.gState[gid];
+  if(st && st.loading) return;
+  if(st && !force && Date.now() - st.at < 30e3) return;
+  UI.gState[gid] = {...(st || {}), loading: true, at: st ? st.at : 0};
+  try { UI.gState[gid] = {data: await pb.send(`/api/knigi/groups/${gid}/state?day=${todayStr()}&from=${weekStart()}`, {}), at: Date.now()}; }
+  catch(e){ UI.gState[gid] = {data: st && st.data, at: Date.now(), err: errText(e)}; }
+  schedule();
+}
+// Человек открыл группу: запоминаем прошлый заход (чтобы пометить новое), сервер ставит новый
+function gVisit(gid){
+  const g = byId('groups', gid), m = myMember(gid);
+  if(!g || !m) return;
+  UI.gPrev[gid] = m.last_seen || '';
+  UI.gBanner[gid] = newBook(g) ? g.book : ''; // плашка о новой книге: только при первом заходе после смены
+  gSeen(gid);
+  loadGState(gid, true);
+}
+let gSeenT = 0;
+function gSeen(gid){
+  clearTimeout(gSeenT);
+  pb.send(`/api/knigi/groups/${gid}/seen`, {method: 'POST'}).then(res => upsert('gmembers', {id: res.id, last_seen: res.last_seen, book_seen: res.book_seen})).catch(() => {});
+}
+// Состав групп поменялся (вступили, вышли, исключили, удалили): права на заметки, комментарии и фото
+// зависят от состава, поэтому всё связанное с группами перечитывается целиком
+let gRefreshT = 0;
+const G_KEYS = ['groups', 'gmembers', 'gbooks', 'gplan', 'people', 'notes', 'comments'];
+function refreshGroups(){ clearTimeout(gRefreshT); gRefreshT = setTimeout(() => loadAll(G_KEYS).catch(() => {}), 400); }
+
+// Обложка, название и мой прогресс в книге группы
+function gBookCard(g){
+  const b = g.book ? byId('books', g.book) : null;
+  if(!b){
+    return `<section class="card g-book"><p class="hint">Книги группы больше нет в библиотеке.${isGroupOwner(g) ? ' Выберите следующую книгу.' : ' Создатель может выбрать следующую.'}</p>
+      ${isGroupOwner(g) ? `<button type="button" class="btn" data-act="g-next" data-id="${g.id}">Выбрать книгу</button>` : ''}</section>`;
+  }
+  const r = readingOf(b.id), fmt = defaultFormat(b), f = fileOf(b.id, fmt), gb = curGBook(g);
+  const btn = canRead(f) ? `<a class="btn primary" href="${readHref(b.id, fmt, '&g=' + g.id)}">${ICON.book}<span>Читать в группе</span></a>`
+    : f && f.status === 'processing' ? '<p class="soon">Книга обрабатывается.</p>' : '<p class="soon">Этот формат пока не открывается в читалке.</p>';
+  return `<section class="card g-book"><div class="gb-row"><a href="#/b/${b.id}" class="gb-cover" aria-label="Карточка книги">${coverHTML(b, 'sm')}</a>
+      <div class="gb-t"><small>Читаем${gb && gb.started_at ? ' с ' + esc(fmtDate(gb.started_at)) : ''}</small><a href="#/b/${b.id}"><b>${esc(b.title)}</b></a><span>${esc(authorsText(b))}</span>
+        ${r ? `<span class="prog wide"><i style="width:${progPct(r)}%"></i></span><small>Я: ${esc(progText(r))}</small>` : '<small>Вы ещё не открывали эту книгу.</small>'}</div></div>
+    ${btn}</section>`;
+}
+
+/* ---------- План чтения ---------- */
+// Где участник в книге по отношению к цели этапа. Если он читает другой формат, сравниваем по проценту.
+function stageStatus(st, u){
+  const p = u && u.pdf, e = u && u.epub;
+  const pdfPct = p && p.pages ? p.page / p.pages * 100 : null;
+  if(st.format === 'pdf'){
+    const pf = fileOf(curBookOfStage(st), 'pdf'), pages = (pf && pf.pages) || (p && p.pages) || 0;
+    if(p && p.page >= st.page) return {done: true};
+    if(e && pages && e.pct >= st.page / pages * 100) return {done: true};
+    if(p) return {text: `читает (с. ${p.page})`};
+    if(e) return {text: `читает (${Math.round(e.pct)}%)`};
+    return {text: 'не начинал'};
+  }
+  if(e && e.pct >= st.pct) return {done: true};
+  if(pdfPct != null && pdfPct >= st.pct) return {done: true};
+  if(e) return {text: `читает (${Math.round(e.pct)}%)`};
+  if(p) return {text: `читает (с. ${p.page})`};
+  return {text: 'не начинал'};
+}
+const curBookOfStage = st => (S.gbooks.find(x => x.id === st.gbook) || {}).book || '';
+const stageTarget = st => st.format === 'pdf' ? `До с. ${st.page}` : `До ${st.chapter ? '«' + st.chapter + '», ' : ''}${String(Math.round(st.pct * 10) / 10).replace('.', ',')}%`;
+function planBlock(g, state){
+  if(!planOn()) return '';
+  const stages = planOf(g);
+  if(!stages.length) return '';
+  const ms = membersOf(g.id), mem = (state && state.members) || {};
+  const doneOf = st => ms.filter(m => stageStatus(st, mem[m.user]).done).length;
+  const next = stages.find(st => doneOf(st) < ms.length) || stages[stages.length - 1];
+  const k = doneOf(next);
+  const late = next.due < todayStr() && k < ms.length;
+  return `<section class="card g-plan"><div class="block-h"><h2>План чтения</h2>${stages.length > 1 ? `<button type="button" class="btn sm ghost" data-act="g-plan-all" data-id="${g.id}">Весь план · ${stages.length}</button>` : ''}</div>
+    <p class="gp-goal"><b>${esc(stageTarget(next))}</b> ${esc(dueText(next.due))}${late ? ' <span class="tag">срок прошёл</span>' : ''}</p>
+    <div class="gp-bar"><span class="prog wide"><i style="width:${ms.length ? Math.round(k / ms.length * 100) : 0}%"></i></span><small>Дошли: ${k} из ${ms.length}</small></div>
+    ${state ? `<div class="gp-who">${ms.map(m => { const s = stageStatus(next, mem[m.user]);
+      return `<div class="gp-row">${faceHTML(person(m.user), 'xs')}<span class="nm">${esc(nameOf(person(m.user)))}${m.user === me().id ? ' (вы)' : ''}</span><span class="st${s.done ? ' done' : ''}">${s.done ? ICON.check + 'дошёл' : esc(s.text)}</span></div>`; }).join('')}</div>` : '<p class="hint">Загружаю…</p>'}
+  </section>`;
+}
+function openPlanAll(g){
+  const stages = planOf(g), ms = membersOf(g.id), st = UI.gState[g.id], mem = (st && st.data && st.data.members) || {};
+  openForm({title: 'План чтения', noSubmit: false, submit: 'Готово', noCancel: true, async onSave(){},
+    html: `<div class="rows">${stages.map(s => { const k = ms.filter(m => stageStatus(s, mem[m.user]).done).length;
+      return `<div class="plan-row"><b>${esc(stageTarget(s))}</b><small>${esc(dueText(s.due))} · дошли ${k} из ${ms.length}</small></div>`; }).join('')}</div>`});
+}
+// Меню «План чтения» у создателя: этапы, добавить, изменить, удалить, удалить весь план
+function openPlan(g){
+  const stages = planOf(g);
+  openForm({title: 'План чтения', text: stages.length ? 'План видят все участники. Отметка «дошёл» ставится сама, когда человек дочитал до цели этапа.' : 'Плана пока нет. Добавьте этап: до какой страницы или главы и к какой дате. Участники увидят его на экране группы.',
+    html: `${stages.length ? `<div class="rows">${stages.map(s => `<div class="plan-row"><span><b>${esc(stageTarget(s))}</b><small>${esc(dueText(s.due))}</small></span>
+        <span class="pr-acts"><button type="button" class="btn sm" data-dlg="edit" data-id="${s.id}">Изменить</button><button type="button" class="btn sm ghost danger" data-dlg="del" data-id="${s.id}">Удалить</button></span></div>`).join('')}</div>` : ''}
+      <button type="button" class="btn" data-dlg="add">${ICON.plus}<span>Добавить этап</span></button>
+      ${stages.length > 1 ? '<button type="button" class="btn ghost danger" data-dlg="drop">Удалить весь план</button>' : ''}`,
+    noSubmit: true,
+    async onClick(b){
+      const a = b.dataset.dlg, s = stages.find(x => x.id === b.dataset.id);
+      if(a === 'add') thenOpen(() => stageForm(g, null)), dlg.close();
+      else if(a === 'edit' && s) thenOpen(() => stageForm(g, s)), dlg.close();
+      else if(a === 'del' && s){ if(!arm(b, 'Удалить?')) return; await pb.collection('group_plan').delete(s.id); removeLocal('gplan', s.id); toast('Этап удалён'); thenOpen(() => openPlan(byId('groups', g.id) || g)); dlg.close(); }
+      else if(a === 'drop'){ if(!arm(b, 'Точно удалить весь план?')) return; for(const x of stages){ await pb.collection('group_plan').delete(x.id); removeLocal('gplan', x.id); } toast('План удалён'); dlg.close(); }
+    }});
+}
+function stageForm(g, s){
+  const b = byId('books', g.book); if(!b){ info('Нет книги', 'У группы сейчас нет книги.'); return; }
+  const fmts = ['pdf', 'epub'].filter(f => fileOf(b.id, f));
+  if(!fmts.length){ info('План не получится', 'У книги нет файла PDF или EPUB.'); return; }
+  const pdf = fileOf(b.id, 'pdf');
+  const fmt0 = s ? s.format : (fmts.includes(defaultFormat(b)) ? defaultFormat(b) : fmts[0]);
+  const fields = [];
+  if(fmts.length > 1) fields.push({key: 'format', type: 'select', label: 'Формат', options: fmts.map(f => [f, FORMATS[f]]), hint: 'Участник, который читает другой формат, тоже получит «дошёл»: сравнение по проценту книги.'});
+  fields.push({key: 'page', type: 'number', label: `До какой страницы${pdf && pdf.pages ? ` (из ${pdf.pages})` : ''}`});
+  fields.push({key: 'pct', type: 'number', label: 'До какого процента книги'}, {key: 'chapter', label: 'Глава (необязательно, для подписи)', max: 200, placeholder: 'Например: Глава 5'});
+  fields.push({key: 'due', type: 'date', label: 'К какой дате', required: true});
+  const show = f => { form.querySelectorAll('#fld-page, #fld-pct, #fld-chapter').forEach(el => { const box = el.closest('.field'); if(box) box.hidden = (el.id === 'fld-page') !== (f === 'pdf'); }); };
+  openForm({title: s ? 'Этап плана' : 'Новый этап', fields, values: {format: fmt0, page: s && s.page || '', pct: s && s.pct || '', chapter: s ? s.chapter : '', due: s ? s.due : addDays(todayStr(), 7)},
+    onChange(el){ if(el.id === 'fld-format') show(el.value); },
+    async onSave(v){
+      const f = v.format || fmt0;
+      const data = {format: f, due: v.due, page: f === 'pdf' ? +v.page || 0 : 0, pct: f === 'epub' ? +String(v.pct).replace(',', '.') || 0 : 0, chapter: f === 'epub' ? v.chapter : ''};
+      if(f === 'pdf' && !(data.page >= 1)) throw {message: 'Укажите страницу.'};
+      if(f === 'epub' && !(data.pct > 0 && data.pct <= 100)) throw {message: 'Укажите процент от 1 до 100.'};
+      const rec = s ? await pb.collection('group_plan').update(s.id, data) : await pb.collection('group_plan').create({...data, group: g.id});
+      upsert('gplan', rec); toast(s ? 'Этап изменён' : 'Этап добавлен');
+      thenOpen(() => openPlan(byId('groups', g.id) || g));
+    }});
+  show(fmt0);
+}
+
+/* ---------- Сегодня читали и неделя группы ---------- */
+const readAmount = t => [t.pages ? `${t.pages} стр.` : '', t.pct ? `+${String(t.pct).replace('.', ',')}%` : ''].filter(Boolean).join(' и ') || 'меньше страницы';
+function todayBlock(g, state){
+  const ms = membersOf(g.id), mem = (state && state.members) || {};
+  const today = todayStr(), from = weekStart(), days = WD_LETTER.map((_, k) => addDays(from, k)), wi = days.indexOf(today);
+  const readers = ms.filter(m => mem[m.user] && mem[m.user].today && mem[m.user].today.read);
+  const head = `<span></span>${WD_LETTER.map((l, k) => `<span class="gw-l${k === wi ? ' today' : ''}" aria-hidden="true">${l}</span>`).join('')}`;
+  const rows = ms.map(m => {
+    const u = person(m.user), on = (mem[m.user] && mem[m.user].days) || [], mine = m.user === me().id;
+    return `<span class="gw-who">${faceHTML(u, 'xs')}<span class="nm${mine ? ' self' : ''}">${esc(nameOf(u))}${mine ? ' (вы)' : ''}</span>
+        <span class="sr">: на этой неделе читал${on.length ? ' ' + on.length + ' из 7 дней' : 'и 0 дней'}</span></span>` +
+      days.map((d, k) => `<i class="gw-d${on.includes(d) ? ' on' : ''}${k === wi ? ' today' : ''}${k > wi ? ' future' : ''}" aria-hidden="true"></i>`).join('');
+  }).join('');
+  return `<section class="card g-today"><div class="block-h"><h2>Сегодня читали</h2><span class="muted">${readers.length} из ${ms.length}</span></div>
+    ${!state ? '<p class="hint">Загружаю…</p>' : readers.length ? `<div class="gt-list">${readers.map(m => `<div class="gt-row">${faceHTML(person(m.user), 'sm')}<span class="nm">${esc(nameOf(person(m.user)))}${m.user === me().id ? ' (вы)' : ''}</span><b>${esc(readAmount(mem[m.user].today))}</b></div>`).join('')}</div>`
+      : '<p class="empty">Сегодня ещё никто не читал.</p>'}
+    <p class="hint sm">Считается по открытым страницам: быстро пролистанная тоже засчитывается. У EPUB прирост процента за день.</p>
+    <div class="gw-grid" aria-label="Неделя группы">${head}${rows}</div></section>`;
+}
+
+/* ---------- Лента: цитаты и заметки группы ---------- */
+function gFeedItem(n, g, prev){
+  const u = person(n.owner), mine = n.owner === me().id, b = n.book ? byId('books', n.book) : null;
+  const fresh = !mine && prev && String(n.created) > prev;
+  const cm = commentsOf(n.id), cmNew = prev && cm.some(c => c.user !== me().id && String(c.created) > prev);
+  const open = `#/note/${n.id}?g=${g.id}`;
+  const current = b && g.book === b.id;
+  const href = noteHref(n, current ? g.id : '');
+  const where = placeText(n, b);
+  const former = !isMemberOf(g.id, n.owner);
+  return `<article class="gf-item${fresh ? ' new' : ''}">
+    <div class="gf-head">${faceHTML(u, 'sm')}<span class="gf-who"><b>${former ? 'Бывший участник' : esc(nameOf(u)) + (mine ? ' (вы)' : '')}</b><small>${esc(fmtWhen(n.created))}</small></span>${fresh ? '<span class="tag new">новое</span>' : ''}</div>
+    <a class="gf-body" href="${esc(open)}">
+      ${n.kind === 'highlight' ? `<span class="gf-quote" style="--hl:${(HL[n.color] || HL.yellow)[1]}">${esc(n.quote || '')}</span>` : `<b class="gf-title">${esc(n.title || 'Заметка')}</b>`}
+      ${n.body_text ? `<span class="gf-text">${esc(n.body_text)}</span>` : ''}</a>
+    <div class="gf-foot">${where ? (href ? `<a class="page-link" href="${esc(href)}">${esc(where)}</a>` : `<span>${esc(where)}</span>`) : ''}
+      <a class="gf-cm${cmNew ? ' new' : ''}" href="${esc(open)}">${ICON.chat}<span>${cm.length ? cm.length + ' ' + plural(cm.length, ['комментарий', 'комментария', 'комментариев']) : 'Комментировать'}</span></a></div>
+  </article>`;
+}
+function feedBlock(g, bookId, title){
+  const all = groupNotes(g.id, bookId).sort((a, b) => String(b.created).localeCompare(String(a.created)));
+  const f = UI.gFeed[g.id] || '';
+  const list = all.filter(n => !f || (f === 'me' ? n.owner === me().id : n.owner === f));
+  const authors = [...new Set(all.map(n => n.owner))].filter(id => id !== me().id);
+  const prev = UI.gPrev[g.id] || '';
+  const chips = all.length ? `<div class="gf-filter" role="group" aria-label="Чьи записи показать">
+      <button type="button" class="chip sm" data-act="g-feed" data-id="${g.id}" data-f="" aria-pressed="${!f}">Все</button>
+      <button type="button" class="chip sm" data-act="g-feed" data-id="${g.id}" data-f="me" aria-pressed="${f === 'me'}">Только мои</button>
+      ${authors.map(id => `<button type="button" class="chip sm" data-act="g-feed" data-id="${g.id}" data-f="${id}" aria-pressed="${f === id}">${faceHTML(person(id), 'xs')}${esc(isMemberOf(g.id, id) ? nameOf(person(id)) : 'Бывший участник')}</button>`).join('')}</div>` : '';
+  return `<section class="block g-feed"><div class="block-h"><h2>${esc(title)}${all.length ? ` <span class="n">${all.length}</span>` : ''}</h2></div>${chips}
+    ${list.length ? `<div class="gf-list">${list.map(n => gFeedItem(n, g, prev)).join('')}</div>`
+      : `<p class="empty">${all.length ? 'Под этот фильтр записей нет.' : 'Пока пусто. Откройте книгу кнопкой «Читать в группе»: новые цитаты и заметки сразу будут видны группе.'}</p>`}</section>`;
+}
+
+/* ---------- Экраны ---------- */
+VIEWS.groups = () => {
+  const list = myGroups(), max = S.gcfg.maxPerUser || 5, full = list.length >= max;
+  const cards = list.map(g => {
+    const ms = membersOf(g.id), b = g.book ? byId('books', g.book) : null, dot = groupNew(g) || newBook(g);
+    const faces = ms.slice(0, 7).map(m => faceHTML(person(m.user), 'sm')).join('') + (ms.length > 7 ? `<span class="face sm more" aria-hidden="true">+${ms.length - 7}</span>` : '');
+    return `<a class="group-card${dot ? ' dot' : ''}" href="#/g/${g.id}">${b ? coverHTML(b, 'xs') : `<span class="gc-noc">${ICON.people}</span>`}
+      <span class="gc-main"><span class="gc-top"><b>${esc(g.name)}</b>${dot ? '<span class="sr">, есть новое</span>' : ''}</span>
+        <small>${b ? 'Читаем «' + esc(b.title) + '»' : 'Книга не выбрана'}</small>
+        <span class="faces">${faces}</span><small>${ms.length} ${plural(ms.length, MEMBERS_W)}${isGroupOwner(g) ? ' · вы создатель' : ''}</small></span>${ICON.chev}</a>`;
+  }).join('');
+  return `<header class="head"><h1>Группы</h1>${meLink()}</header>
+    ${list.length ? `<div class="groups">${cards}</div>`
+      : '<section class="card"><p>Группа нужна, чтобы читать одну книгу вместе: видеть, кто сегодня читал, делиться цитатами и заметками и обсуждать их.</p><p class="hint">Создайте группу и отправьте ссылку тем, с кем хотите читать. Вступить смогут те, у кого уже есть аккаунт в библиотеке.</p></section>'}
+    <button type="button" class="${list.length ? 'dashed' : 'btn primary big wide'}" data-act="g-new"${full ? ' disabled' : ''}>${full ? `Вы уже в ${max} ${plural(max, GROUPS_W)}` : list.length ? '+ Создать группу' : 'Создать группу'}</button>
+    ${full ? `<p class="hint">Можно состоять не больше чем в ${max} ${plural(max, GROUPS_W)}, вместе с созданными. Чтобы создать новую, выйдите из одной из старых.</p>` : ''}`;
+};
+VIEWS.g = r => {
+  const g = byId('groups', r.id);
+  if(!g || !myMember(g.id)) return groupGone();
+  const gbId = r.q.get('gb');
+  if(gbId) return gPastBook(g, gbId);
+  const ms = membersOf(g.id), own = isGroupOwner(g);
+  loadGState(g.id);
+  if(groupNew(g)) { clearTimeout(gSeenT); gSeenT = setTimeout(() => { if(route().name === 'g' && route().id === g.id) gSeen(g.id); }, 3000); }
+  const st = UI.gState[g.id], state = st && st.data && st.data.book === g.book ? st.data : null;
+  const faces = ms.slice(0, 9).map(m => faceHTML(person(m.user), 'sm')).join('') + (ms.length > 9 ? `<span class="face sm more" aria-hidden="true">+${ms.length - 9}</span>` : '');
+  const banner = UI.gBanner[g.id] && UI.gBanner[g.id] === g.book && byId('books', g.book)
+    ? `<div class="g-banner"><span>Группа начала новую книгу: <b>${esc(byId('books', g.book).title)}</b></span><button type="button" class="icon-btn" data-act="g-banner" data-id="${g.id}" aria-label="Закрыть">${ICON.close}</button></div>` : '';
+  const alone = own && ms.length < 2 ? `<section class="card"><h2>Пригласите участников</h2><p class="hint">Отправьте ссылку тем, с кем хотите читать эту книгу. Вступить смогут те, у кого уже есть аккаунт в библиотеке.</p>
+      <button type="button" class="btn primary" data-act="g-invite" data-id="${g.id}">Пригласить</button></section>` : '';
+  const past = gbooksOf(g.id).filter(x => x.finished_at);
+  return `<div class="nav-head">${backLink('#/groups', 'Группы')}<span class="row-acts">${own ? `<button type="button" class="btn sm" data-act="g-invite" data-id="${g.id}">Пригласить</button>` : ''}
+      <button type="button" class="icon-btn" data-act="g-menu" data-id="${g.id}" aria-label="Действия с группой" aria-haspopup="menu" title="Действия с группой">${ICON.more}</button></span></div>
+    ${banner}
+    <header class="g-head"><h1>${esc(g.name)}</h1>
+      ${g.description ? `<details class="desc g-desc"><summary>Описание</summary><p>${esc(g.description).replace(/\n/g, '<br>')}</p></details>` : ''}
+      <button type="button" class="g-faces" data-act="g-members" data-id="${g.id}" aria-label="Участники: ${ms.length}"><span class="faces">${faces}</span><small>${ms.length} ${plural(ms.length, MEMBERS_W)} · ${own ? 'вы создатель' : 'создатель ' + esc(nameOf(person(g.owner)))}</small></button></header>
+    ${alone}
+    ${gBookCard(g)}
+    ${planBlock(g, state)}
+    ${todayBlock(g, state)}
+    ${g.book ? feedBlock(g, g.book, 'Цитаты и заметки группы') : ''}
+    ${past.length ? `<section class="card"><h2>Прочитанные книги группы</h2><div class="rows">${past.map(x => { const b = x.book ? byId('books', x.book) : null; const n = x.book ? groupNotes(g.id, x.book).length : 0;
+      return `<a class="brow" href="#/g/${g.id}?gb=${x.id}">${b ? coverHTML(b, 'sm') : `<span class="cover sm"><span class="cover-ph" style="--spine:${spineColor(x.id)}"><b>${esc(x.book_title)}</b></span></span>`}
+        <span class="brow-t"><b>${esc(b ? b.title : x.book_title)}</b><small>с ${esc(fmtDate(x.started_at))} по ${esc(fmtDate(x.finished_at))}${n ? ' · ' + n + ' ' + plural(n, ['запись', 'записи', 'записей']) : ''}${b ? '' : ' · книга удалена'}</small></span>${ICON.chev}</a>`; }).join('')}</div></section>` : ''}`;
+};
+// Прочитанная книга группы: заметки и цитаты по ней (комментировать можно)
+function gPastBook(g, gbId){
+  const x = S.gbooks.find(y => y.id === gbId && y.group === g.id);
+  if(!x) return `${backLink('#/g/' + g.id, g.name)}${notFound()}`;
+  const b = x.book ? byId('books', x.book) : null;
+  return `${backLink('#/g/' + g.id, g.name)}
+    <header class="head"><div><p class="crumbs">Прочитанная книга группы</p><h1>${esc(b ? b.title : x.book_title)}</h1></div></header>
+    <p class="hint">Читали с ${esc(fmtDate(x.started_at))} по ${esc(fmtDate(x.finished_at))}.${b ? '' : ' Книги больше нет в библиотеке.'}</p>
+    ${x.book ? feedBlock(g, x.book, 'Цитаты и заметки группы') : '<p class="empty">Записи к удалённой книге не показываются.</p>'}`;
+}
+// Приглашение по ссылке ?group=КОД
+VIEWS.join = r => {
+  const code = r.id;
+  if(!UI.join || UI.join.code !== code){ UI.join = {code, data: null, err: ''}; loadJoin(code); }
+  const j = UI.join, head = '<header class="head"><h1>Приглашение в группу</h1></header>';
+  if(j.err) return head + `<section class="card"><p>${esc(j.err)}</p><a class="btn" href="#/groups">К группам</a></section>`;
+  if(!j.data) return head + '<div class="loading">Проверяю ссылку…</div>';
+  const d = j.data;
+  const top = `<span class="join-ic" aria-hidden="true">${ICON.people}</span><h2>${esc(d.name)}</h2>
+    <p class="muted">Создатель: ${esc(d.owner || 'без имени')} · ${d.members} ${plural(d.members, MEMBERS_W)}${d.book ? ' · читаем «' + esc(d.book) + '»' : ''}</p>
+    ${d.description ? `<p>${esc(d.description)}</p>` : ''}`;
+  if(d.member) return head + `<section class="card join-card">${top}<p>Вы уже участник этой группы.</p><a class="btn primary big wide" href="#/g/${esc(d.id)}">Открыть группу</a></section>`;
+  if(d.full) return head + `<section class="card join-card">${top}<p>В группе уже ${d.max} участников, больше вступить нельзя.</p><a class="btn wide" href="#/groups">К группам</a></section>`;
+  return head + `<section class="card join-card">${top}
+    <p class="hint">Участники увидят ваше имя и фото, сколько вы читаете книгу группы и где вы в ней, а ещё цитаты и заметки, которые вы сами отправите в группу. Остальные ваши заметки по-прежнему видите только вы.</p>
+    <button type="button" class="btn primary big wide" data-act="g-join" data-code="${esc(code)}">Вступить</button>
+    <a class="btn ghost wide" href="#/groups">Не сейчас</a></section>`;
+};
+async function loadJoin(code){
+  try { const d = await pb.send('/api/knigi/join/' + encodeURIComponent(code), {}); if(UI.join && UI.join.code === code) UI.join.data = d; }
+  catch(e){ if(UI.join && UI.join.code === code) UI.join.err = errText(e); }
+  schedule();
+}
+async function joinGroup(code, btn){
+  if(btn) btn.disabled = true;
+  try {
+    const res = await pb.send('/api/knigi/join/' + encodeURIComponent(code), {method: 'POST'});
+    await loadAll(G_KEYS);
+    UI.join = null;
+    const g = byId('groups', res.id);
+    toast(g ? `Вы в группе «${g.name}»` : 'Вы вступили в группу');
+    go('#/g/' + res.id, true);
+  } catch(e){ toast(errText(e)); if(btn) btn.disabled = false; throw e; }
+}
+
+/* ---------- Окна групп ---------- */
+// Выбор книги из библиотеки с поиском (для новой группы и следующей книги)
+function bookPickHTML(q, sel, skip){
+  const h = searchHits(q);
+  const list = (h ? h.books : [...S.books].sort(titleSort)).filter(b => b.id !== skip).slice(0, 60);
+  return list.map(b => `<button type="button" class="pick-row${b.id === sel ? ' on' : ''}" data-dlg="book" data-id="${b.id}" aria-pressed="${b.id === sel}">${coverHTML(b, 'xs')}<span><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small></span>${b.id === sel ? ICON.check : ''}</button>`).join('') || '<p class="empty">Ничего не нашлось.</p>';
+}
+function openNewGroup(){
+  const max = S.gcfg.maxPerUser || 5;
+  if(myGroups().length >= max){ info('Групп уже много', `Можно состоять не больше чем в ${max} ${plural(max, GROUPS_W)}, вместе с созданными. Чтобы создать новую, выйдите из одной из старых.`); return; }
+  let q = '', sel = '';
+  openForm({title: 'Новая группа', fields: [{key: 'name', label: 'Название', required: true, max: 100, placeholder: 'Например: Читаем вместе'}, {key: 'description', label: 'Описание (необязательно)', type: 'textarea', rows: 3, max: 1000}],
+    html: `<div class="field"><span class="flabel">Первая книга</span><label class="search"><span class="sr">Поиск книги</span>${ICON.search}<input type="search" id="gb-q" placeholder="Название или автор" autocomplete="off"></label>
+      <div class="pick-list" id="gb-list">${bookPickHTML('', '')}</div></div>`, submit: 'Создать',
+    onInput(el){ if(el.id === 'gb-q'){ q = el.value; $('#gb-list').innerHTML = bookPickHTML(q, sel); } },
+    onClick(el){ if(el.dataset.dlg === 'book'){ sel = el.dataset.id; $('#gb-list').innerHTML = bookPickHTML(q, sel); formErr(''); } },
+    async onSave(v){
+      if(!sel) throw {message: 'Выберите первую книгу группы.'};
+      const res = await pb.send('/api/knigi/groups', {method: 'POST', body: {name: v.name, description: v.description, book: sel}});
+      await loadAll(G_KEYS);
+      toast('Группа создана'); go('#/g/' + res.id);
+    }});
+}
+function openNextBook(g){
+  let q = '', sel = '';
+  const cur = g.book ? byId('books', g.book) : null;
+  openForm({title: cur ? 'Следующая книга' : 'Книга группы', text: cur ? `«${cur.title}» уйдёт в прочитанные книги группы с сегодняшней датой, план по ней закроется. Её заметки и цитаты останутся доступны группе.` : 'Выберите книгу, которую группа будет читать.',
+    html: `<label class="search"><span class="sr">Поиск книги</span>${ICON.search}<input type="search" id="gb-q" placeholder="Название или автор" autocomplete="off"></label><div class="pick-list" id="gb-list">${bookPickHTML('', '', g.book)}</div>`,
+    submit: 'Начать эту книгу',
+    onInput(el){ if(el.id === 'gb-q'){ q = el.value; $('#gb-list').innerHTML = bookPickHTML(q, sel, g.book); } },
+    onClick(el){ if(el.dataset.dlg === 'book'){ sel = el.dataset.id; $('#gb-list').innerHTML = bookPickHTML(q, sel, g.book); formErr(''); } },
+    async onSave(){
+      if(!sel) throw {message: 'Выберите книгу.'};
+      await pb.send(`/api/knigi/groups/${g.id}/book`, {method: 'POST', body: {book: sel}});
+      await loadAll(['groups', 'gbooks', 'gmembers', 'gplan']);
+      delete UI.gState[g.id]; loadGState(g.id, true);
+      toast('Группа начала новую книгу');
+    }});
+}
+function openInvite(g){
+  const link = groupLink(g);
+  openForm({title: 'Пригласить в группу',
+    text: 'Отправьте ссылку тем, с кем хотите читать вместе. Вступить смогут те, у кого уже есть аккаунт в библиотеке: регистрация по-прежнему только по приглашению администратора.',
+    html: `<div class="field"><label for="g-link">Ссылка на группу «${esc(g.name)}»</label><input type="text" id="g-link" readonly value="${esc(link)}"></div>
+      <div class="share-btns"><button type="button" class="btn primary" data-dlg="copy">Скопировать</button>${navigator.share ? '<button type="button" class="btn" data-dlg="share">Поделиться</button>' : ''}</div>`,
+    submit: 'Готово', noCancel: true, async onSave(){},
+    onClick(b){
+      if(b.dataset.dlg === 'copy') copyText(link);
+      if(b.dataset.dlg === 'share') navigator.share({title: 'Библиотека', text: `Приглашаю в группу «${g.name}» в Библиотеке`, url: link}).catch(() => {});
+    }});
+}
+const personRow = (uid, extra) => { const u = person(uid); return `<div class="member">${faceHTML(u, 'md')}<div class="mb-main"><b>${esc(nameOf(u))}${uid === me().id ? ' (вы)' : ''}</b>${extra || ''}</div></div>`; };
+function openMembers(g){
+  const own = isGroupOwner(g);
+  const rows = membersOf(g.id).map(m => {
+    const acts = own && m.user !== me().id ? `<div class="mb-acts"><button type="button" class="btn sm" data-dlg="owner" data-id="${esc(m.user)}">Сделать создателем</button><button type="button" class="btn sm ghost danger" data-dlg="kick" data-id="${esc(m.user)}">Исключить</button></div>` : '';
+    return personRow(m.user, `<small>${m.user === g.owner ? 'создатель' : 'участник'} · с ${esc(fmtDate(m.created))}</small>` + acts);
+  }).join('');
+  openForm({title: 'Участники', text: own ? 'Если исключить участника, его цитаты и заметки пропадут из ленты группы и станут личными, а комментарии останутся.' : '',
+    html: `<div class="members">${rows}</div>`, submit: 'Готово', noCancel: true, async onSave(){},
+    async onClick(b){
+      const kick = b.dataset.dlg === 'kick';
+      if(!arm(b, kick ? 'Точно исключить?' : 'Точно передать?')) return;
+      b.disabled = true;
+      try {
+        await pb.send(`/api/knigi/groups/${g.id}/${kick ? 'remove' : 'owner'}`, {method: 'POST', body: {user: b.dataset.id}});
+        await loadAll(G_KEYS);
+        toast(kick ? 'Участник исключён' : 'Роль создателя передана');
+        const g2 = byId('groups', g.id);
+        if(g2 && dlg.open && cur && cur.title === 'Участники') openMembers(g2);
+      } catch(e){ toast(errText(e)); b.disabled = false; }
+    }});
+}
+function openRenameGroup(g){
+  openForm({title: 'Название и описание', fields: [{key: 'name', label: 'Название', required: true, max: 100}, {key: 'description', label: 'Описание', type: 'textarea', rows: 3, max: 1000}], values: g,
+    async onSave(v){ upsert('groups', await pb.collection('groups').update(g.id, {name: v.name, description: v.description})); toast('Сохранено'); }});
+}
+function openNewLink(g){
+  openForm({title: 'Сделать новую ссылку?', text: 'Старая ссылка сразу перестанет работать. Те, кто уже вступил, останутся в группе.', submit: 'Сделать новую',
+    async onSave(){
+      const res = await pb.send(`/api/knigi/groups/${g.id}/link`, {method: 'POST'});
+      const g2 = {...g, invite_code: res.invite_code};
+      upsert('groups', g2); thenOpen(() => openInvite(g2));
+    }});
+}
+function leaveGroup(g){
+  const own = isGroupOwner(g);
+  if(own && membersOf(g.id).length > 1){
+    info('Сначала передайте роль создателя', 'Создатель не может просто выйти из группы. Откройте «Участники» и нажмите «Сделать создателем» рядом с тем, кто будет вести группу. После этого можно выйти.');
+    return;
+  }
+  openForm({title: 'Выйти из группы?', submit: 'Выйти', danger: true,
+    text: own ? `Вы единственный участник, поэтому группа «${g.name}» удалится.` : `Ваши цитаты и заметки пропадут из ленты группы «${g.name}» и станут личными. Ваши комментарии останутся с подписью «Бывший участник».`,
+    async onSave(){
+      await pb.send(`/api/knigi/groups/${g.id}/leave`, {method: 'POST'});
+      await loadAll(G_KEYS);
+      toast(own ? 'Группа удалена' : 'Вы вышли из группы'); go('#/groups', true);
+    }});
+}
+function deleteGroup(g){
+  openForm({title: 'Удалить группу?', submit: 'Удалить', danger: true,
+    text: `Группа «${g.name}» удалится у всех участников вместе с комментариями и планом. Цитаты и заметки участников останутся у них как личные.`,
+    async onSave(){ await pb.collection('groups').delete(g.id); await loadAll(G_KEYS); toast('Группа удалена'); go('#/groups', true); }});
+}
+function groupMenu(btn, g){
+  const own = isGroupOwner(g);
+  openMenu(btn, [
+    ...(own ? [{label: 'Пригласить', run: () => openInvite(g)}] : []),
+    {label: 'Участники', run: () => openMembers(g)},
+    ...(own && planOn() ? [{label: 'План чтения', run: () => openPlan(g)}] : []),
+    ...(own ? [{label: g.book ? 'Книга прочитана, выбрать следующую' : 'Выбрать книгу', run: () => openNextBook(g)},
+      {label: 'Название и описание', run: () => openRenameGroup(g)}, {label: 'Новая ссылка', run: () => openNewLink(g)}] : []),
+    {label: 'Выйти из группы', danger: !own, run: () => leaveGroup(g)},
+    ...(own ? [{label: 'Удалить группу', danger: true, run: () => deleteGroup(g)}] : [])
+  ]);
+}
+// «Видно группе»: в какую группу отправить заметку или цитату (только группы, которые сейчас читают эту книгу)
+function pickNoteGroup(n, done){
+  const gs = groupsOfBook(n.book);
+  const curG = n.group && byId('groups', n.group);
+  if(curG && !gs.includes(curG)) gs.push(curG);
+  if(!gs.length){ info('Нет группы с этой книгой', 'Отправить запись можно в группу, которая сейчас читает эту книгу.'); return; }
+  const what = n.kind === 'highlight' ? 'цитату' : 'заметку';
+  openForm({title: 'Видно группе', text: `Кто увидит эту ${what}.`,
+    html: `<fieldset class="checks"><label class="check-row"><input type="radio" name="ng" value=""${!n.group ? ' checked' : ''}><span><b>Только мне</b></span></label>
+      ${gs.map(g => `<label class="check-row"><input type="radio" name="ng" value="${g.id}"${n.group === g.id ? ' checked' : ''}><span><b>Группе «${esc(g.name)}»</b><small>${membersOf(g.id).length} ${plural(membersOf(g.id).length, MEMBERS_W)}${g.book !== n.book ? ' · прошлая книга группы' : ''}</small></span></label>`).join('')}</fieldset>`,
+    async onSave(){
+      const v = (form.querySelector('input[name=ng]:checked') || {}).value || '';
+      if(v === (n.group || '')) return;
+      const rec = await pb.collection('notes').update(n.id, {group: v}, {fields: hlFields});
+      upsert('notes', hlStrip(rec));
+      if(done) done(rec);
+      toast(v ? `Видно группе «${(byId('groups', v) || {}).name || ''}»` : 'Теперь видно только вам');
+    }});
+}
+
+/* ---------- Комментарии ---------- */
+function commentsHTML(n){
+  if(!n || !n.group || !myMember(n.group)) return '';
+  const g = byId('groups', n.group), list = commentsOf(n.id), own = isGroupOwner(g);
+  const prev = UI.gPrev[n.group] || '';
+  const rows = list.map(c => {
+    const mine = c.user === me().id, member = isMemberOf(n.group, c.user), u = person(c.user);
+    const canDel = mine || n.owner === me().id || own;
+    const editing = UI.cmEdit === c.id;
+    return `<div class="cm${prev && !mine && String(c.created) > prev ? ' new' : ''}" id="cm-${c.id}">${member ? faceHTML(u, 'sm') : '<span class="face sm gone" aria-hidden="true">?</span>'}
+      <div class="cm-main"><div class="cm-head"><b>${member ? esc(nameOf(u)) + (mine ? ' (вы)' : '') : 'Бывший участник'}</b><small>${esc(agoText(c.created))}${c.edited ? ' · изменено' : ''}</small></div>
+        ${editing ? `<textarea id="cm-edit" rows="3" maxlength="2000" aria-label="Изменить комментарий">${esc(c.text)}</textarea><div class="cm-acts"><button type="button" class="btn sm primary" data-act="cm-save" data-id="${c.id}">Сохранить</button><button type="button" class="btn sm ghost" data-act="cm-cancel">Отмена</button></div>`
+          : `<p class="cm-text">${linkify(c.text)}</p>${mine || canDel ? `<div class="cm-acts">${mine ? `<button type="button" class="linkbtn sm" data-act="cm-edit" data-id="${c.id}">Изменить</button>` : ''}${canDel ? `<button type="button" class="linkbtn sm danger" data-act="cm-del" data-id="${c.id}">Удалить</button>` : ''}</div>` : ''}`}</div></div>`;
+  }).join('');
+  return `<section class="card comments" id="cm-box" data-note="${n.id}"><h2>Комментарии${list.length ? ` <span class="n">${list.length}</span>` : ''}</h2>
+    <p class="hint sm">Видят участники группы «${esc(g ? g.name : '')}».</p>
+    ${rows ? `<div class="cm-list">${rows}</div>` : ''}
+    <div class="cm-form"><label class="sr" for="cm-text">Комментарий</label><textarea id="cm-text" rows="2" maxlength="2000" placeholder="Написать комментарий">${esc(UI.cmDraft[n.id] || '')}</textarea>
+      <button type="button" class="btn primary" data-act="cm-send" data-id="${n.id}">Отправить</button></div></section>`;
+}
+// Перерисовать только комментарии (экран заметки с редактором не перерисовывается целиком)
+function cmPaint(){
+  const box = $('#cm-box'); if(!box) return;
+  const n = byId('notes', box.dataset.note) || (ED.rec && ED.rec.id === box.dataset.note ? ED.rec : null);
+  const act = document.activeElement, fid = act && (act.id === 'cm-text' || act.id === 'cm-edit') ? act.id : '';
+  const pos = fid ? act.selectionStart : 0, editVal = fid === 'cm-edit' ? act.value : null;
+  const html = commentsHTML(n);
+  if(!html){ box.remove(); return; }
+  box.outerHTML = html;
+  if(editVal != null){ const e = $('#cm-edit'); if(e) e.value = editVal; }
+  if(fid){ const el = document.getElementById(fid); if(el){ el.focus(); try { el.setSelectionRange(pos, pos); } catch(e){} } }
+}
+async function cmSend(noteId, btn){
+  const ta = $('#cm-text'), text = ta ? ta.value.trim() : '';
+  if(!text){ toast('Напишите комментарий.'); return; }
+  if(text.length > 2000){ toast('Комментарий длиннее 2000 знаков.'); return; }
+  btn.disabled = true;
+  try {
+    upsert('comments', await pb.collection('note_comments').create({note: noteId, user: me().id, text}));
+    UI.cmDraft[noteId] = ''; if(ta) ta.value = '';
+    cmPaint();
+  } catch(e){ toast(errText(e)); }
+  finally { btn.disabled = false; }
+}
+async function cmSave(id){
+  const ta = $('#cm-edit'), text = ta ? ta.value.trim() : '';
+  if(!text){ toast('Комментарий пустой. Чтобы убрать его, нажмите «Удалить».'); return; }
+  try { upsert('comments', await pb.collection('note_comments').update(id, {text})); UI.cmEdit = ''; cmPaint(); } catch(e){ toast(errText(e)); }
+}
+async function cmDelete(id, btn){
+  if(!arm(btn, 'Удалить?')) return;
+  try { await pb.collection('note_comments').delete(id); removeLocal('comments', id); cmPaint(); toast('Комментарий удалён'); } catch(e){ toast(errText(e)); }
+}
+
 /* ---------- Профиль ---------- */
 VIEWS.profile = () => {
   const u = me();
@@ -1111,6 +1663,7 @@ VIEWS.profile = () => {
       ${isAdmin() ? `<a href="#/review">${ICON.inbox}На проверке<span class="n${reviewCount() ? ' hot' : ''}">${reviewCount()}</span>${ICON.chev}</a>` : ''}
       ${isAdmin() ? `<a href="#/log">${ICON.log}Журнал чтения${ICON.chev}</a>` : ''}
     </nav>
+    ${isAdmin() ? `<p class="hint">Групп в библиотеке: ${S.gcount == null ? '…' : S.gcount}</p>` : ''}
     ${isAdmin() ? `<details class="fold" id="inv-fold"${UI.invOpen ? ' open' : ''}><summary><span>Приглашения</span>${ICON.chev}</summary><div class="fold-body">
       <p class="hint">Новый человек может зарегистрироваться только по приглашению. Создайте его и отправьте ссылку.</p>
       <div class="field"><label for="i-note">Для кого (заметка)</label><input type="text" id="i-note" placeholder="Например: мама"></div>
@@ -1137,6 +1690,8 @@ VIEWS.profile = () => {
 };
 async function loadInvites(){ try { S.invites = await pb.collection('invites').getFullList(); schedule(); } catch(e){} }
 async function loadUsers(){ try { S.users = await pb.send('/api/knigi/admin/users', {}); schedule(); } catch(e){} }
+async function loadGroupCfg(){ try { S.gcfg = await pb.send('/api/knigi/group-config', {}); } catch(e){} }
+async function loadGCount(){ if(!isAdmin()) return; try { S.gcount = (await pb.send('/api/knigi/admin/groups-count', {})).count; schedule(); } catch(e){} }
 async function loadOwner(){ try { S.owner = await pb.send('/api/knigi/owner', {}); schedule(); } catch(e){} }
 async function loadDisk(){ if(!isAdmin()) return; try { S.disk = await pb.send('/api/knigi/disk', {}); schedule(); } catch(e){} }
 
@@ -1220,7 +1775,10 @@ VIEWS.note = r => {
   const bookId = isNew ? r.q.get('book') || '' : n.book;
   const b = bookId ? byId('books', bookId) : null;
   const own = isNew || n.owner === me().id;
-  const back = b ? '#/b/' + b.id + (kind === 'lesson' ? '?tab=lessons' : '') : '#/notes';
+  const fromG = r.q.get('g') ? byId('groups', r.q.get('g')) : null; // открыли из ленты группы: «Назад» в группу
+  const back = fromG ? '#/g/' + fromG.id : b ? '#/b/' + b.id + (kind === 'lesson' ? '?tab=lessons' : '') : '#/notes';
+  const backText = fromG ? fromG.name : b ? b.title : 'Заметки';
+  if(!isNew && n.kind === 'highlight') return hlPage(n, b, own, back, backText);
   const page = isNew ? (+r.q.get('page') || '') : (n.page || '');
   const ctx = isNew && UI.noteCtx && UI.noteCtx.book === bookId ? UI.noteCtx : null;
   const fmt = isNew ? (ctx ? ctx.format : (b && fileOf(b.id, 'pdf') ? 'pdf' : '')) : (n.format || (n.page ? 'pdf' : ''));
@@ -1230,15 +1788,22 @@ VIEWS.note = r => {
   const epubPlace = fmt === 'epub' ? (isNew ? (ctx && ctx.place) : n.place) || '' : '';
   const epubHref = !isNew && fmt === 'epub' ? noteHref(n) : '';
   if(!own){
-    return `${backLink(back, b ? b.title : 'Заметки')}
-      <article class="card note-view"><div class="note-top">${S.owner ? faceHTML(S.owner, 'xs') : ''}<p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'} автора библиотеки</p><span class="ed-state"></span>${fullBtnHTML()}</div>
+    // заметка участника группы или общая заметка автора библиотеки
+    const grpNote = n.group && !n.shared;
+    const who = grpNote ? `${faceHTML(person(n.owner), 'xs')}<p class="note-kind">Заметка · ${esc(isMemberOf(n.group, n.owner) ? nameOf(person(n.owner)) : 'бывший участник')}</p>`
+      : `${S.owner ? faceHTML(S.owner, 'xs') : ''}<p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'} автора библиотеки</p>`;
+    return `${backLink(back, backText)}
+      <article class="card note-view"><div class="note-top">${who}<span class="ed-state"></span>${fullBtnHTML()}</div>
         <h1>${esc(n.title || 'Без заголовка')}</h1><p class="note-meta">${bookLine}${epubPlace ? ' · ' + (epubHref ? `<a class="page-link" href="${esc(epubHref)}">${esc(placeText(n, b))}</a>` : esc(epubPlace)) : n.page ? ' · ' + pageLink(n.page) : ''} · изменено ${esc(fmtWhen(n.updated))}</p>
         <div class="prose" id="note-body"><p class="muted">Загружаю…</p></div></article>
-      ${kind === 'lesson' ? filesBlock(n, false) : ''}`;
+      ${kind === 'lesson' ? filesBlock(n, false) : ''}${commentsHTML(n)}`;
   }
-  return `${backLink(back, b ? b.title : 'Заметки')}
+  // «Видно группе»: у новой заметки из группового режима сразу включено, у отправленной в группу можно выключить
+  const ng = kind !== 'note' ? null : isNew ? newNoteGroup(r, bookId) : n.group ? byId('groups', n.group) : null;
+  const groupCtl = ng ? `<label class="check-chip sm grp-chip"><input type="checkbox" id="ed-group" value="${ng.id}"${isNew || n.group ? ' checked' : ''}><span>Видно группе «${esc(ng.name)}»</span></label>` : '';
+  return `${backLink(back, backText)}
     <article class="card note-edit">
-      <div class="note-top"><p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'}</p>${n && n.shared ? '<span class="tag shared">Видна всем</span>' : ''}
+      <div class="note-top"><p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'}</p>${n && n.shared ? '<span class="tag shared">Видна всем</span>' : ''}${groupCtl}
         <span class="ed-state" id="ed-state" role="status">${esc(ED.state)}</span>
         <button type="button" class="icon-btn" data-act="note-menu" aria-label="Действия с заметкой" aria-haspopup="menu">${ICON.more}</button></div>
       <label class="sr" for="ed-title">Заголовок</label><input type="text" id="ed-title" class="ed-title" maxlength="300" placeholder="Заголовок" value="${esc(n ? n.title : '')}">
@@ -1246,8 +1811,29 @@ VIEWS.note = r => {
         : `<label class="ed-page">страница <input type="number" id="ed-page" min="0" max="99999" inputmode="numeric" value="${esc(page)}"></label>${pdfOk ? `<a class="btn sm ghost" id="ed-open" href="${readHref(b.id, 'pdf', page ? '&p=' + page : '')}">Открыть книгу</a>` : ''}`}</div>
       <div id="ed-box" class="ed-box"><p class="muted">Загружаю редактор…</p></div>
     </article>
-    ${kind === 'lesson' && n ? filesBlock(n, true) : kind === 'lesson' ? '<p class="hint">Файлы можно будет прикрепить, когда в уроке появится текст или заголовок.</p>' : ''}`;
+    ${kind === 'lesson' && n ? filesBlock(n, true) : kind === 'lesson' ? '<p class="hint">Файлы можно будет прикрепить, когда в уроке появится текст или заголовок.</p>' : ''}${n ? commentsHTML(n) : ''}`;
 };
+// Группа для новой заметки: открыли из группового режима, человек в группе, группа читает эту книгу
+function newNoteGroup(r, bookId){ const g = byId('groups', r.q.get('g') || ''); return g && bookId && g.book === bookId && myMember(g.id) ? g : null; }
+// Экран цитаты: текст цитаты, мысль, место в книге; своя цитата меняется здесь же; у групповой комментарии
+function hlPage(n, b, own, back, backText){
+  const g = n.group ? byId('groups', n.group) : null, u = person(n.owner);
+  const href = noteHref(n, g && b && g.book === b.id && myMember(g.id) ? g.id : '');
+  const where = placeText(n, b);
+  const author = n.group && !n.shared && !isMemberOf(n.group, n.owner) ? 'бывший участник' : nameOf(u);
+  return `${backLink(back, backText)}
+    <article class="card hl-view" style="--hl:${(HL[n.color] || HL.yellow)[1]}">
+      <div class="note-top">${own ? '' : faceHTML(n.shared ? (S.owner || u) : u, 'xs')}<p class="note-kind">${own ? 'Цитата' : n.shared && !n.group ? 'Цитата автора библиотеки' : 'Цитата · ' + esc(author)}</p>
+        ${own && n.group ? `<span class="tag grp">Видно группе${g ? ' «' + esc(g.name) + '»' : ''}</span>` : ''}${own && n.shared ? '<span class="tag">Видна всем</span>' : ''}</div>
+      <blockquote class="hl-quote">${esc(n.quote || '')}</blockquote>
+      <div class="prose hl-thought" id="note-body">${n.body_text ? `<p>${esc(n.body_text)}</p>` : ''}</div>
+      <p class="note-meta">${b ? `<a href="#/b/${b.id}">${esc(b.title)}</a>` : esc(n.book_title || 'Без книги')}${where ? ' · ' + (href ? `<a class="page-link" href="${esc(href)}">${esc(where)}</a>` : esc(where)) : ''} · ${esc(fmtWhen(n.created))}</p>
+      ${own ? `<div class="row-acts hl-acts"><button type="button" class="btn sm" data-act="hl-thought" data-id="${n.id}">${ICON.pen}<span>Мысль</span></button>
+        ${groupsOfBook(n.book).length || n.group ? `<button type="button" class="btn sm" data-act="hl-group" data-id="${n.id}">${ICON.people}<span>Видно группе</span></button>` : ''}
+        <button type="button" class="btn sm ghost danger" data-act="hl-del" data-id="${n.id}">Удалить цитату</button></div>` : ''}
+    </article>
+    ${commentsHTML(n)}`;
+}
 function filesBlock(n, own){
   const files = S.nfiles.filter(f => f.note === n.id).sort((a, b) => (a.sort || 0) - (b.sort || 0) || String(a.created).localeCompare(String(b.created)));
   const ups = UP.items.filter(u => u.kind === 'file' && u.note === n.id && u.state !== 'done');
@@ -1273,7 +1859,11 @@ async function edMount(r){
     if(ED.id !== id) return;
     ED.rec = rec;
   }
-  if(!own){ const box = $('#note-body'); if(box) box.innerHTML = cleanHtml(rec.body) || '<p class="muted">Текста нет.</p>'; return; }
+  if(!own || (rec && rec.kind === 'highlight')){
+    const box = $('#note-body');
+    if(box) box.innerHTML = cleanHtml(rec.body) || (rec.kind === 'highlight' ? (own ? '<p class="muted">Мысли пока нет.</p>' : '') : '<p class="muted">Текста нет.</p>');
+    return;
+  }
   try { await loadQuill(); } catch(e){ $('#ed-box').innerHTML = `<p class="form-err">${esc(e.message)}</p>`; return; }
   const box = $('#ed-box'); if(!box || ED.id !== id) return;
   box.innerHTML = '<div id="ed-q"></div>';
@@ -1338,10 +1928,11 @@ async function edSave(){
       // заметка из читалки: формат и место в книге (у EPUB глава и процент)
       const ctx = UI.noteCtx && UI.noteCtx.book === book ? UI.noteCtx : null;
       const extra = ctx ? {format: ctx.format, place: ctx.place || '', anchor: ctx.anchor || null} : book && fileOf(book, 'pdf') && d.page ? {format: 'pdf'} : {};
-      rec = await pb.collection('notes').create({id, owner: me().id, kind, book, ...extra, ...d});
+      const ge = $('#ed-group'), group = kind === 'note' && ge && ge.checked ? ge.value : '';
+      rec = await pb.collection('notes').create({id, owner: me().id, kind, book, ...extra, ...d, ...(group ? {group} : {})});
       UI.noteCtx = null;
       ED.isNew = false;
-      if(route().name === 'note' && route().id === 'new'){ history.replaceState(null, '', '#/note/' + id); UI.fullFor = id; }
+      if(route().name === 'note' && route().id === 'new'){ history.replaceState(null, '', '#/note/' + id + (r.q.get('g') ? '?g=' + r.q.get('g') : '')); UI.fullFor = id; }
     } else {
       rec = await pb.collection('notes').update(id, d);
     }
@@ -1367,6 +1958,7 @@ function noteMenu(btn){
   const items = [];
   items.push({label: UI.fullNow ? 'Свернуть' : 'На весь экран', run: () => setFull(!UI.fullNow)});
   if(isAdmin()) items.push({label: 'Настройки', run: () => noteSettings()});
+  if(n && n.kind === 'note' && n.book && (n.group || groupsOfBook(n.book).length)) items.push({label: 'Видно группе', run: () => edSave().then(() => pickNoteGroup(ED.rec || n, rec => { if(ED.rec && ED.rec.id === rec.id) ED.rec = {...ED.rec, group: rec.group}; render(true); }))});
   items.push({label: n && n.book ? 'Сменить книгу' : 'Привязать к книге', run: () => pickBook(n)});
   if(n) items.push({label: n.kind === 'lesson' ? 'Удалить урок' : 'Удалить заметку', danger: true, run: () => openForm({title: n.kind === 'lesson' ? 'Удалить урок?' : 'Удалить заметку?',
     text: `«${n.title || 'Без заголовка'}» удалится полностью${n.kind === 'lesson' ? ' вместе с прикреплёнными файлами' : ''}. Вернуть её будет нельзя.`, submit: 'Удалить', danger: true,
@@ -1396,7 +1988,7 @@ function pickBook(n){
       await edSave();
       const book = el.dataset.id;
       if(!ED.rec){ dlg.close(); go('#/note/new?book=' + book, true); return; }
-      const rec = await pb.collection('notes').update(ED.rec.id, {book});
+      const rec = await pb.collection('notes').update(ED.rec.id, {book, ...(ED.rec.group && !groupsOfBook(book).some(g => g.id === ED.rec.group) ? {group: ''} : {})});
       ED.rec = rec; upsert('notes', {...rec, body_text: String(rec.body_text || '').slice(0, 160), body: undefined, search: undefined});
       dlg.close(); render(true);
     }});
@@ -1625,7 +2217,7 @@ function mergeBook(b){
       }
       const parts = [`файлы: ${m.formats.map(f => FORMATS[f]).join(', ') || 'нет'}`];
       if(m.shelves) parts.push(`места на полках: ${m.shelves}`);
-      const notes = [m.notes ? `${m.notes} ${plural(m.notes, NOTES_W)}` : '', m.lessons ? `${m.lessons} ${plural(m.lessons, ['урок','урока','уроков'])}` : '', m.highlights ? `${m.highlights} ${plural(m.highlights, ['выделение','выделения','выделений'])}` : ''].filter(Boolean);
+      const notes = [m.notes ? `${m.notes} ${plural(m.notes, NOTES_W)}` : '', m.lessons ? `${m.lessons} ${plural(m.lessons, ['урок','урока','уроков'])}` : '', m.highlights ? `${m.highlights} ${plural(m.highlights, ['цитата','цитаты','цитат'])}` : ''].filter(Boolean);
       if(notes.length) parts.push(notes.join(', ') + ' (у всех пользователей)');
       if(m.readers) parts.push(`прогресс чтения: ${m.readers} ${plural(m.readers, ['человек','человека','человек'])}`);
       thenOpen(() => openForm({title: 'Объединить книги?', text: `Останется «${b.title}» (эта карточка). Из «${other.title}» сюда перейдут: ${parts.join('; ')}. Если у этой книги нет года, описания или обложки, они возьмутся у второй. Карточка «${other.title}» пропадёт. Отменить объединение нельзя.`,
@@ -1643,7 +2235,7 @@ function removeFormat(b){
   if(files.length < 2){ info('Это последний формат', 'Последний формат убрать нельзя. Чтобы убрать книгу совсем, выберите «Удалить книгу».'); return; }
   const ask = async f => {
     const m = await pb.send(`/api/knigi/book-files/${f.id}`, {});
-    thenOpen(() => openForm({title: `Убрать ${FORMATS[f.format]}?`, text: `Из книги «${b.title}» удалятся файл ${FORMATS[f.format]} и его текст, прогресс чтения в ${FORMATS[f.format]}${m.readers ? ` (у ${m.readers} ${plural(m.readers, ['человека','человек','человек'])})` : ''} и выделения в этом формате у всех: ${m.highlights}. Заметки останутся. Вернуть можно только новой загрузкой файла.`,
+    thenOpen(() => openForm({title: `Убрать ${FORMATS[f.format]}?`, text: `Из книги «${b.title}» удалятся файл ${FORMATS[f.format]} и его текст, прогресс чтения в ${FORMATS[f.format]}${m.readers ? ` (у ${m.readers} ${plural(m.readers, ['человека','человек','человек'])})` : ''} и цитаты в этом формате у всех: ${m.highlights}. Заметки останутся. Вернуть можно только новой загрузкой файла.`,
       submit: 'Убрать', danger: true, async onSave(){
         await pb.send(`/api/knigi/book-files/${f.id}`, {method: 'DELETE'});
         delete UI.cardFmt[b.id];
@@ -1841,7 +2433,7 @@ function renderUploadsPanel(){
 const READER = {mode: ''}; // 'pdf' или 'epub': какая читалка сейчас на экране
 const RD = {open: false, key: '', src: null, doc: null, lib: null, link: null, linkAt: 0, mark: '', title: '', page: 1, pages: 0, zoom: 1,
   cache: new Map(), seq: 0, seen: new Set(), saveT: 0, pending: [], pause: 0, bars: true, outline: null, back: '#/',
-  hls: [], marker: false, mk: null, flash: ''};
+  hls: [], marker: false, mk: null, flash: '', group: null, ghls: [], focusO: ''};
 const rdText = () => isAdmin() || READER_TEXT_LAYER;
 // Телефон и планшет: у читателя обычное выделение выключено (иначе Safari покажет «Скопировать» и «Поделиться»), выделяет «Маркер»
 const touchUI = () => window.matchMedia('(hover: none) and (pointer: coarse)').matches;
@@ -1925,6 +2517,7 @@ function rdShell(){
       <button type="button" class="icon-btn" data-rd="toc" id="rd-toc" aria-label="Оглавление" title="Оглавление" hidden>${ICON.toc}</button>
       ${book ? markerBtn() + `<button type="button" class="btn sm" data-rd="note" title="Заметка к этой странице">${ICON.pen}<span>Заметка</span></button>` : ''}
       <button type="button" class="icon-btn" data-rd="menu" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button></div>
+    <div class="rd-gline" id="rd-gline" aria-hidden="true"></div>
     <div class="rd-stage" id="rd-stage"><div class="rd-pagebox" id="rd-pagebox"></div></div>
     <div class="rd-bottom"><button type="button" class="icon-btn" data-rd="prev" aria-label="Предыдущая страница" title="Предыдущая страница">${ICON.left}</button>
       <button type="button" class="rd-num" data-rd="goto" id="rd-num" aria-label="Перейти к странице" title="Перейти к странице">…</button>
@@ -1956,6 +2549,11 @@ function rdOpenScreen(){
 function rdFail(text){
   $('#reader').innerHTML = `<div class="rd-msg"><div class="rd-msg-box"><p>${esc(text)}</p><button type="button" class="btn" data-rd="close">Назад</button></div></div>`;
 }
+// Групповой режим (#/read/ID?g=ГРУППА): человек в группе, группа сейчас читает эту книгу.
+// Новые цитаты и заметки по умолчанию видны группе, можно показать цитаты других участников.
+function readerGroup(r, bookId){ const g = byId('groups', r.q.get('g') || ''); return g && g.book === bookId && myMember(g.id) ? g : null; }
+const rdGroup = () => READER.mode === 'epub' ? EP.group : RD.group;
+const grpShow = () => !!loadLS('grpHls', false);
 async function rdShow(r){
   rdOpenScreen();
   hpHide();
@@ -1972,14 +2570,19 @@ async function rdShow(r){
   const key = src.kind + ':' + src.id;
   const want = +r.q.get('p') || 0;
   RD.flash = r.q.get('hl') || '';
+  RD.focusO = RD.flash;
+  const grp = src.kind === 'book' ? readerGroup(r, src.id) : null, grpChanged = (RD.group && RD.group.id) !== (grp && grp.id);
+  RD.group = grp;
   if(RD.key === key && RD.doc){
-    if($('#rd-pagebox') == null){ RD.src = src; rdShell(); rdHeader(); $('#rd-slider').max = RD.pages; rdMarkerState(); const t = $('#rd-toc'); if(t) t.hidden = !RD.outline; }
+    if($('#rd-pagebox') == null){ RD.src = src; rdShell(); $('#rd-slider').max = RD.pages; rdMarkerState(); const t = $('#rd-toc'); if(t) t.hidden = !RD.outline; }
+    rdHeader();
+    if(grpChanged || RD.flash) rdLoadGHls(); else rdDrawAll();
     if(want && want !== RD.page) rdGo(want); else rdGo(RD.page, true);
     return;
   }
   // другая книга: прежнюю закрываем
   rdDispose();
-  RD.key = key; RD.src = src; RD.zoom = 1; RD.seen = new Set(); RD.pause = 0; RD.pending = []; RD.hls = [];
+  RD.key = key; RD.src = src; RD.zoom = 1; RD.seen = new Set(); RD.pause = 0; RD.pending = []; RD.hls = []; RD.ghls = [];
   if(src.kind === 'book'){
     const b = byId('books', src.id);
     if(!b){ RD.key = ''; rdFail('Книга не найдена.'); return; }
@@ -2008,7 +2611,7 @@ async function rdShow(r){
     const rd = src.kind === 'book' ? readOf(src.id, 'pdf') : null;
     const start = Math.min(RD.pages, Math.max(1, want || (rd ? rd.page : 1)));
     $('#rd-slider').max = RD.pages;
-    if(src.kind === 'book') rdLoadHls();
+    if(src.kind === 'book'){ rdLoadHls(); rdLoadGHls(); }
     rdGo(start, true);
     doc.getOutline().then(o => { RD.outline = o && o.length ? o : null; const t = $('#rd-toc'); if(t) t.hidden = !RD.outline; }).catch(() => {});
   } catch(e){
@@ -2016,12 +2619,19 @@ async function rdShow(r){
     rdMsg(e && e.name === 'PasswordException' ? 'Файл защищён паролем, его нельзя открыть.' : e && e.name === 'InvalidPDFException' ? 'Файл повреждён или это не PDF.' : errText(e), true);
   }
 }
-function rdHeader(){ const t = $('#rd-title'); if(t) t.textContent = READER.mode === 'epub' ? EP.title : RD.title; }
+function rdHeader(){
+  const t = $('#rd-title'); if(!t) return;
+  const g = rdGroup();
+  t.innerHTML = `<span class="rd-t1">${esc(READER.mode === 'epub' ? EP.title : RD.title)}</span>${g ? `<small class="rd-grp">Группа: ${esc(g.name)}</small>` : ''}`;
+  t.title = g ? 'Назад в группу' : 'Карточка книги';
+  const gl = $('#rd-gline'); if(gl) gl.textContent = g ? 'Группа: ' + g.name : '';
+  $('#reader').classList.toggle('in-group', !!g);
+}
 function rdDispose(){
   clearTimeout(RD.saveT); clearTimeout(RD.pauseT);
   if(RD.doc) RD.doc.destroy().catch(() => {});
   else if(RD.task) RD.task.destroy().catch(() => {});
-  RD.doc = null; RD.task = null; RD.transport = null; RD.cache.clear(); RD.key = ''; RD.link = null; RD.outline = null; RD.pause = 0; RD.pending = []; RD.hls = []; RD.mk = null;
+  RD.doc = null; RD.task = null; RD.transport = null; RD.cache.clear(); RD.key = ''; RD.link = null; RD.outline = null; RD.pause = 0; RD.pending = []; RD.hls = []; RD.ghls = []; RD.mk = null;
 }
 function rdClose(){
   askHide();
@@ -2137,7 +2747,7 @@ function saveReading(id, fmt, res){
 function rdSave(leaving){
   clearTimeout(RD.saveT);
   if(!RD.src || RD.src.kind !== 'book' || !RD.doc) return;
-  const body = {format: 'pdf', page: RD.page, pages: RD.pages, seen: [...RD.seen]};
+  const body = {format: 'pdf', page: RD.page, pages: RD.pages, seen: [...RD.seen], day: todayStr()};
   RD.seen = new Set();
   const id = RD.src.id;
   const r = readOf(id, 'pdf');
@@ -2193,27 +2803,74 @@ function rdNote(){
     const c = EP.cur || {};
     UI.noteCtx = {book: EP.bookId, format: 'epub', place: epPlace(c.chapter, c.pct), anchor: c.cfi ? {v: 1, cfi: c.cfi, pct: c.pct, chapter: c.chapter || ''} : null};
     epSave(false);
-    go(`#/note/new?book=${EP.bookId}`);
+    go(`#/note/new?book=${EP.bookId}${EP.group ? '&g=' + EP.group.id : ''}`);
     return;
   }
   UI.noteCtx = {book: RD.src.id, format: 'pdf', place: 'с. ' + RD.page};
   rdSave(false);
-  go(`#/note/new?book=${RD.src.id}&page=${RD.page}`);
+  go(`#/note/new?book=${RD.src.id}&page=${RD.page}${RD.group ? '&g=' + RD.group.id : ''}`);
 }
 function rdMenu(btn){
   const dark = !!loadLS('darkPages', false);
+  const g = rdGroup(), bookId = READER.mode === 'epub' ? EP.bookId : RD.src.kind === 'book' ? RD.src.id : '';
+  // в групповом режиме: цитаты других участников и путь обратно в группу
+  const grpItems = g ? [{label: grpShow() ? 'Скрыть цитаты группы' : 'Показать цитаты группы', run: toggleGroupHls},
+    {label: `Группа «${g.name}»`, run: readerBack}, {label: 'Карточка книги', run: () => { rdClose(); go('#/b/' + bookId); }}]
+    : bookId ? [{label: 'Карточка книги', run: readerBack}] : [];
   if(READER.mode === 'epub'){
-    openMenu(btn, [
-      {label: 'Оглавление', run: epToc},
-      {label: 'Карточка книги', run: readerBack},
-    ]);
+    openMenu(btn, [{label: 'Оглавление', run: epToc}, ...grpItems]);
     return;
   }
   openMenu(btn, [
     {label: dark ? 'Обычные страницы' : 'Тёмные страницы', run: () => { saveLS('darkPages', !dark); $('#reader').classList.toggle('dark-pages', !dark); }},
     {label: 'Перейти к странице', run: rdGoto},
-    ...(RD.src.kind === 'book' ? [{label: 'Карточка книги', run: readerBack}] : []),
+    ...grpItems,
   ]);
+}
+// «Показать цитаты группы»: цитаты других участников бледнее моих, с кружком автора (выбор запоминается на устройстве)
+function toggleGroupHls(){
+  const on = !grpShow();
+  saveLS('grpHls', on); hpHide();
+  if(READER.mode === 'epub') epGroupDraw(); else rdDrawAll();
+  toast(on ? (((READER.mode === 'epub' ? EP.ghls : RD.ghls).length) ? 'Цитаты группы показаны: они бледнее ваших.' : 'Других цитат группы в этом формате пока нет.') : 'Цитаты группы скрыты');
+}
+// Цитаты других участников группы в этой книге (загружаются в групповом режиме; рисуются, если включено или к ним перешли из ленты)
+async function rdLoadGHls(){
+  const g = RD.group, key = RD.key;
+  if(!g || !RD.src || RD.src.kind !== 'book'){ RD.ghls = []; rdDrawAll(); return; }
+  try {
+    const list = await pb.collection('notes').getFullList({filter: pb.filter('book = {:b} && kind = "highlight" && group = {:g} && owner != {:u} && format = "pdf"', {b: RD.src.id, g: g.id, u: me().id}), fields: hlFields});
+    if(RD.key !== key || !RD.group || RD.group.id !== g.id) return;
+    RD.ghls = list; rdDrawAll(); rdFlash();
+  } catch(e){}
+}
+// Живое обновление цитаты другого участника в открытой книге
+function ghlLive(r, deleted){
+  if(r.kind !== 'highlight' || r.owner === me().id) return;
+  const upd = list => { const i = list.findIndex(x => x.id === r.id); if(deleted || !r.group){ if(i >= 0) list.splice(i, 1); } else if(r.anchor){ if(i >= 0) list[i] = {...r}; else list.push({...r}); } };
+  if(RD.group && RD.src && RD.src.kind === 'book' && RD.src.id === r.book && (deleted || r.format === 'pdf') && (deleted || r.group === RD.group.id)){ upd(RD.ghls); rdDrawAll(); }
+  if(EP.group && EP.view && EP.bookId === r.book && (deleted || r.format === 'epub') && (deleted || r.group === EP.group.id)){
+    const old = EP.ghls.find(x => x.id === r.id);
+    if(old) epDelOther(old);
+    upd(EP.ghls);
+    const now = EP.ghls.find(x => x.id === r.id);
+    if(now && (grpShow() || now.id === EP.focusO)) epAddOther(now);
+  }
+}
+// Панель чужой цитаты: автор, текст, мысль, комментарии
+function hpShowOther(h, rect){
+  hpHide();
+  Object.assign(HP, {mode: 'other', h, pending: null});
+  const el = document.createElement('div');
+  el.className = 'hl-pop other'; el.id = 'hl-pop'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Цитата участника группы');
+  const u = person(h.owner), k = commentsOf(h.id).length, q = h.quote || '', t = h.body_text || '';
+  el.innerHTML = `<div class="hp-who">${faceHTML(u, 'xs')}<b>${esc(nameOf(u))}</b><small>${esc(fmtWhen(h.created))}</small></div>
+    <p class="hp-q" style="--hl:${(HL[h.color] || HL.yellow)[1]}">${esc(q.slice(0, 240))}${q.length > 240 ? '…' : ''}</p>
+    ${t ? `<p class="hp-t">${esc(t.slice(0, 300))}${t.length > 300 ? '…' : ''}</p>` : ''}
+    <div class="hp-row"><button type="button" class="hp-b" data-hp="open">${ICON.chat}<span>${k ? k + ' ' + plural(k, ['комментарий', 'комментария', 'комментариев']) : 'Комментировать'}</span></button></div>`;
+  $('#reader').appendChild(el);
+  HP.el = el;
+  hpPlace(el, rect);
 }
 
 /* ---------- Выделения ---------- */
@@ -2223,25 +2880,32 @@ function rdMenu(btn){
 //   EPUB: {v: 1, cfi: место в книге (EPUB CFI), pct, chapter}
 // Каждый видит и меняет только свои выделения. Общие выделения администратора у читателей только в списках.
 const HP = {mode: '', h: null, pending: null, el: null};
-const hlFields = 'id,owner,book,book_title,kind,page,format,place,color,anchor,quote,body_text,shared,created,updated';
+const hlFields = 'id,owner,book,book_title,kind,page,format,place,color,anchor,quote,body_text,shared,group,created,updated';
 function hlStrip(rec){ return {...rec, body_text: String(rec.body_text || '').slice(0, 400), body: undefined, search: undefined, anchor: undefined}; }
 // Панель выделения: цвета, «Заметка», у администратора «Копировать»; у готового выделения ещё мысль, удалить и «⋯»
 function hpShow(o){
   hpHide();
   Object.assign(HP, {mode: o.mode, h: o.h || null, pending: o.pending || null});
   const el = document.createElement('div');
-  el.className = 'hl-pop'; el.id = 'hl-pop'; el.setAttribute('role', 'toolbar'); el.setAttribute('aria-label', 'Выделение');
+  el.className = 'hl-pop'; el.id = 'hl-pop'; el.setAttribute('role', 'toolbar'); el.setAttribute('aria-label', o.mode === 'new' ? 'Сохранить цитату' : 'Цитата');
   const cur = o.h ? o.h.color : '';
+  const g = rdGroup();
+  if(o.mode === 'new') HP.grp = true; // в групповом режиме новая цитата сразу видна группе
+  const grpRow = g && o.mode === 'new' ? `<div class="hp-row hp-grp"><button type="button" class="hp-g" data-hp="grp" aria-pressed="true" title="Цитату увидят участники группы «${esc(g.name)}»">${ICON.check}<span>Видно группе</span></button></div>`
+    : o.h && o.h.group ? `<p class="hp-note">${ICON.people}<span>Видно группе${byId('groups', o.h.group) ? ' «' + esc(byId('groups', o.h.group).name) + '»' : ''}</span></p>` : '';
   const thought = o.h && o.h.body_text ? `<p class="hp-t">${esc(o.h.body_text.slice(0, 220))}${o.h.body_text.length > 220 ? '…' : ''}</p>` : '';
-  el.innerHTML = `<div class="hp-row"><span class="hp-colors">${HL_KEYS.map(c => `<button type="button" class="hp-c${cur === c ? ' on' : ''}" data-hp="color" data-c="${c}" style="--hl:${HL[c][1]}" aria-label="${HL[c][0]}" title="${HL[c][0]}"></button>`).join('')}</span>
+  el.innerHTML = `<div class="hp-row"><span class="hp-colors">${HL_KEYS.map(c => `<button type="button" class="hp-c${cur === c ? ' on' : ''}" data-hp="color" data-c="${c}" style="--hl:${HL[c][1]}" aria-label="${o.mode === 'new' ? 'Сохранить цитату: ' + HL[c][0].toLowerCase() : HL[c][0]}" title="${o.mode === 'new' ? 'Сохранить цитату: ' + HL[c][0].toLowerCase() : HL[c][0]}"></button>`).join('')}</span>
     ${o.mode === 'new'
-      ? `<button type="button" class="hp-b" data-hp="note" title="Выделить и написать мысль">${ICON.pen}<span>Заметка</span></button>${isAdmin() ? `<button type="button" class="hp-i" data-hp="copy" aria-label="Копировать" title="Копировать">${ICON.copy}</button>` : ''}`
+      ? `<button type="button" class="hp-b" data-hp="note" title="Сохранить цитату и написать мысль">${ICON.pen}<span>Заметка</span></button>${isAdmin() ? `<button type="button" class="hp-i" data-hp="copy" aria-label="Копировать" title="Копировать">${ICON.copy}</button>` : ''}`
       : `<button type="button" class="hp-b" data-hp="thought" title="${o.h.body_text ? 'Изменить мысль' : 'Написать мысль'}">${ICON.pen}<span>Мысль</span></button>
-        <button type="button" class="hp-i" data-hp="del" aria-label="Удалить выделение" title="Удалить выделение">${ICON.trash}</button>
-        <button type="button" class="hp-i" data-hp="more" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button>`}</div>${thought}`;
+        <button type="button" class="hp-i" data-hp="del" aria-label="Удалить цитату" title="Удалить цитату">${ICON.trash}</button>
+        <button type="button" class="hp-i" data-hp="more" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button>`}</div>${grpRow}${thought}`;
   $('#reader').appendChild(el);
   HP.el = el;
-  const r = o.rect || {left: innerWidth / 2, right: innerWidth / 2, top: innerHeight / 2, bottom: innerHeight / 2};
+  hpPlace(el, o.rect);
+}
+function hpPlace(el, rect){
+  const r = rect || {left: innerWidth / 2, right: innerWidth / 2, top: innerHeight / 2, bottom: innerHeight / 2};
   const w = el.offsetWidth, h = el.offsetHeight;
   // выделение в верхней половине экрана: панель под ним, в нижней: над ним (с запасом на ручки выделения)
   const gap = touchUI() ? 26 : 12;
@@ -2259,9 +2923,10 @@ function hpHide(){
 // Сохранить новое выделение (PDF или EPUB) с цветом
 async function hlCreate(color){
   const p = HP.pending; if(!p) return null;
-  const isEpub = READER.mode === 'epub';
+  const isEpub = READER.mode === 'epub', g = rdGroup();
   const data = {id: newId(), owner: me().id, kind: 'highlight', book: isEpub ? EP.bookId : RD.src.id, format: isEpub ? 'epub' : 'pdf',
-    quote: p.quote.slice(0, 20000), color, page: isEpub ? 0 : p.n, place: isEpub ? epPlace(p.chapter, p.pct) : 'с. ' + p.n, anchor: p.anchor, body: ''};
+    quote: p.quote.slice(0, 20000), color, page: isEpub ? 0 : p.n, place: isEpub ? epPlace(p.chapter, p.pct) : 'с. ' + p.n, anchor: p.anchor, body: '',
+    ...(g && HP.grp !== false ? {group: g.id} : {})};
   hpHide();
   try { window.getSelection().removeAllRanges(); } catch(e){}
   if(isEpub) epDeselect();
@@ -2273,11 +2938,15 @@ async function hlCreate(color){
 }
 // Свои выделения открытой книги и общий список заметок
 function hlLocal(rec, deleted){
-  const list = rec.format === 'epub' ? EP.hls : RD.hls;
+  // список открытой в памяти книги меняется, только если цитата из неё (правка с экрана цитаты бывает и при другой книге в читалке)
+  const epub = rec.format === 'epub';
+  const open = epub ? EP.bookId === rec.book : !!(RD.src && RD.src.kind === 'book' && RD.src.id === rec.book);
+  const list = !open ? [] : epub ? EP.hls : RD.hls;
   const i = list.findIndex(x => x.id === rec.id);
   if(deleted){ if(i >= 0) list.splice(i, 1); removeLocal('notes', rec.id); }
-  else { if(i >= 0) list[i] = {...list[i], ...rec}; else list.push(rec); upsert('notes', hlStrip(rec)); }
-  if(rec.format === 'epub') epDrawHl(rec, deleted); else rdDrawAll();
+  else { if(i >= 0) list[i] = {...list[i], ...rec}; else if(open && rec.anchor) list.push(rec); upsert('notes', hlStrip(rec)); }
+  if(!open) return;
+  if(epub) epDrawHl(rec, deleted); else rdDrawAll();
 }
 // Живое обновление (другая вкладка или устройство): своё выделение в открытой книге
 function hlLive(r, deleted){
@@ -2302,22 +2971,24 @@ async function hlUpdate(h, patch){
 async function hlDelete(h){
   await pb.collection('notes').delete(h.id);
   hlLocal(h, true);
-  toast('Выделение удалено');
+  toast('Цитата удалена');
 }
 const textToHtml = t => String(t || '').split(/\n+/).map(x => x.trim()).filter(Boolean).map(x => `<p>${esc(x)}</p>`).join('');
 function hlThought(h){
-  openForm({title: h.body_text ? 'Мысль к выделению' : 'Новая мысль', text: '«' + h.quote.slice(0, 400) + (h.quote.length > 400 ? '…' : '') + '»',
+  openForm({title: h.body_text ? 'Мысль к цитате' : 'Новая мысль', text: '«' + h.quote.slice(0, 400) + (h.quote.length > 400 ? '…' : '') + '»',
     fields: [{key: 't', type: 'textarea', label: 'Ваша мысль', rows: 5, max: 20000, placeholder: 'Что вы об этом думаете'}], values: {t: h.body_text || ''},
-    async onSave(v){ await hlUpdate(h, {body: textToHtml(v.t)}); toast('Сохранено'); }});
+    async onSave(v){ await hlUpdate(h, {body: textToHtml(v.t)}); toast('Сохранено'); if(route().name === 'note'){ ED.rec = null; render(true); } }});
 }
 function hlSettings(h){
-  openForm({title: 'Настройки', fields: [{key: 'shared', type: 'check', label: 'Видна всем читателям', hint: 'Читатели увидят выделение и вашу мысль в карточке книги, в блоке «Заметки автора библиотеки». На страницах книги у них оно не рисуется.'}],
+  openForm({title: 'Настройки', fields: [{key: 'shared', type: 'check', label: 'Видна всем читателям', hint: 'Читатели увидят цитату и вашу мысль в карточке книги, в блоке «Заметки автора библиотеки». На страницах книги у них она не рисуется.'}],
     values: {shared: !!h.shared}, async onSave(v){ await hlUpdate(h, {shared: v.shared}); toast(v.shared ? 'Теперь видно всем читателям' : 'Теперь видно только вам'); }});
 }
-// «Сделать заметкой»: новая заметка с цитатой в начале и местом в книге, выделение остаётся
+// «Сделать заметкой»: новая заметка с цитатой в начале и местом в книге, цитата остаётся.
+// Цитата была видна группе: заметка тоже видна той же группе (если группа ещё читает эту книгу).
 async function hlToNote(h){
   try {
-    const rec = await pb.collection('notes').create({id: newId(), owner: me().id, kind: 'note', book: h.book, format: h.format, page: h.page || 0, place: h.place || '',
+    const grp = h.group && groupsOfBook(h.book).some(g => g.id === h.group) ? h.group : '';
+    const rec = await pb.collection('notes').create({id: newId(), owner: me().id, kind: 'note', book: h.book, format: h.format, page: h.page || 0, place: h.place || '', ...(grp ? {group: grp} : {}),
       anchor: h.anchor || null, title: '', body: `<blockquote>${esc(h.quote)}</blockquote>${h.body_text ? textToHtml(h.body_text) : '<p></p>'}`});
     upsert('notes', hlStrip(rec));
     UI.normalOnce = true;
@@ -2328,7 +2999,7 @@ async function hlToNote(h){
 async function hpAction(btn){
   const a = btn.dataset.hp, h = HP.h;
   if(a === 'color'){
-    if(HP.mode === 'new'){ const rec = await hlCreate(btn.dataset.c); if(rec) toast('Выделено'); }
+    if(HP.mode === 'new'){ const rec = await hlCreate(btn.dataset.c); if(rec) toast(rec.group ? 'Цитата сохранена, её видит группа' : 'Цитата сохранена'); }
     else if(h){ const c = btn.dataset.c; hpHide(); try { await hlUpdate(h, {color: c}); } catch(e){ toast(errText(e)); } }
   } else if(a === 'note'){
     const rec = await hlCreate('yellow');
@@ -2339,12 +3010,17 @@ async function hpAction(btn){
     try { window.getSelection().removeAllRanges(); } catch(e){}
     if(READER.mode === 'epub') epDeselect();
     try { await navigator.clipboard.writeText(t); toast('Скопировано'); } catch(e){ toast('Не удалось скопировать.'); }
-  } else if(a === 'thought' && h){ hpHide(); hlThought(h); }
+  } else if(a === 'grp'){
+    HP.grp = HP.grp === false; btn.setAttribute('aria-pressed', String(HP.grp)); btn.innerHTML = `${HP.grp ? ICON.check : ''}<span>Видно группе</span>`;
+  } else if(a === 'open' && h){ hpHide(); go(`#/note/${h.id}?g=${h.group}`); }
+  else if(a === 'thought' && h){ hpHide(); hlThought(h); }
   else if(a === 'del' && h){ if(!arm(btn, 'Удалить?')) return; hpHide(); try { await hlDelete(h); } catch(e){ toast(errText(e)); } }
   else if(a === 'more' && h){
     const items = [{label: 'Сделать заметкой', run: () => { hpHide(); hlToNote(h); }}];
+    if(h.group || groupsOfBook(h.book).length) items.push({label: 'Видно группе', run: () => { hpHide(); pickNoteGroup(h, rec => hlLocal({...h, ...rec})); }});
+    if(h.group) items.push({label: 'Комментарии', run: () => { hpHide(); go(`#/note/${h.id}?g=${h.group}`); }});
     if(isAdmin()) items.push({label: 'Настройки', run: () => { hpHide(); hlSettings(h); }});
-    items.push({label: 'Удалить выделение', danger: true, run: () => { hpHide(); hlDelete(h).catch(e => toast(errText(e))); }});
+    items.push({label: 'Удалить цитату', danger: true, run: () => { hpHide(); hlDelete(h).catch(e => toast(errText(e))); }});
     openMenu(btn, items);
   }
 }
@@ -2360,10 +3036,14 @@ async function rdLoadHls(){
   } catch(e){}
 }
 function rdDrawAll(){ for(const [n, c] of RD.cache) rdDrawHls(c.el, n); }
+const rdOthers = n => RD.group ? RD.ghls.filter(h => (grpShow() || h.id === RD.focusO) && h.page === n && h.anchor && Array.isArray(h.anchor.rects) && h.anchor.rects.length) : [];
 function rdDrawHls(el, n){
   const layer = el.querySelector('.hl-layer:not(.hl-tmp)'); if(!layer) return;
-  layer.innerHTML = RD.hls.filter(h => h.page === n && h.anchor && Array.isArray(h.anchor.rects)).map(h =>
-    h.anchor.rects.map(([x, y, w, hh]) => `<i class="hl-mark" data-h="${h.id}" style="left:${x * 100}%;top:${y * 100}%;width:${w * 100}%;height:${hh * 100}%;--hl:${(HL[h.color] || HL.yellow)[1]}"></i>`).join('')).join('');
+  const mark = (h, cls) => h.anchor.rects.map(([x, y, w, hh]) => `<i class="hl-mark${cls}" data-h="${h.id}" style="left:${x * 100}%;top:${y * 100}%;width:${w * 100}%;height:${hh * 100}%;--hl:${(HL[h.color] || HL.yellow)[1]}"></i>`).join('');
+  // цитаты других участников группы: бледнее, у начала кружок автора
+  const others = rdOthers(n).map(h => { const [x, y] = h.anchor.rects[0];
+    return mark(h, ' other') + `<span class="hl-who" style="left:${x * 100}%;top:${y * 100}%;--hl:${(HL[h.color] || HL.yellow)[1]}">${faceHTML(person(h.owner), 'hw')}</span>`; }).join('');
+  layer.innerHTML = others + RD.hls.filter(h => h.page === n && h.anchor && Array.isArray(h.anchor.rects)).map(h => mark(h, '')).join('');
 }
 // Переход к выделению из списка: оно коротко мигает
 function rdFlash(){
@@ -2434,6 +3114,12 @@ function rdHitHl(x, y){
   const B = pg.getBoundingClientRect(), fx = (x - B.left) / B.width, fy = (y - B.top) / B.height;
   if(fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
   return RD.hls.slice().reverse().find(h => h.page === RD.page && h.anchor && (h.anchor.rects || []).some(([a, b, w, hh]) => fx >= a - 0.003 && fx <= a + w + 0.003 && fy >= b - 0.003 && fy <= b + hh + 0.003)) || null;
+}
+function rdHitOther(x, y){
+  const pg = $('#rd-pagebox .rd-page'); if(!pg) return null;
+  const B = pg.getBoundingClientRect(), fx = (x - B.left) / B.width, fy = (y - B.top) / B.height;
+  if(fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
+  return rdOthers(RD.page).reverse().find(h => h.anchor.rects.some(([a, b, w, hh]) => fx >= a - 0.012 && fx <= a + w + 0.003 && fy >= b - 0.006 && fy <= b + hh + 0.003)) || null;
 }
 function hlBox(id){
   const marks = $$(`#rd-pagebox .hl-mark[data-h="${id}"]`).map(m => m.getBoundingClientRect());
@@ -2525,7 +3211,9 @@ function mkUp(e){
     // нажатие без движения: может быть по готовому выделению
     m.page.querySelector('.hl-tmp').innerHTML = '';
     const h = rdHitHl(e.clientX, e.clientY);
-    if(h) hpShow({mode: 'edit', h, rect: hlBox(h.id)});
+    if(h){ hpShow({mode: 'edit', h, rect: hlBox(h.id)}); return; }
+    const o = rdHitOther(e.clientX, e.clientY);
+    if(o) hpShowOther(o, hlBox(o.id));
     return;
   }
   if(!m.start || !m.end){ m.page.querySelector('.hl-tmp').innerHTML = ''; return; }
@@ -2635,6 +3323,8 @@ $('#reader').addEventListener('click', e => {
   if(HP.el || HP.eat){ HP.eat = false; hpHide(); return; } // нажатие мимо панели только закрывает её
   const h = rdHitHl(e.clientX, e.clientY);
   if(h){ hpShow({mode: 'edit', h, rect: hlBox(h.id)}); return; }
+  const o = rdHitOther(e.clientX, e.clientY);
+  if(o){ hpShowOther(o, hlBox(o.id)); return; }
   const r = st.getBoundingClientRect(), x = (e.clientX - r.left) / r.width;
   if(x < 0.28) rdGo(RD.page - 1);
   else if(x > 0.72) rdGo(RD.page + 1);
@@ -2683,7 +3373,7 @@ document.addEventListener('fullscreenchange', () => { if(RD.open && READER.mode 
 // (overlayer), место в книге хранится как EPUB CFI. Файл приходит целиком по той же защищённой ссылке,
 // что и PDF, считается в лимите и журнале и лежит только в памяти вкладки (fetch без кэша).
 // Скрипты из книги не загружаются и вырезаются из страниц. Подпись читателя рисуется холстом поверх страницы.
-const EP = {key: '', bookId: '', fid: '', view: null, lib: null, title: '', back: '', mark: '', cur: null, hls: [], marker: false,
+const EP = {key: '', bookId: '', fid: '', view: null, lib: null, title: '', back: '', mark: '', cur: null, hls: [], marker: false, group: null, ghls: [], focusO: '',
   saveT: 0, seen: new Set(), docs: new Map(), mk: null, flash: '', toc: null, annAt: 0};
 const EP_FONT = [90, 100, 115, 130];
 let foliateLoad = null;
@@ -2704,6 +3394,7 @@ function epShell(){
       <button type="button" class="icon-btn" data-rd="toc" id="rd-toc" aria-label="Оглавление" title="Оглавление" hidden>${ICON.toc}</button>
       ${markerBtn()}<button type="button" class="btn sm" data-rd="note" title="Заметка к этому месту">${ICON.pen}<span>Заметка</span></button>
       <button type="button" class="icon-btn" data-rd="menu" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button></div>
+    <div class="rd-gline" id="rd-gline" aria-hidden="true"></div>
     <div class="ep-stage" id="ep-stage"><div class="ep-host" id="ep-host"></div><canvas class="ep-mark" id="ep-mark" aria-hidden="true"></canvas><div class="ep-tmp" id="ep-tmp"></div></div>
     <div class="rd-bottom"><button type="button" class="icon-btn" data-rd="prev" aria-label="Назад" title="Назад">${ICON.left}</button>
       <button type="button" class="rd-num ep-num" data-rd="goto" id="rd-num" aria-label="Оглавление" title="Оглавление">…</button>
@@ -2737,14 +3428,18 @@ async function epShow(r, b, again){
   if(!f){ rdFail('У этой книги нет файла EPUB.'); return; }
   if(f.status !== 'ready'){ rdFail(f.status === 'processing' ? 'Книга ещё обрабатывается. Попробуйте через минуту.' : 'Этот файл не открывается: при обработке была ошибка.'); return; }
   const hl = r.q.get('hl') || '';
+  const grp = readerGroup(r, b.id), grpChanged = (EP.group && EP.group.id) !== (grp && grp.id);
+  EP.group = grp; EP.focusO = hl;
   if(EP.key === f.id && EP.view){
-    if(!$('#ep-host')){ epShell(); $('#ep-host').appendChild(EP.view); rdHeader(); epTocBtn(); epStyle(); epNum(); requestAnimationFrame(epMarkDraw); }
+    if(!$('#ep-host')){ epShell(); $('#ep-host').appendChild(EP.view); epTocBtn(); epStyle(); epNum(); requestAnimationFrame(epMarkDraw); }
+    rdHeader();
+    if(grpChanged || hl) await epLoadGHls();
     if(hl) epGoNote(hl);
     return;
   }
   epDispose();
   const key = f.id;
-  Object.assign(EP, {key, bookId: b.id, fid: f.id, title: b.title, hls: [], seen: new Set(), cur: null, flash: hl, docs: new Map(), toc: null});
+  Object.assign(EP, {key, bookId: b.id, fid: f.id, title: b.title, hls: [], ghls: [], seen: new Set(), cur: null, flash: hl, docs: new Map(), toc: null});
   epShell(); rdHeader(); epMarkerState();
   rdMsg('Открываю…');
   try {
@@ -2774,7 +3469,8 @@ async function epShow(r, b, again){
     view.addEventListener('create-overlay', ev => epOverlay(ev.detail.index));
     view.addEventListener('draw-annotation', ev => {
       const {draw, annotation} = ev.detail;
-      draw(annotation.flash ? EP.lib.Overlayer.outline : EP.lib.Overlayer.highlight, {color: annotation.color, width: 3});
+      if(annotation.other) draw(epOtherDraw, {color: annotation.color, who: annotation.who});
+      else draw(annotation.flash ? EP.lib.Overlayer.outline : EP.lib.Overlayer.highlight, {color: annotation.color, width: 3});
     });
     view.addEventListener('show-annotation', ev => epShowAnn(ev.detail));
     view.addEventListener('external-link', ev => ev.preventDefault()); // внешние ссылки из книги не открываем
@@ -2785,6 +3481,8 @@ async function epShow(r, b, again){
     epTocBtn();
     epStyle();
     const own = await epLoadHls();
+    if(EP.key !== key) return;
+    await epLoadGHls();
     if(EP.key !== key) return;
     let start = null;
     if(hl){ const n = await epNoteAnchor(hl); if(n) start = n.cfi; }
@@ -2805,7 +3503,7 @@ function epTocBtn(){ const t = $('#rd-toc'); if(t) t.hidden = !EP.toc; }
 function epDispose(){
   clearTimeout(EP.saveT);
   if(EP.view){ try { EP.view.close(); } catch(e){} EP.view.remove(); }
-  Object.assign(EP, {key: '', view: null, cur: null, hls: [], docs: new Map(), mk: null, toc: null});
+  Object.assign(EP, {key: '', view: null, cur: null, hls: [], ghls: [], docs: new Map(), mk: null, toc: null});
 }
 // Тема и размер шрифта: светлая или тёмная вместе с приложением, 4 шага шрифта
 function epStyle(){
@@ -2857,7 +3555,7 @@ function epOnRelocate(ev){
 function epSave(leaving){
   clearTimeout(EP.saveT);
   const c = EP.cur; if(!c || !EP.bookId || !EP.view) return;
-  const body = {format: 'epub', pct: c.pct, pos: c.cfi, page: c.page || 1, pages: c.pages || 0, seen: [...EP.seen]};
+  const body = {format: 'epub', pct: c.pct, pos: c.cfi, page: c.page || 1, pages: c.pages || 0, seen: [...EP.seen], day: todayStr()};
   EP.seen = new Set();
   const id = EP.bookId, r = readOf(id, 'epub');
   if(r && r.pos === body.pos && !body.seen.length) return;
@@ -3067,8 +3765,47 @@ async function epLoadHls(){
   } catch(e){ return []; }
 }
 function epAdd(h){ if(EP.view && h.anchor && h.anchor.cfi) EP.view.addAnnotation({value: h.anchor.cfi, color: (HL[h.color] || HL.yellow)[1]}).catch(() => {}); }
-// Глава загрузилась: рисуем на ней выделения
-function epOverlay(){ for(const h of EP.hls) epAdd(h); }
+// Глава загрузилась: рисуем на ней цитаты (свои и, если включено, других участников группы)
+function epOverlay(){ for(const h of EP.hls) epAdd(h); if(EP.group) for(const h of EP.ghls) if(grpShow() || h.id === EP.focusO) epAddOther(h); }
+// Цитаты других участников группы в EPUB: бледная заливка и кружок с первой буквой имени автора
+const epMineAt = cfi => EP.hls.some(x => x.anchor && x.anchor.cfi === cfi);
+function epAddOther(h){
+  if(!EP.view || !h.anchor || !h.anchor.cfi || epMineAt(h.anchor.cfi)) return;
+  EP.view.addAnnotation({value: h.anchor.cfi, color: (HL[h.color] || HL.yellow)[1], other: true, who: initial(person(h.owner))}).catch(() => {});
+}
+function epDelOther(h){ if(EP.view && h.anchor && h.anchor.cfi && !epMineAt(h.anchor.cfi)) EP.view.deleteAnnotation({value: h.anchor.cfi}).catch(() => {}); }
+function epGroupDraw(){ for(const h of EP.ghls){ if(grpShow() || h.id === EP.focusO) epAddOther(h); else epDelOther(h); } }
+function epOtherDraw(rects, o){
+  const ns = 'http://www.w3.org/2000/svg';
+  const out = document.createElementNS(ns, 'g');
+  const g = EP.lib.Overlayer.highlight(rects, {color: o.color});
+  g.style.opacity = '.2';
+  out.append(g);
+  const r0 = rects[0];
+  if(r0){
+    const c = document.createElementNS(ns, 'circle');
+    c.setAttribute('cx', Math.max(8, r0.left - 9)); c.setAttribute('cy', r0.top + 7); c.setAttribute('r', 7.5);
+    c.setAttribute('fill', o.color); c.setAttribute('stroke', '#fff'); c.setAttribute('stroke-width', '1.5');
+    const t = document.createElementNS(ns, 'text');
+    t.setAttribute('x', Math.max(8, r0.left - 9)); t.setAttribute('y', r0.top + 10.5); t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('font-size', '10'); t.setAttribute('font-weight', '700'); t.setAttribute('font-family', 'sans-serif'); t.setAttribute('fill', '#222');
+    t.textContent = o.who || '';
+    out.append(c, t);
+  }
+  return out;
+}
+async function epLoadGHls(){
+  const g = EP.group, key = EP.key;
+  for(const h of EP.ghls) epDelOther(h);
+  EP.ghls = [];
+  if(!g || !EP.bookId) return;
+  try {
+    const list = await pb.collection('notes').getFullList({filter: pb.filter('book = {:b} && kind = "highlight" && group = {:g} && owner != {:u} && format = "epub"', {b: EP.bookId, g: g.id, u: me().id}), fields: hlFields});
+    if(EP.key !== key || !EP.group || EP.group.id !== g.id) return;
+    EP.ghls = list.filter(h => h.anchor && h.anchor.cfi);
+    epGroupDraw();
+  } catch(e){}
+}
 function epDrawHl(h, removed){
   if(!EP.view || !h || !h.anchor || !h.anchor.cfi) return;
   if(removed){ EP.view.deleteAnnotation({value: h.anchor.cfi}).catch(() => {}); return; }
@@ -3078,13 +3815,13 @@ function epShowAnn(d){
   EP.annAt = Date.now();
   if(EP.marker && EP.mk) return;
   const h = EP.hls.find(x => x.anchor && x.anchor.cfi === d.value);
-  if(!h) return;
   const sr = d.range ? epScreenRect(d.range) : null;
+  if(!h){ const o = EP.ghls.find(x => x.anchor && x.anchor.cfi === d.value); if(o) hpShowOther(o, sr ? sr.box : null); return; }
   hpShow({mode: 'edit', h, rect: sr ? sr.box : null});
 }
-// Переход к заметке или выделению: его место из anchor (своё или общее)
+// Переход к заметке или цитате: её место из anchor (своя, общая или групповая)
 async function epNoteAnchor(id){
-  let n = EP.hls.find(x => x.id === id);
+  let n = EP.hls.find(x => x.id === id) || EP.ghls.find(x => x.id === id);
   if(!n){ try { n = await pb.collection('notes').getOne(id, {fields: 'id,anchor,format,book'}); } catch(e){ n = null; } }
   return n && n.anchor && n.anchor.cfi ? {cfi: n.anchor.cfi, id} : null;
 }
@@ -3094,13 +3831,13 @@ async function epGoNote(id){
   await EP.view.goTo(a.cfi).catch(() => {});
   setTimeout(() => epFlash(id), 300);
 }
-// Мигнуть выделением: на миг рамка вместо заливки
+// Мигнуть цитатой: на миг рамка вместо заливки
 function epFlash(id){
-  const h = EP.hls.find(x => x.id === id);
-  if(!h || !EP.view) return;
-  const v = {value: h.anchor.cfi, color: '#C2410C', flash: true};
+  const h = EP.hls.find(x => x.id === id), o = h ? null : EP.ghls.find(x => x.id === id);
+  if(!(h || o) || !EP.view) return;
+  const v = {value: (h || o).anchor.cfi, color: '#C2410C', flash: true};
   EP.view.addAnnotation(v).catch(() => {});
-  setTimeout(() => epAdd(h), 1600);
+  setTimeout(() => h ? epAdd(h) : epAddOther(o), 1600);
 }
 // Подпись читателя поверх страниц: холст на весь экран читалки, сквозь него нажатия проходят
 function epMarkDraw(){
@@ -3155,7 +3892,9 @@ function tickReset(){
 function renderAuth(msg, ok){
   const b = $('#auth-body');
   const note = msg ? `<p class="${ok ? 'form-ok' : 'form-err'}">${esc(msg)}</p>` : '';
-  const joinNote = '';
+  // пришли по ссылке в группу: после входа человек сразу вступает в неё
+  const jn = loadLS('join', null);
+  const joinNote = jn && jn.code ? `<p class="join-note">${authMode === 'register' ? 'Вас пригласили в группу чтения. После регистрации вы сразу окажетесь в ней.' : 'Вас пригласили в группу чтения. Войдите, и вы сразу окажетесь в ней.'}</p>` : '';
   if(authMode === 'register'){
     $('#auth-sub').textContent = isFirstRun ? 'Создайте аккаунт владельца. Вы станете администратором библиотеки и сможете приглашать других.' : 'Регистрация по приглашению.';
     b.innerHTML = `<form class="stack" id="auth-form" data-mode="register" novalidate>${joinNote}
@@ -3326,6 +4065,12 @@ document.addEventListener('click', e => {
   const r = route();
   if(r.name === 'home' && !r.q.get('q')){ e.preventDefault(); window.scrollTo({top: 0, behavior: 'smooth'}); const q = $('#q'); if(q) q.blur(); }
 });
+// Ctrl+Enter (Cmd+Enter) в поле комментария отправляет его
+document.addEventListener('keydown', e => {
+  if(e.key !== 'Enter' || !(e.ctrlKey || e.metaKey)) return;
+  if(e.target.id === 'cm-text'){ e.preventDefault(); const b = $('#cm-box [data-act="cm-send"]'); if(b) b.click(); }
+  else if(e.target.id === 'cm-edit' && UI.cmEdit){ e.preventDefault(); cmSave(UI.cmEdit); }
+});
 // Esc на главной стирает поиск
 document.addEventListener('keydown', e => {
   if(e.key !== 'Escape' || !searchQ() || dlg.open || cropDlg.open || menu || RD.open) return;
@@ -3392,14 +4137,53 @@ document.addEventListener('click', async e => {
     case 'hl-color': UI.hlColor = d.c; render(true); break;
     case 'hl-more': { UI.hlOpen.has(d.id) ? UI.hlOpen.delete(d.id) : UI.hlOpen.add(d.id); render(true); break; }
     case 'note-full': setFull(!UI.fullNow); break;
+    // группы
+    case 'g-new': openNewGroup(); break;
+    case 'g-menu': { const g = byId('groups', d.id); if(g) groupMenu(a, g); break; }
+    case 'g-invite': { const g = byId('groups', d.id); if(g) openInvite(g); break; }
+    case 'g-members': { const g = byId('groups', d.id); if(g) openMembers(g); break; }
+    case 'g-plan-all': { const g = byId('groups', d.id); if(g) openPlanAll(g); break; }
+    case 'g-next': { const g = byId('groups', d.id); if(g) openNextBook(g); break; }
+    case 'g-feed': UI.gFeed[d.id] = d.f; render(true); break;
+    case 'g-banner': UI.gBanner[d.id] = ''; render(true); break;
+    case 'g-join': joinGroup(d.code, a).catch(() => {}); break;
+    // комментарии
+    case 'cm-send': cmSend(d.id, a); break;
+    case 'cm-edit': { UI.cmEdit = d.id; cmPaint(); const t = $('#cm-edit'); if(t){ t.focus(); t.setSelectionRange(t.value.length, t.value.length); } break; }
+    case 'cm-save': cmSave(d.id); break;
+    case 'cm-cancel': UI.cmEdit = ''; cmPaint(); break;
+    case 'cm-del': cmDelete(d.id, a); break;
+    // экран цитаты
+    case 'hl-thought': { const h = hlRec(d.id); if(h) hlThought(h); break; }
+    case 'hl-group': { const h = hlRec(d.id); if(h) pickNoteGroup(h, () => { ED.rec = null; render(true); }); break; }
+    case 'hl-del': {
+      const h = hlRec(d.id); if(!h || !arm(a, 'Удалить?')) return;
+      try { await hlDelete(h); ED.rec = null; goBack(h.book ? '#/b/' + h.book + '?tab=highlights' : '#/notes'); } catch(err){ toast(errText(err)); }
+      break;
+    }
     case 'edit-name': openForm({title: 'Имя', fields: [{key: 'name', label: 'Как вас называть', max: 100}], values: {name: me().name || ''},
       async onSave(v){ const rec = await pb.collection('users').update(me().id, {name: v.name}); pb.authStore.save(pb.authStore.token, rec); render(true); }}); break;
     default: accountAction(a, d);
   }
 });
+const hlRec = id => ED.rec && ED.rec.id === id ? ED.rec : byId('notes', id);
+// «Видно группе» в редакторе: у сохранённой заметки меняется сразу, у новой запишется при первом сохранении
+async function edGroupToggle(t){
+  const n = ED.rec;
+  if(!n || ED.isNew) return;
+  try {
+    await edSave();
+    const rec = await pb.collection('notes').update(n.id, {group: t.checked ? t.value : ''}, {fields: hlFields});
+    ED.rec = {...ED.rec, group: rec.group}; upsert('notes', hlStrip(rec));
+    toast(rec.group ? 'Заметку видит группа' : 'Теперь заметку видите только вы');
+    const box = $('#cm-box'), html = commentsHTML(ED.rec);
+    if(box) cmPaint(); else if(html){ const art = $('.note-edit'); if(art) art.insertAdjacentHTML('afterend', html); }
+  } catch(err){ t.checked = !t.checked; toast(errText(err)); }
+}
 document.addEventListener('change', e => {
   const t = e.target;
   if(t.name === 'p-theme'){ setTheme(t.value); return; }
+  if(t.id === 'ed-group'){ edGroupToggle(t); return; }
   if(t.id === 'books-sort'){ UI.booksSort = t.value; saveLS('booksSort', t.value); render(true); return; }
   if(t.id === 'books-fmt'){ UI.booksFmt = t.value; render(true); return; }
   if(t.id === 'books-scan'){ UI.booksScan = t.checked; render(true); return; }
@@ -3409,6 +4193,7 @@ document.addEventListener('change', e => {
   if(t.id === 'note-files'){ const files = [...t.files]; t.value = ''; if(files.length) addUploads(files, 'file', t.dataset.note); return; }
 });
 document.addEventListener('input', e => {
+  if(e.target.id === 'cm-text'){ const box = e.target.closest('#cm-box'); if(box) UI.cmDraft[box.dataset.note] = e.target.value; }
   if(e.target.id === 'q') setSearch(e.target.value);
   if(e.target.id === 'nq'){ UI.notesQ = e.target.value; notesSearch(); schedule(); }
 });
@@ -3418,7 +4203,7 @@ document.addEventListener('toggle', e => {
   if(e.target.id === 'users-fold' && e.target.open !== UI.usersOpen){ UI.usersOpen = e.target.open; if(UI.usersOpen && isAdmin()) loadUsers(); }
   if(e.target.classList && e.target.classList.contains('desc')) UI.descOpen = e.target.open;
 }, true);
-window.addEventListener('hashchange', () => { if(route().name === 'profile' && isAdmin()) loadDisk(); });
+window.addEventListener('hashchange', () => { if(route().name === 'profile' && isAdmin()){ loadDisk(); loadGCount(); } });
 
 /* ---------- Профиль: пароль, приглашения, выход ---------- */
 const INV_ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';

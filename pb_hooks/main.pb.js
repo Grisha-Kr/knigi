@@ -100,6 +100,7 @@ onRecordAfterUpdateSuccess((e) => {
   lib.dropLonelyAuthors($app, o.getStringSlice("authors").filter((a) => now.indexOf(a) < 0));
   if (o.getString("title") !== e.record.getString("title")) {
     $app.db().newQuery("UPDATE notes SET book_title = {:t} WHERE book = {:b}").bind({ t: e.record.getString("title"), b: e.record.id }).execute();
+    $app.db().newQuery("UPDATE group_books SET book_title = {:t} WHERE book = {:b}").bind({ t: e.record.getString("title"), b: e.record.id }).execute();
     // название в «Моих предложенных книгах» меняется вместе с книгой (через запись, чтобы пришло живое обновление)
     for (const x of $app.findRecordsByFilter("book_offers", "book = {:b}", "", 0, 0, { b: e.record.id })) {
       x.set("title", e.record.getString("title"));
@@ -164,11 +165,12 @@ onRecordUpdateRequest((e) => {
   e.next();
 }, "notes");
 
-// Чужую заметку видно только общую (shared). Место выделения (anchor) у общей видно: по нему
-// читатель переходит к месту в EPUB. Если запись почему-то пришла не общей, служебные поля скрыты.
+// Чужую заметку видно только общую (shared) или групповую (участникам группы, этап 3). Место цитаты
+// (anchor) у них видно: по нему читатель переходит к месту в книге. Если запись почему-то пришла
+// не общей и не групповой, служебные поля скрыты.
 onRecordEnrich((e) => {
   const auth = e.requestInfo.auth;
-  if (!(auth && (auth.isSuperuser() || auth.id === e.record.getString("owner") || e.record.getBool("shared")))) e.record.hide("anchor", "color");
+  if (!(auth && (auth.isSuperuser() || auth.id === e.record.getString("owner") || e.record.getBool("shared") || e.record.getString("group")))) e.record.hide("anchor", "color");
   e.next();
 }, "notes");
 
@@ -341,6 +343,7 @@ routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
   const fill = (r) => { r.set("page", page); r.set("pages", pages); r.set("pct", pct); r.set("pos", pos); };
   let r = null;
   try { r = $app.findFirstRecordByFilter("reading", "user = {:u} && book = {:b} && format = {:f}", key); } catch (_) {}
+  const oldPct = r ? r.getFloat("pct") : null; // для групп: где человек был до этого сохранения
   if (!r) {
     r = new Record($app.findCollectionByNameOrId("reading"));
     r.set("user", e.auth.id);
@@ -357,6 +360,8 @@ routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
     const seen = body.seen.map((x) => parseInt(x, 10)).filter((x) => x > 0 && (!pages || x <= pages)).slice(0, 500);
     F.logPages(e.auth.id, b, seen);
   }
+  // группы чтения: сколько страниц (у EPUB процентов) человек прочитал сегодня, если книга читается в его группе
+  require(`${__hooks}/groups_lib.js`).recordRead(e.auth.id, b, fmt, body, oldPct, pct, pages);
   return e.json(200, { id: r.id, format: fmt, page, pages, pct, pos, updated: r.getString("updated") });
 }, $apis.requireAuth("users"));
 
@@ -519,12 +524,13 @@ routerAdd("GET", "/api/knigi/admin/log", (e) => {
 /* ---------- Фото профиля (правки 1.1) ---------- */
 // Файл защищённый, а чужие записи users через API не читает никто, поэтому фото отдаёт этот маршрут:
 // своё фото каждому, любое фото администратору, фото администратора всем вошедшим
-// (оно стоит рядом с «Заметками автора библиотеки»). Чужое фото читателя другой читатель не получит.
+// (оно стоит рядом с «Заметками автора библиотеки»), фото участника общей группы (этап 3).
+// Чужое фото читателя, с которым нет общей группы, другой читатель не получит.
 routerAdd("GET", "/api/knigi/users/{id}/avatar", (e) => {
   const lib = require(`${__hooks}/lib.js`);
   let u = null;
   try { u = $app.findRecordById("users", e.request.pathValue("id")); } catch (_) {}
-  const ok = u && (u.id === e.auth.id || lib.isAdmin(e.auth) || lib.isAdmin(u));
+  const ok = u && (u.id === e.auth.id || lib.isAdmin(e.auth) || lib.isAdmin(u) || require(`${__hooks}/groups_lib.js`).shareGroup($app, e.auth.id, u.id));
   const name = ok ? u.getString("avatar") : "";
   if (!name || $app.settings().s3.enabled) throw new NotFoundError("Фото нет.");
   e.response.header().set("Cache-Control", "private, no-store");

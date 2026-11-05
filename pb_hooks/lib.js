@@ -182,7 +182,7 @@ function checkNote(e) {
   // выделение не превращается в заметку или урок и наоборот: для этого есть «Сделать заметкой»
   const o = r.isNew() ? null : r.original();
   if (o && (o.getString("kind") === "highlight") !== (kind === "highlight")) {
-    throw new BadRequestError("Выделение нельзя превратить в заметку. Нажмите «Сделать заметкой»: появится новая заметка, а выделение останется.");
+    throw new BadRequestError("Цитату нельзя превратить в заметку. Нажмите «Сделать заметкой»: появится новая заметка, а цитата останется.");
   }
   r.set("title", r.getString("title").replace(/\s+/g, " ").trim());
   const body = cleanHtml(r.getString("body"));
@@ -195,7 +195,7 @@ function checkNote(e) {
   r.set("search", norm(r.getString("title") + " " + plain + " " + quote).slice(0, 1000000));
   if (r.getInt("page") < 0) r.set("page", 0);
   if (kind === "highlight") {
-    if (!r.getString("book")) throw new BadRequestError("Выделение делается в книге.");
+    if (!r.getString("book")) throw new BadRequestError("Цитата сохраняется из книги.");
     if (!quote) throw new BadRequestError("Выделите текст.");
     if (HL_COLORS.indexOf(r.getString("color")) < 0) r.set("color", "yellow");
     if (!r.getString("format")) throw new BadRequestError("Не указан формат книги.");
@@ -209,6 +209,8 @@ function checkNote(e) {
     if (!b) throw new BadRequestError("Книга не найдена: возможно, её удалили.");
     r.set("book_title", b.getString("title"));
   }
+  // в группу (этап 3): только участник и только к книге, которую группа читает сейчас
+  require(`${__hooks}/groups_lib.js`).checkNoteGroup(r, e.auth);
 }
 
 /* ---------- Отметки «Читаю» и «Прочитано» (правки 2.2) ---------- */

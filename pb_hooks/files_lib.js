@@ -1067,6 +1067,12 @@ function mergeBooks(book, other) {
     db.newQuery("DELETE FROM shelf_books WHERE book = {:b} AND shelf IN (SELECT shelf FROM shelf_books WHERE book = {:a})").bind(q).execute();
     db.newQuery("UPDATE shelf_books SET book = {:a} WHERE book = {:b}").bind(q).execute();
     db.newQuery("UPDATE notes SET book = {:a}, book_title = {:t} WHERE book = {:b}").bind(q).execute();
+    // группы чтения (этап 3): книга группы, её история и учёт чтения по дням переходят к первой книге
+    db.newQuery('UPDATE "groups" SET book = {:a} WHERE book = {:b}').bind(q).execute();
+    db.newQuery("UPDATE group_books SET book = {:a}, book_title = {:t} WHERE book = {:b}").bind(q).execute();
+    db.newQuery("UPDATE group_members SET book_seen = {:a} WHERE book_seen = {:b}").bind(q).execute();
+    db.newQuery(`DELETE FROM group_reads WHERE book = {:b} AND EXISTS (SELECT 1 FROM group_reads a WHERE a.book = {:a} AND a."user" = group_reads."user" AND a.day = group_reads.day)`).bind(q).execute();
+    db.newQuery("UPDATE group_reads SET book = {:a} WHERE book = {:b}").bind(q).execute();
     db.newQuery("UPDATE book_offers SET book = {:a} WHERE book = {:b}").bind(q).execute();
     // отметки «Читаю» и «Прочитано»: если у человека есть отметка у первой книги, вторая просто убирается
     db.newQuery(`DELETE FROM marks WHERE book = {:b} AND EXISTS (SELECT 1 FROM marks m WHERE m.book = {:a} AND m."user" = marks."user")`).bind(q).execute();
