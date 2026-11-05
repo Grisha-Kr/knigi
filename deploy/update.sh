@@ -42,7 +42,7 @@ need=""
 for p in pdftoppm:poppler-utils qpdf:qpdf djvused:djvulibre-bin ddjvu:djvulibre-bin unzip:unzip ocrmypdf:ocrmypdf tesseract:tesseract-ocr jbig2:jbig2; do
   command -v "${p%%:*}" >/dev/null 2>&1 || need="$need ${p#*:}"
 done
-python3 -c 'import ensurepip' >/dev/null 2>&1 || need="$need python3-venv"
+/usr/bin/python3 -c 'import ensurepip' >/dev/null 2>&1 || need="$need python3-venv"
 [ -f /usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf ] || need="$need fonts-dejavu-core"
 for l in ${LANGS//+/ }; do
   ls /usr/share/tesseract-ocr/*/tessdata/"$l".traineddata >/dev/null 2>&1 || need="$need tesseract-ocr-${l//_/-}"
@@ -64,7 +64,7 @@ MOBI_VER="0.3.3"
 if ! "$VENV/bin/python3" -c "import mobi, ocrmypdf, pikepdf, PIL" >/dev/null 2>&1; then
   echo "Готовлю модуль для книг Kindle (MOBI, AZW3)…"
   rm -rf "$VENV"
-  if python3 -m venv --system-site-packages "$VENV" >/dev/null 2>&1 && \
+  if /usr/bin/python3 -m venv --system-site-packages "$VENV" >/dev/null 2>&1 && \
      "$VENV/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir "mobi==$MOBI_VER" >/dev/null 2>&1; then
     echo "  Готово."
   else
@@ -104,7 +104,7 @@ chown -R $NAME:$NAME "$APP/src" "$APP/pb_data" "$APP/books" "$APP/files"
 systemctl start $NAME
 sleep 4
 if systemctl is-active --quiet $NAME; then
-  echo "Готово: приложение обновлено и работает ($($GIT log -1 --format=%s | cut -c1-80))."
+  echo "Готово: приложение обновлено и работает (версия $($GIT log -1 --format=%h))."
   djvu="$(ls "$APP/books"/*.djvu 2>/dev/null | wc -l)"
   [ "$djvu" -gt 0 ] && echo "Книги DjVu ($djvu) переводятся в PDF в фоне, по одной. Это может занять несколько минут на книгу."
   exit 0

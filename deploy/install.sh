@@ -131,7 +131,7 @@ add_setting OCR_LANGS rus+eng "Распознавание текста в ска
 # Модуль для книг Kindle (MOBI, AZW3): pip в отдельную папку venv, системный Python не трогается
 if ! "$APP_DIR/venv/bin/python3" -c "import mobi, ocrmypdf" >/dev/null 2>&1; then
   rm -rf "$APP_DIR/venv"
-  python3 -m venv --system-site-packages "$APP_DIR/venv" >/dev/null 2>&1 && \
+  /usr/bin/python3 -m venv --system-site-packages "$APP_DIR/venv" >/dev/null 2>&1 && \
     "$APP_DIR/venv/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir "mobi==0.3.3" >/dev/null 2>&1 || \
     echo "  Модуль для MOBI и AZW3 не установился (нет доступа к pypi.org?). Запустите позже: bash $APP_DIR/src/deploy/update.sh"
 fi
