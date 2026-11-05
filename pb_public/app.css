@@ -619,6 +619,72 @@ dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 32px)}
 .crop-zoom input{flex:1;min-width:0;min-height:44px;accent-color:#8DB3D6}
 .no-img .crop-zoom,.no-img .crop-hint{opacity:.35}
 
+/* Правки 2.2 */
+/* Кнопка «Добавить книги»: квадрат 44×44 со стрелкой вверх */
+.btn.sq{width:44px;min-height:44px;height:44px;padding:0;border-radius:12px}
+.btn.sq svg{width:22px;height:22px}
+/* Поиск: свой крестик справа, системный убран */
+.search .search-x{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:44px;height:44px;border:0;border-radius:50%;background:none;color:var(--muted);display:grid;place-items:center;cursor:pointer;padding:0}
+.search .search-x svg{position:static;transform:none;width:18px;height:18px}
+.search .search-x:hover{color:var(--ink)}
+.search input{padding-right:48px}
+.search input::-webkit-search-cancel-button{-webkit-appearance:none;appearance:none;display:none}
+/* Фото в шапке (телефон): открывает профиль, тонкая рамка цвета акцента, точка «есть книги на проверке» */
+.me-link{position:relative;width:48px;height:48px;flex:none}
+.me-link .face{width:44px;height:44px;font-size:18px;box-shadow:0 0 0 2px var(--bg),0 0 0 3.5px var(--accent)}
+.me-link.dot::after,.face-wrap.dot::after{content:"";position:absolute;top:1px;right:1px;width:12px;height:12px;border-radius:50%;background:var(--ochre);box-shadow:0 0 0 2px var(--bg)}
+.face-wrap{position:relative;display:inline-flex;flex:none}
+.face-wrap.dot::after{top:-2px;right:-2px;width:11px;height:11px;box-shadow:0 0 0 2px var(--nav)}
+.side-me[aria-current="page"]{background:var(--soft);color:var(--soft-ink)}
+.side .tab .n{margin-left:auto;font-size:12.5px;font-weight:700;color:var(--ochre-ink);background:var(--ochre-soft);border-radius:999px;padding:0 8px;min-width:22px;text-align:center}
+.side .tab .n:empty{display:none}
+.links a .n.hot{color:var(--ochre-ink);background:var(--ochre-soft);border-radius:999px;padding:0 9px;font-weight:700}
+.card h2 .n,.block h2 .n{font-family:var(--f-body);font-size:13px;font-weight:600;color:var(--muted);margin-left:4px}
+/* Отметки «Читаю» и «Прочитано» */
+.mark-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.mark-btn[aria-pressed="true"]{background:var(--soft);border-color:var(--accent);color:var(--soft-ink)}
+.mark-done{appearance:none;display:inline-flex;align-items:center;gap:6px;min-height:40px;padding:0 12px;border-radius:10px;border:0;background:var(--ochre-soft);color:var(--ochre-ink);font-weight:600;font-size:14px;cursor:pointer}
+.mark-done svg{width:18px;height:18px}
+@media (max-width: 899px){ .mark-row{justify-content:center} }
+.fin-day{color:var(--ochre-ink)!important}
+.offered{font-size:12.5px}
+/* Плашка в читалке «Читаете эту книгу?» */
+.mk-ask{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(86px + env(safe-area-inset-bottom,0px));z-index:6;display:flex;align-items:center;gap:8px;max-width:calc(100% - 24px);background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 28px rgb(0 0 0 / .18);padding:6px 4px 6px 14px;font-size:14px;font-weight:600}
+.mk-ask span{white-space:nowrap}
+.mk-ask .btn{white-space:nowrap}
+.reader.bars-off .mk-ask{bottom:calc(14px + env(safe-area-inset-bottom,0px))}
+@media (max-width: 380px){ .mk-ask span{display:none} }
+/* Книги от читателей */
+.offer-sent{background:var(--soft);color:var(--soft-ink);border-radius:14px;padding:12px 14px;font-weight:600;font-size:14.5px}
+.pend-note{background:var(--ochre-soft);color:var(--ochre-ink);border-radius:12px;padding:10px 12px;font-size:14px}
+.pend-note a{color:inherit;font-weight:700}
+.offer-row{display:flex;flex-direction:column;gap:2px;padding:10px 4px;border-top:1px solid var(--line)}
+.rows .offer-row:first-child{border-top:0}
+.offer-row b{font-weight:600;overflow-wrap:anywhere}
+.offer-row a{text-decoration:none;color:var(--accent-text)}
+.offer-row small{font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.offer-row .st{font-weight:700}
+.offer-row.pending .st{color:var(--soft-ink)}
+.offer-row.approved .st{color:var(--ochre-ink)}
+.offer-row.rejected .st,.offer-row .reason{color:var(--danger)}
+.offer-file{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.of-name{display:flex;flex-direction:column;min-width:0}
+.of-name b{overflow-wrap:anywhere;font-weight:600}
+.of-name small{color:var(--muted);font-size:13px}
+.rev-row .brow-t small{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.rev-note{font-style:italic}
+.rev-quote{font-family:var(--f-head);font-style:italic;border-left:3px solid var(--ochre);padding-left:12px}
+.rev-shelves{display:flex;flex-direction:column;gap:6px}
+.rev-shelves .check-row{background:var(--bg)}
+.rev-acts{display:flex;gap:10px;flex-wrap:wrap}
+.rev-acts .btn{flex:1;min-width:140px}
+
+.links a .chev{margin-left:auto}
+.links a .n + .chev{margin-left:0}
+
+/* Шапка с кнопками и фото: на телефоне кнопки строкой ниже, фото рядом с заголовком */
+@media (max-width: 899px){ .head-wrap{flex-wrap:wrap} .head-wrap .row-acts{order:3;width:100%} }
+
 /* Печать приложения выключена: книги и их страницы не печатаются */
 @media print{
   body > *{display:none!important}

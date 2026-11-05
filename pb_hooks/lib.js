@@ -205,8 +205,46 @@ function checkNote(e) {
   if (bookId) {
     let b = null;
     try { b = $app.findRecordById("books", bookId); } catch (_) {}
+    if (b && b.getBool("pending") && !admin) b = null; // книга на проверке: её видит только администратор
     if (!b) throw new BadRequestError("Книга не найдена: возможно, её удалили.");
     r.set("book_title", b.getString("title"));
+  }
+}
+
+/* ---------- Отметки «Читаю» и «Прочитано» (правки 2.2) ---------- */
+// Отметка человека у книги: status reading или finished. «Читаю» ставит started_at (если пусто),
+// «Прочитано» ставит finished_at (сегодня, если дату не прислали). Книга и владелец после создания не меняются.
+const isDay = (s) => /^\d{4}-\d{2}-\d{2}/.test(String(s || ""));
+function checkMark(e) {
+  const r = e.record;
+  const admin = isAdmin(e.auth);
+  if (r.isNew()) {
+    r.set("user", e.auth.id);
+    let b = null;
+    try { b = $app.findRecordById("books", r.getString("book")); } catch (_) {}
+    if (b && b.getBool("pending") && !admin) b = null;
+    if (!b) throw new BadRequestError("Книга не найдена: возможно, её удалили.");
+    if ($app.countRecords("marks", $dbx.hashExp({ user: e.auth.id, book: b.id })) > 0) {
+      throw new BadRequestError("Отметка у этой книги уже есть. Обновите страницу.");
+    }
+  } else {
+    const o = r.original();
+    r.set("user", o.getString("user"));
+    r.set("book", o.getString("book"));
+  }
+  const st = r.getString("status");
+  if (st !== "reading" && st !== "finished") throw new BadRequestError("Неизвестная отметка.");
+  const now = new Date().toISOString().replace("T", " ");
+  if (st === "reading" && !r.getString("started_at")) r.set("started_at", now);
+  if (st === "finished") {
+    const d = r.getString("finished_at");
+    if (!d) r.set("finished_at", now.slice(0, 10) + " 12:00:00.000Z");
+    else {
+      if (!isDay(d)) throw new BadRequestError("Проверьте дату прочтения.");
+      const day = String(d).slice(0, 10);
+      if (day > new Date(Date.now() + 2 * 864e5).toISOString().slice(0, 10)) throw new BadRequestError("Дата прочтения не может быть в будущем.");
+      if (day < "1900-01-01") throw new BadRequestError("Проверьте дату прочтения.");
+    }
   }
 }
 
@@ -329,9 +367,93 @@ function mailPolish(e, kind) {
   }
 }
 
+/* ---------- Свои письма: книги на проверке (правки 2.2) ---------- */
+// Почта настроена, если в панели включён SMTP. Иначе писем нет, всё видно в приложении.
+function mailReady() {
+  try { return !!$app.settings().smtp.enabled; } catch (_) { return false; }
+}
+function letterHtml(title, paragraphs, href, button) {
+  const font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+  const p = (t) => `<p class="mol-ink" style="margin:0 0 16px;font-size:16px;line-height:24px;color:#26231F;">${t}</p>`;
+  const appUrl = String($app.settings().meta.appURL || "").replace(/\/+$/, "");
+  const btn = href ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 20px;"><tr>
+<td class="mol-btn" align="center" bgcolor="#2C4A66" style="background:#2C4A66;border-radius:12px;">
+<a class="mol-btn-a" href="${escHtml(href)}" target="_blank" rel="noopener" style="display:block;padding:15px 20px;font-family:${font};font-size:17px;line-height:22px;font-weight:bold;color:#FFFFFF;text-decoration:none;border-radius:12px;">${escHtml(button)}</a>
+</td></tr></table>` : "";
+  return MAIL_HEAD + `
+<table class="mol-bg" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F4EFE6" style="width:100%;background:#F4EFE6;">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:480px;">
+<tr><td class="mol-card" bgcolor="#FFFFFF" style="background:#FFFFFF;border-radius:16px;padding:28px 22px 16px;font-family:${font};color:#26231F;text-align:left;">
+<h1 class="mol-ink" style="margin:0 0 18px;font-family:Georgia,'Times New Roman',serif;font-size:24px;line-height:30px;font-weight:bold;color:#26231F;">${escHtml(title)}</h1>
+${paragraphs.map(p).join("\n")}
+${btn}
+</td></tr>
+<tr><td class="mol-muted" align="center" style="padding:16px 8px 0;font-family:${font};font-size:12px;line-height:18px;color:#6E665A;">
+Библиотека<br><a class="mol-muted" href="${escHtml(appUrl)}" target="_blank" rel="noopener" style="color:#6E665A;">${escHtml(appUrl)}</a>
+</td></tr>
+</table>
+</td></tr></table>` + MAIL_FOOT;
+}
+// Отправить письмо, если почта настроена. Ошибка почты не мешает основному действию.
+function sendLetter(user, kind, subject, title, paragraphs, path, button) {
+  if (!mailReady() || !user || !user.getString("email")) return false;
+  try {
+    const s = $app.settings();
+    const appUrl = String(s.meta.appURL || "").replace(/\/+$/, "");
+    const name = user.getString("name").trim();
+    const html = letterHtml(title, [name ? `Здравствуйте, ${escHtml(name)}.` : "Здравствуйте."].concat(paragraphs), path ? appUrl + path : "", button);
+    $app.newMailClient().send(new MailerMessage({
+      from: { address: s.meta.senderAddress, name: s.meta.senderName },
+      to: [{ address: user.getString("email") }],
+      subject, html,
+    }));
+    const r = new Record($app.findCollectionByNameOrId("mail_log"));
+    r.set("user", user.id);
+    r.set("kind", kind);
+    $app.save(r);
+    return true;
+  } catch (err) {
+    $app.logger().warn("Письмо не отправлено", "kind", kind, "error", String(err));
+    return false;
+  }
+}
+// Администратору: «Новая книга на проверке», не чаще одного письма в час
+function mailNewOffer(offer, who) {
+  if (!mailReady()) return;
+  const admins = $app.findRecordsByFilter("users", "role = 'admin'", "created", 1, 0);
+  if (!admins.length) return;
+  const admin = admins[0];
+  const hourAgo = new Date(Date.now() - 3600e3).toISOString().replace("T", " ");
+  if ($app.countRecords("mail_log", $dbx.exp("user = {:u} AND kind = 'offer' AND created > {:t}", { u: admin.id, t: hourAgo })) > 0) return;
+  const whoName = who.getString("name").trim() || who.getString("email");
+  const note = offer.getString("note");
+  sendLetter(admin, "offer", "Новая книга на проверке", "Новая книга на проверке",
+    [`${escHtml(whoName)} предлагает книгу «${escHtml(offer.getString("title"))}».` + (note ? ` Пара слов от читателя: ${escHtml(note)}` : ""),
+      "Книга видна только вам, пока вы её не одобрите. Откройте раздел «На проверке», чтобы посмотреть её, поправить данные и принять решение."],
+    "/#/review", "Открыть «На проверке»");
+}
+// Читателю: решение по его книге
+function mailOfferDecision(offer) {
+  let user = null;
+  try { user = $app.findRecordById("users", offer.getString("user")); } catch (_) { return; }
+  const title = offer.getString("title");
+  if (offer.getString("status") === "approved") {
+    sendLetter(user, "offer_ok", "Ваша книга добавлена в библиотеку", "Книга добавлена",
+      [`Книга «${escHtml(title)}», которую вы предложили, теперь в библиотеке. Спасибо!`],
+      "/#/b/" + offer.getString("book"), "Открыть книгу");
+  } else {
+    sendLetter(user, "offer_no", "Ваша книга не добавлена в библиотеку", "Книга не добавлена",
+      [`Книгу «${escHtml(title)}», которую вы предложили, администратор не добавил в библиотеку.`,
+        `Причина: ${escHtml(offer.getString("reason"))}`],
+      "/#/profile", "Открыть профиль");
+  }
+}
+
 module.exports = {
   MB, isAdmin, requireAdmin, norm, sortName, splitAuthors, authorId, bookSearch, dropLonelyAuthors,
   MAX_DEPTH, shelfDepth, checkShelfCreate, checkShelfUpdate, checkShelfDelete,
   cleanHtml, plainText, checkNote, checkRegistration, HL_COLORS,
   MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,
+  checkMark, mailReady, sendLetter, mailNewOffer, mailOfferDecision, escHtml,
 };

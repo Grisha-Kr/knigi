@@ -80,7 +80,7 @@ onRecordUpdate((e) => { e.record.set("search", require(`${__hooks}/lib.js`).book
 onRecordUpdateRequest((e) => {
   if (!e.hasSuperuserAuth()) {
     const o = e.record.original();
-    for (const f of ["formats", "text_file", "file_size", "pages", "has_text", "status", "status_note", "cover"]) {
+    for (const f of ["formats", "text_file", "file_size", "pages", "has_text", "status", "status_note", "cover", "pending", "offered_by"]) {
       e.record.set(f, o.get(f));
     }
     const title = e.record.getString("title").replace(/\s+/g, " ").trim();
@@ -100,7 +100,18 @@ onRecordAfterUpdateSuccess((e) => {
   lib.dropLonelyAuthors($app, o.getStringSlice("authors").filter((a) => now.indexOf(a) < 0));
   if (o.getString("title") !== e.record.getString("title")) {
     $app.db().newQuery("UPDATE notes SET book_title = {:t} WHERE book = {:b}").bind({ t: e.record.getString("title"), b: e.record.id }).execute();
+    // название в «Моих предложенных книгах» меняется вместе с книгой (через запись, чтобы пришло живое обновление)
+    for (const x of $app.findRecordsByFilter("book_offers", "book = {:b}", "", 0, 0, { b: e.record.id })) {
+      x.set("title", e.record.getString("title"));
+      try { $app.save(x); } catch (_) {}
+    }
   }
+}, "books");
+// Кто предложил книгу, видит только администратор.
+onRecordEnrich((e) => {
+  const auth = e.requestInfo.auth;
+  if (!(auth && (auth.isSuperuser() || auth.getString("role") === "admin"))) e.record.hide("offered_by", "pending");
+  e.next();
 }, "books");
 
 // Служебные поля файла книги (имя на диске, исходное имя, отпечаток) видит только администратор.
@@ -121,6 +132,7 @@ onRecordCreateRequest((e) => {
     let b = null;
     try { b = $app.findRecordById("books", e.record.getString("book")); } catch (_) {}
     if (!b) throw new BadRequestError("Книга не найдена.");
+    if (b.getBool("pending")) throw new BadRequestError("Книга на проверке. На полку она встанет после одобрения.");
     if ($app.countRecords("shelf_books", $dbx.hashExp({ shelf: e.record.getString("shelf"), book: b.id })) > 0) {
       throw new BadRequestError("Эта книга уже стоит на этой полке.");
     }
@@ -162,6 +174,10 @@ onRecordEnrich((e) => {
 
 onRecordEnrich((e) => { e.record.hide("file"); e.next(); }, "note_files");
 
+/* ---------- Отметки «Читаю» и «Прочитано» (правки 2.2) ---------- */
+onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkMark(e); e.next(); }, "marks");
+onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkMark(e); e.next(); }, "marks");
+
 // Файл урока удалили (сам или вместе с уроком): убираем его с диска.
 onRecordAfterDeleteSuccess((e) => {
   e.next();
@@ -184,9 +200,10 @@ routerAdd("POST", "/api/knigi/logout", (e) => {
 // Обложка: только вошедшему (по куке). Можно хранить в памяти браузера, адрес меняется вместе с обложкой.
 routerAdd("GET", "/api/knigi/f/cover/{id}", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
-  F.cookieUser(e);
+  const u = F.cookieUser(e);
   let b = null;
   try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
+  if (b && b.getBool("pending") && u.getString("role") !== "admin") b = null; // книгу на проверке видит только администратор
   const name = b ? b.getString("cover") : "";
   if (!name) throw new NotFoundError("Обложки нет.");
   const h = e.response.header();
@@ -201,6 +218,7 @@ routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   let b = null;
   try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
+  if (b && b.getBool("pending") && !require(`${__hooks}/lib.js`).isAdmin(e.auth)) b = null;
   if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
   const fmt = String((e.requestInfo().query || {}).f || "pdf");
   if (fmt !== "pdf" && fmt !== "epub") throw new BadRequestError("Читалка для этого формата появится позже.");
@@ -225,6 +243,7 @@ routerAdd("GET", "/api/knigi/f/book/{id}", (e) => {
   const user = F.linkUser(e, "book", id);
   let f = null, b = null;
   try { f = $app.findRecordById("book_files", id); b = $app.findRecordById("books", f.getString("book")); } catch (_) {}
+  if (b && b.getBool("pending") && user.getString("role") !== "admin") b = null;
   if (!f || !b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
   const name = f.getString("file");
   const size = f.getInt("file_size");
@@ -304,6 +323,7 @@ routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   let b = null;
   try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
+  if (b && b.getBool("pending") && e.auth.getString("role") !== "admin") b = null;
   if (!b) throw new NotFoundError("Книга не найдена.");
   const body = e.requestInfo().body || {};
   // формат: PDF (страница) или EPUB (процент и место); старое приложение формат не присылает, это PDF
@@ -340,31 +360,62 @@ routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
   return e.json(200, { id: r.id, format: fmt, page, pages, pct, pos, updated: r.getString("updated") });
 }, $apis.requireAuth("users"));
 
-/* ---------- Загрузка книг и файлов уроков (только администратор) ---------- */
+/* ---------- Загрузка книг и файлов уроков ---------- */
+// Книги и файлы уроков загружает администратор. Читатель может только предложить книгу (kind: offer):
+// она попадает на проверку, не больше 3 книг на проверке от одного человека (правки 2.2).
+// Продолжить, закончить и отменить загрузку может только тот, кто её начал (uploadMeta проверяет владельца).
 routerAdd("POST", "/api/knigi/upload/start", (e) => {
-  require(`${__hooks}/lib.js`).requireAdmin(e);
-  return e.json(200, require(`${__hooks}/files_lib.js`).startUpload(e, e.requestInfo().body || {}));
+  const lib = require(`${__hooks}/lib.js`);
+  const body = e.requestInfo().body || {};
+  if (body.kind === "offer") {
+    if (lib.isAdmin(e.auth)) throw new BadRequestError("Администратор добавляет книги сам: кнопка «Добавить книги» на главной.");
+  } else lib.requireAdmin(e);
+  return e.json(200, require(`${__hooks}/files_lib.js`).startUpload(e, body));
 }, $apis.requireAuth("users"));
 routerAdd("POST", "/api/knigi/upload/{up}/finish", (e) => {
-  require(`${__hooks}/lib.js`).requireAdmin(e);
-  return e.json(200, require(`${__hooks}/files_lib.js`).finishUpload(e, e.request.pathValue("up")));
+  const F = require(`${__hooks}/files_lib.js`);
+  if (F.uploadKind(e.request.pathValue("up"), e.auth.id) !== "offer") require(`${__hooks}/lib.js`).requireAdmin(e);
+  return e.json(200, F.finishUpload(e, e.request.pathValue("up")));
 }, $apis.requireAuth("users"));
 routerAdd("POST", "/api/knigi/upload/{up}/{n}", (e) => {
-  require(`${__hooks}/lib.js`).requireAdmin(e);
-  return e.json(200, require(`${__hooks}/files_lib.js`).saveChunk(e, e.request.pathValue("up"), e.request.pathValue("n")));
+  const F = require(`${__hooks}/files_lib.js`);
+  if (F.uploadKind(e.request.pathValue("up"), e.auth.id) !== "offer") require(`${__hooks}/lib.js`).requireAdmin(e);
+  return e.json(200, F.saveChunk(e, e.request.pathValue("up"), e.request.pathValue("n")));
 }, $apis.requireAuth("users"), $apis.bodyLimit(12 * 1024 * 1024));
 routerAdd("DELETE", "/api/knigi/upload/{up}", (e) => {
-  require(`${__hooks}/lib.js`).requireAdmin(e);
   const F = require(`${__hooks}/files_lib.js`);
-  F.uploadDir(e.request.pathValue("up"));
+  if (F.uploadKind(e.request.pathValue("up"), e.auth.id) !== "offer") require(`${__hooks}/lib.js`).requireAdmin(e);
   F.dropUpload(e.request.pathValue("up"));
   return e.json(200, { ok: true });
 }, $apis.requireAuth("users"));
 
 // Обработать загруженные книги сейчас (иначе это сделает задание раз в минуту).
+// Может позвать любой вошедший: так книга читателя тоже обрабатывается сразу после загрузки.
+// Маршрут только запускает очередь, которая и так идёт раз в минуту.
 routerAdd("POST", "/api/knigi/process", (e) => {
-  require(`${__hooks}/lib.js`).requireAdmin(e);
   return e.json(200, require(`${__hooks}/files_lib.js`).processQueue());
+}, $apis.requireAuth("users"));
+
+/* ---------- Книги на проверке (правки 2.2, только администратор) ---------- */
+// Одобрить: {shelves: [id общих полок]}. Название, авторов, год, описание и обложку администратор
+// правит до этого обычными способами (книга видна ему, как любая другая).
+routerAdd("POST", "/api/knigi/offers/{id}/approve", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const body = e.requestInfo().body || {};
+  require(`${__hooks}/files_lib.js`).approveOffer(e, e.request.pathValue("id"), body.shelves);
+  return e.json(200, { ok: true });
+}, $apis.requireAuth("users"));
+// Отклонить: {reason}. Файл, текст и обложка удаляются с диска.
+routerAdd("POST", "/api/knigi/offers/{id}/reject", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  const body = e.requestInfo().body || {};
+  require(`${__hooks}/files_lib.js`).rejectOffer(e, e.request.pathValue("id"), body.reason);
+  return e.json(200, { ok: true });
+}, $apis.requireAuth("users"));
+// Настроена ли почта: на экране проверки администратор видит, придёт ли человеку письмо.
+routerAdd("GET", "/api/knigi/admin/mail", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  return e.json(200, { ready: require(`${__hooks}/lib.js`).mailReady() });
 }, $apis.requireAuth("users"));
 routerAdd("POST", "/api/knigi/books/{id}/reprocess", (e) => {
   require(`${__hooks}/lib.js`).requireAdmin(e);

@@ -256,6 +256,8 @@ function cleanLog() {
 const CHUNK = 8 * MB;
 const KINDS = {
   book: { exts: ["pdf", "epub", "djvu", "djv"], max: 500 * MB, about: "PDF, EPUB или DjVu до 500 МБ" },
+  // книга от читателя (правки 2.2): те же форматы и размер, попадает на проверку администратору
+  offer: { exts: ["pdf", "epub", "djvu", "djv"], max: 500 * MB, about: "PDF, EPUB или DjVu до 500 МБ" },
   file: { exts: ["pdf", "doc", "docx", "ppt", "pptx", "jpg", "jpeg", "png", "webp", "gif", "heic"], max: 50 * MB,
     about: "PDF, DOC, DOCX, PPT, PPTX или изображение до 50 МБ" },
 };
@@ -271,6 +273,27 @@ function uploadMeta(up, userId) {
   if (!meta || meta.user !== userId) throw new NotFoundError("Загрузка не найдена: начните её заново.");
   return meta;
 }
+// Книги от читателя: сколько у человека на проверке вместе с теми, что загружаются прямо сейчас
+const OFFER_MAX = 3;
+function offerUploads(userId, skip) {
+  let n = 0, list = [];
+  try { list = $os.readDir(uploadsDir()); } catch (_) { return 0; }
+  for (const d of list) {
+    if (d.name() === skip) continue;
+    let meta = null;
+    try { meta = JSON.parse(toString($os.readFile($filepath.join(uploadsDir(), d.name(), "meta.json")))); } catch (_) {}
+    if (meta && meta.kind === "offer" && meta.user === userId && Date.now() - meta.at < 864e5) n++;
+  }
+  return n;
+}
+function offersPending(userId) {
+  return $app.countRecords("book_offers", $dbx.hashExp({ user: userId, status: "pending" }));
+}
+function offerLimit(userId, skip) {
+  if (offersPending(userId) + offerUploads(userId, skip) >= OFFER_MAX) {
+    throw new BadRequestError(`На проверке уже ${OFFER_MAX} ваши книги. Дождитесь решения по ним, потом предложите следующую.`);
+  }
+}
 function startUpload(e, body) {
   const kind = KINDS[body.kind] ? body.kind : "book";
   const rule = KINDS[kind];
@@ -281,6 +304,11 @@ function startUpload(e, body) {
   if (size <= 0) throw new BadRequestError("Файл пустой.");
   if (size > rule.max) throw new BadRequestError(`Файл «${name}» больше, чем можно: ${rule.about}.`);
   let note = "", book = "";
+  if (kind === "offer") {
+    // роль проверяет маршрут: предлагают читатели, администратор добавляет книги сам
+    offerLimit(e.auth.id, "");
+    note = String(body.note || "").replace(/\s+/g, " ").trim().slice(0, 1000);
+  }
   if (kind === "book" && body.book) {
     // ещё один формат к книге, которая уже есть
     let b = null;
@@ -304,6 +332,7 @@ function startUpload(e, body) {
   const dir = $filepath.join(uploadsDir(), up);
   $os.mkdirAll(dir, 0o750);
   const meta = { user: e.auth.id, kind, name, size, ext: ext === "djv" ? "djvu" : ext, note, book, chunks: Math.ceil(size / CHUNK), at: Date.now() };
+  if (kind === "offer") meta.note = note;
   $os.writeFile($filepath.join(dir, "meta.json"), JSON.stringify(meta), 0o640);
   return { upload: up, chunk: CHUNK, chunks: meta.chunks };
 }
@@ -333,6 +362,11 @@ function joinChunks(up, meta, dest) {
     throw new BadRequestError("Файл склеился неправильно. Загрузите его заново.");
   }
 }
+// Отпечаток файла (sha256): по нему видны повторы
+function sha256(path) {
+  try { return run(["sha256sum", path], 600).split(/\s+/)[0] || ""; } catch (_) { return ""; }
+}
+function uploadKind(up, userId) { return uploadMeta(up, userId).kind; }
 function dropUpload(up) { try { $os.removeAll(uploadDir(up)); } catch (_) {} }
 // Брошенные загрузки старше суток
 function cleanUploads() {
@@ -381,6 +415,7 @@ function finishUpload(e, up) {
   const file = `${id}.${fmt}`;
   joinChunks(up, meta, $filepath.join(booksDir(), file));
   dropUpload(up);
+  if (meta.kind === "offer") return finishOffer(e, meta, id, fmt, file);
   const fileRec = (bookId) => {
     const f = new Record($app.findCollectionByNameOrId("book_files"));
     f.set("id", id);
@@ -412,6 +447,124 @@ function finishUpload(e, up) {
     $app.runInTransaction((tx) => { tx.save(b); tx.save(fileRec(id)); });
   } catch (err) { rmFile(booksDir(), file); throw err; }
   return { id, file: id, kind: "book" };
+}
+
+/* ---------- Книги от читателей (правки 2.2) ---------- */
+// Файл уже склеен в BOOKS_DIR. Если такой файл есть в библиотеке или уже на проверке, он удаляется
+// и человек получает ответ. Иначе появляются книга (pending, видит только администратор), её файл
+// (обрабатывается как обычно) и строка book_offers.
+function finishOffer(e, meta, id, fmt, file) {
+  const lib = require(`${__hooks}/lib.js`);
+  const path = $filepath.join(booksDir(), file);
+  const hash = sha256(path);
+  if (hash) {
+    const twins = $app.findRecordsByFilter("book_files", "hash = {:h}", "created", 0, 0, { h: hash });
+    for (const t of twins) {
+      let tb = null;
+      try { tb = $app.findRecordById("books", t.getString("book")); } catch (_) {}
+      if (!tb) continue;
+      rmFile(booksDir(), file);
+      if (tb.getBool("pending")) return { kind: "offer", pending: true, message: "Эта книга уже на проверке." };
+      return { kind: "offer", duplicate: { id: tb.id, title: tb.getString("title") }, message: "Эта книга уже есть в библиотеке." };
+    }
+  }
+  try { offerLimit(e.auth.id, ""); } catch (err) { rmFile(booksDir(), file); throw err; }
+  const guess = fromFileName(meta.name);
+  const b = new Record($app.findCollectionByNameOrId("books"));
+  b.set("id", id);
+  b.set("title", guess.title.slice(0, 500));
+  b.set("formats", [fmt]);
+  b.set("file_size", meta.size);
+  b.set("status", "processing");
+  b.set("pending", true);
+  b.set("offered_by", e.auth.id);
+  const f = new Record($app.findCollectionByNameOrId("book_files"));
+  f.set("id", id);
+  f.set("book", id);
+  f.set("format", fmt);
+  f.set("file", file);
+  f.set("orig_name", meta.name);
+  f.set("file_size", meta.size);
+  f.set("status", "processing");
+  f.set("hash", hash);
+  const o = new Record($app.findCollectionByNameOrId("book_offers"));
+  o.set("user", e.auth.id);
+  o.set("book", id);
+  o.set("title", guess.title.slice(0, 500));
+  o.set("file_name", meta.name);
+  o.set("file_size", meta.size);
+  o.set("note", meta.note || "");
+  o.set("status", "pending");
+  try {
+    $app.runInTransaction((tx) => {
+      if (guess.authors) b.set("authors", lib.splitAuthors(guess.authors).map((n) => lib.authorId(tx, n)));
+      tx.save(b); tx.save(f); tx.save(o);
+    });
+  } catch (err) { rmFile(booksDir(), file); throw err; }
+  try { lib.mailNewOffer(o, e.auth); } catch (err) { $app.logger().warn("Письмо о новой книге", "error", String(err)); }
+  return { kind: "offer", id: o.id };
+}
+function offerOf(id) {
+  let o = null;
+  try { o = $app.findRecordById("book_offers", id); } catch (_) {}
+  if (!o) throw new NotFoundError("Предложение не найдено: возможно, его уже разобрали.");
+  if (o.getString("status") !== "pending") throw new BadRequestError("По этой книге решение уже принято.");
+  let b = null;
+  try { b = $app.findRecordById("books", o.getString("book")); } catch (_) {}
+  if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  if (b.getString("status") === "processing") throw new BadRequestError("Книга ещё обрабатывается. Подождите минуту и попробуйте снова.");
+  return { o, b };
+}
+// Одобрить: книга становится видна всем, встаёт на выбранные общие полки
+function approveOffer(e, id, shelves) {
+  const lib = require(`${__hooks}/lib.js`);
+  const { o, b } = offerOf(id);
+  if (b.getString("status") === "error") throw new BadRequestError("Файл книги не удалось обработать. Такую книгу лучше отклонить.");
+  const list = [];
+  for (const sid of (Array.isArray(shelves) ? shelves : []).slice(0, 50)) {
+    let s = null;
+    try { s = $app.findRecordById("shelves", String(sid)); } catch (_) {}
+    if (!s || !s.getBool("common")) throw new BadRequestError("Полка не найдена или она не общая.");
+    if (list.indexOf(s.id) < 0) list.push(s.id);
+  }
+  $app.runInTransaction((tx) => {
+    const r = tx.findRecordById("books", b.id);
+    r.set("pending", false);
+    tx.save(r);
+    // файлы книги сохраняем заново: так приложения читателей сразу получают их живым обновлением
+    for (const f of filesOf(b.id, tx)) tx.save(f);
+    const col = tx.findCollectionByNameOrId("shelf_books");
+    for (const sid of list) {
+      if (tx.countRecords("shelf_books", $dbx.hashExp({ shelf: sid, book: b.id })) > 0) continue;
+      const sb = new Record(col);
+      sb.set("shelf", sid);
+      sb.set("book", b.id);
+      sb.set("sort", tx.countRecords("shelf_books", $dbx.hashExp({ shelf: sid })));
+      tx.save(sb);
+    }
+    const x = tx.findRecordById("book_offers", o.id);
+    x.set("status", "approved");
+    x.set("title", r.getString("title"));
+    x.set("decided_at", new Date().toISOString().replace("T", " "));
+    tx.save(x);
+  });
+  try { lib.mailOfferDecision($app.findRecordById("book_offers", o.id)); } catch (_) {}
+}
+// Отклонить: книга, её файл, текст, обложка и авторы без книг удаляются, у человека «Отклонена» с причиной
+function rejectOffer(e, id, reason) {
+  const lib = require(`${__hooks}/lib.js`);
+  reason = String(reason || "").replace(/\s+/g, " ").trim().slice(0, 1000);
+  if (!reason) throw new BadRequestError("Напишите причину: её увидит человек, который предложил книгу.");
+  const { o, b } = offerOf(id);
+  const x = $app.findRecordById("book_offers", o.id);
+  x.set("status", "rejected");
+  x.set("reason", reason);
+  x.set("title", b.getString("title"));
+  x.set("book", "");
+  x.set("decided_at", new Date().toISOString().replace("T", " "));
+  $app.save(x);
+  deleteBook(e, b, "delete");
+  try { lib.mailOfferDecision(x); } catch (_) {}
 }
 
 /* ---------- Сводка книги по её файлам ---------- */
@@ -844,6 +997,10 @@ function deleteBook(e, book, notesMode) {
       tx.save(n);
     }
     tx.db().newQuery("UPDATE read_log SET book = '' WHERE book = {:b}").bind({ b: book.id }).execute();
+    // книгу на проверке удалили из карточки: у человека она «Отклонена»
+    tx.db().newQuery(`UPDATE book_offers SET status = 'rejected', reason = 'Администратор удалил книгу.', decided_at = {:t}, title = {:title}
+      WHERE book = {:b} AND status = 'pending'`).bind({ b: book.id, t: new Date().toISOString().replace("T", " "), title }).execute();
+    tx.db().newQuery("UPDATE book_offers SET book = '' WHERE book = {:b}").bind({ b: book.id }).execute();
     tx.delete(book); // файлы книги, места на полках и прогресс удаляются каскадом
   });
   for (const f of files) { rmFile(booksDir(), f.file); rmFile(textDir(), f.id + ".txt"); }
@@ -894,6 +1051,7 @@ function mergeInfo(book, other) {
 function mergeBooks(book, other) {
   const lib = require(`${__hooks}/lib.js`);
   if (book.id === other.id) throw new BadRequestError("Это одна и та же книга.");
+  if (book.getBool("pending") || other.getBool("pending")) throw new BadRequestError("Книга на проверке. Сначала одобрите её, потом объединяйте.");
   const info = mergeInfo(book, other);
   if (info.conflict.length) {
     throw new BadRequestError(`У обеих книг есть файл ${info.conflict.map((x) => FMT_NAME[x]).join(" и ")}. Сначала уберите лишний формат в одной из них.`);
@@ -909,6 +1067,10 @@ function mergeBooks(book, other) {
     db.newQuery("DELETE FROM shelf_books WHERE book = {:b} AND shelf IN (SELECT shelf FROM shelf_books WHERE book = {:a})").bind(q).execute();
     db.newQuery("UPDATE shelf_books SET book = {:a} WHERE book = {:b}").bind(q).execute();
     db.newQuery("UPDATE notes SET book = {:a}, book_title = {:t} WHERE book = {:b}").bind(q).execute();
+    db.newQuery("UPDATE book_offers SET book = {:a} WHERE book = {:b}").bind(q).execute();
+    // отметки «Читаю» и «Прочитано»: если у человека есть отметка у первой книги, вторая просто убирается
+    db.newQuery(`DELETE FROM marks WHERE book = {:b} AND EXISTS (SELECT 1 FROM marks m WHERE m.book = {:a} AND m."user" = marks."user")`).bind(q).execute();
+    db.newQuery("UPDATE marks SET book = {:a} WHERE book = {:b}").bind(q).execute();
     db.newQuery(`DELETE FROM reading WHERE book = {:b} AND EXISTS (SELECT 1 FROM reading r WHERE r.book = {:a} AND r."user" = reading."user" AND r.format = reading.format)`).bind(q).execute();
     db.newQuery("UPDATE reading SET book = {:a} WHERE book = {:b}").bind(q).execute();
     // журнал: строки за один час складываются
@@ -935,6 +1097,7 @@ module.exports = {
   MB, S, booksDir, filesDir, coversDir, textDir, ensureDirs, rmFile, exists, freeBytes, checkFree,
   fileKey, LINK_TTL, setCookie, clearCookie, cookieUser, makeLink, linkUser, watermarkFor,
   MAX_SPAN, EPUB_MAX, parseRange, noStore, takeBytes, logBytes, logPages, cleanLog,
-  CHUNK, KINDS, startUpload, saveChunk, finishUpload, dropUpload, uploadDir, cleanUploads, fromFileName,
+  CHUNK, KINDS, startUpload, saveChunk, finishUpload, dropUpload, uploadDir, uploadKind, cleanUploads, fromFileName,
+  OFFER_MAX, approveOffer, rejectOffer,
   processQueue, replaceCover, deleteBook, filesOf, syncBook, FMT_NAME, formatInfo, removeFormat, mergeInfo, mergeBooks, htmlText,
 };

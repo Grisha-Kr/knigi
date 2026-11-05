@@ -64,18 +64,23 @@ const ICON = {
   marker: sv('<path d="M14.5 4.5l5 5L10 19H5v-5z"/><path d="M12 7l5 5"/><path d="M4 21h9"/>'),
   hl: sv('<path d="M5 20h14"/><path d="M8 16l-1.5-1.5L15 6l3 3-8.5 8.5z"/>'),
   copy: sv('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>'),
+  inbox: sv('<path d="M4 13l2.5-8h11L20 13v6H4z"/><path d="M4 13h4.5l1 2h5l1-2H20"/>'),
   aa: '<svg viewBox="0 0 24 24" aria-hidden="true"><text x="2" y="18" font-size="15" font-weight="700" fill="currentColor" stroke="none" font-family="Georgia,serif">А</text><text x="13" y="18" font-size="10" font-weight="700" fill="currentColor" stroke="none" font-family="Georgia,serif">а</text></svg>',
 };
 
 /* ---------- Состояние ---------- */
-const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], invites:[], users:[], owner:null, loaded:false, disk:null};
-const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files'};
+// marks: отметки «Читаю» и «Прочитано» (у каждого свои); offers: предложенные книги (у читателя свои, у администратора все);
+// pbooks: книги на проверке (только у администратора, в общих списках их нет)
+const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], marks:[], offers:[], pbooks:[], invites:[], users:[], owner:null, loaded:false, disk:null, mail:null};
+const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files', marks:'marks', offers:'book_offers', pbooks:'books'};
 const KEYS = Object.keys(PBN);
-const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS}), bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS})};
+const loadKeys = () => KEYS.filter(k => k !== 'pbooks' || isAdmin());
+const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS + (isAdmin() ? ',offered_by' : ''), filter: 'pending = false'}), pbooks: () => ({fields: BOOK_FIELDS + ',offered_by,pending', filter: 'pending = true'}),
+  bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS})};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('kn_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('kn_'+k, JSON.stringify(v)); } catch(e){} };
 const dropLS = k => { try { localStorage.removeItem('kn_'+k); } catch(e){} };
-const UI = {hops:0, q:'', reorder:'', booksView: loadLS('booksView', 'grid'), booksSort: loadLS('booksSort', 'title'), booksFmt:'', booksScan:false,
+const UI = {hops:0, reorder:'', revShelves:{}, finAll:false, booksView: loadLS('booksView', 'grid'), booksSort: loadLS('booksSort', 'title'), booksFmt:'', booksScan:false,
   tab:'notes', notesQ:'', notesKind:'', notesHits:null, cardFrom:{}, logQ:{days:7, user:'', book:''}, log:null, descOpen:false,
   cardFmt:{}, hlColor:'', hlThought:false, hlOpen:new Set(), noteCtx:null,
   fullFor:'', fullNow:false, normalOnce:false};
@@ -128,7 +133,9 @@ function newId(){ const a = new Uint8Array(15); crypto.getRandomValues(a); retur
 const collator = new Intl.Collator('ru', {sensitivity: 'base', numeric: true});
 
 /* ---------- Доступ к данным ---------- */
-const byId = (key, id) => S[key].find(x => x.id === id);
+// книга на проверке у администратора лежит в S.pbooks, но открывается так же, как любая (карточка, читалка, правка)
+const byId = (key, id) => S[key].find(x => x.id === id) || (key === 'books' ? S.pbooks.find(x => x.id === id) : undefined);
+const bookKey = id => S.pbooks.some(x => x.id === id) ? 'pbooks' : 'books';
 const bySort = (a, b) => (a.sort ?? 0) - (b.sort ?? 0) || collator.compare(a.name || '', b.name || '');
 const authorName = id => (byId('authors', id) || {}).name || '';
 const authorsText = b => (b.authors || []).map(authorName).filter(Boolean).join(', ');
@@ -178,7 +185,8 @@ const titleSort = (a, b) => collator.compare(a.title || '', b.title || '');
 function upsert(key, rec){ const arr = S[key]; const i = arr.findIndex(x => x.id === rec.id); if(i >= 0) arr[i] = {...arr[i], ...rec}; else arr.push({...rec}); schedule(); }
 function removeLocal(key, id){ S[key] = S[key].filter(x => x.id !== id); schedule(); }
 
-async function loadAll(keys = KEYS){
+async function loadAll(keys = loadKeys()){
+  keys = keys.filter(k => k !== 'pbooks' || isAdmin());
   const res = await Promise.all(keys.map(k => pb.collection(PBN[k]).getFullList({batch: 1000, ...(LIST_OPTS[k] ? LIST_OPTS[k]() : {})})));
   keys.forEach((k, n) => { S[k] = res[n]; });
   schedule();
@@ -188,10 +196,13 @@ async function subscribeAll(){
   if(subscribed) return; subscribed = true;
   await pb.collection('users').subscribe(me().id, e => { if(e.action === 'update'){ pb.authStore.save(pb.authStore.token, e.record); themeFromUser(); schedule(); } });
   for(const k of KEYS){
+    if(k === 'pbooks') continue; // книги на проверке приходят вместе с books
     await pb.collection(PBN[k]).subscribe('*', e => {
-      if(e.action === 'delete'){ removeLocal(k, e.record.id); if(k === 'notes') hlLive(e.record, true); }
+      if(e.action === 'delete'){ removeLocal(k, e.record.id); if(k === 'books') removeLocal('pbooks', e.record.id); if(k === 'notes') hlLive(e.record, true); }
       else {
         const r = e.record;
+        // книга ушла на проверку или её одобрили: переносим между списками
+        if(k === 'books'){ if(r.pending){ S.books = S.books.filter(x => x.id !== r.id); upsert('pbooks', r); } else { S.pbooks = S.pbooks.filter(x => x.id !== r.id); upsert('books', r); } return; }
         // заметки: в общем списке без текста, только начало для подписи
         if(k === 'notes'){ hlLive(r); r.body_text = String(r.body_text || '').slice(0, 400); delete r.body; delete r.search; delete r.anchor; }
         upsert(k, r);
@@ -267,15 +278,22 @@ function schedule(){ if(raf) return; raf = requestAnimationFrame(() => { raf = 0
 function showNotice(text){ $('#notice-text').textContent = text; $('#notice').hidden = false; }
 
 /* ---------- Меню разделов: внизу на телефоне, сбоку на компьютере ---------- */
-const TABS = [['lib', '#/', 'Библиотека', 'library'], ['shelves', '#/shelves', 'Полки', 'shelves'], ['notes', '#/notes', 'Заметки', 'notes'], ['profile', '#/profile', 'Профиль', 'profile']];
+// Разделы. Новый раздел (например, «Группы») добавляется строкой сюда: [ключ, адрес, подпись, значок].
+// Профиль открывается фото: в шапке на телефоне, внизу бокового меню на компьютере.
+const TABS = [['lib', '#/', 'Библиотека', 'library'], ['shelves', '#/shelves', 'Полки', 'shelves'], ['notes', '#/notes', 'Заметки', 'notes']];
 function buildNav(){
   const items = TABS.map(([k, h, l, ic]) => `<a href="${h}" class="tab" data-tab="${k}">${ICON[ic]}<span>${l}</span></a>`).join('');
   $('#tabbar').innerHTML = `<div class="tabbar-in">${items}</div>`;
-  $('#side').innerHTML = `<div class="side-brand"><span class="side-logo" aria-hidden="true"></span><b>Библиотека</b></div>${items}<a class="side-me" id="side-me" href="#/profile"></a>`;
+  const review = isAdmin() ? `<a href="#/review" class="tab" data-tab="review">${ICON.inbox}<span>На проверке</span><span class="n" id="side-rev"></span></a>` : '';
+  $('#side').innerHTML = `<div class="side-brand"><span class="side-logo" aria-hidden="true"></span><b>Библиотека</b></div>${items}${review}<a class="side-me" id="side-me" href="#/profile"></a>`;
 }
+// Сколько книг ждёт проверки (только у администратора): счётчик в меню и точка на фото
+const reviewCount = () => isAdmin() ? S.pbooks.length : 0;
+// Фото в шапке на телефоне: открывает профиль (на компьютере профиль внизу бокового меню)
+const meLink = () => `<a class="me-link${reviewCount() ? ' dot' : ''}" href="#/profile" aria-label="Профиль${reviewCount() ? ', есть книги на проверке' : ''}" title="Профиль">${faceHTML(me(), 'md')}</a>`;
 
 /* ---------- Адреса экранов ----------
-   #/ главная, #/shelves полки, #/sh/ID полка, #/books все книги, #/authors авторы, #/a/ID автор,
+   #/ главная (#/?q=слово: поиск), #/review книги на проверке (#/review/ID_КНИГИ проверка одной), #/shelves полки, #/sh/ID полка, #/books все книги, #/authors авторы, #/a/ID автор,
    #/b/ID карточка книги (?tab=lessons), #/read/ID читалка (?p=страница), #/pdf/ID файл урока в читалке (?note=ID),
    #/note/ID заметка или урок, #/note/new (?book=ID&page=N&kind=lesson), #/notes мои заметки, #/profile, #/log журнал */
 function route(){
@@ -295,7 +313,8 @@ function readerHistory(prev){
   if(r.name !== 'read' || !r.id) return;
   if(history.state && history.state.kn) return; // вернулись на запись читалки, которая уже стоит после карточки
   const h = location.hash;
-  if(prev && prev.name === 'b' && prev.id === r.id){ history.replaceState({kn: 1}, '', h); return; }
+  // из карточки этой книги или с экрана проверки: «Назад» в читалке ведёт туда же
+  if(prev && ((prev.name === 'b' && prev.id === r.id) || (prev.name === 'review' && prev.id === r.id))){ history.replaceState({kn: 1}, '', h); return; }
   // открыли не из карточки (например, «Продолжить чтение» или ссылка из заметки): карточка встаёт перед читалкой
   // knRoot: карточку вставили первой записью приложения, её «Назад» ведёт на главную, а не за пределы приложения
   history.replaceState(prev ? null : {knRoot: 1}, '', '#/b/' + r.id);
@@ -309,8 +328,25 @@ function noteCardFrom(prev, cur){
 window.addEventListener('hashchange', () => {
   const prev = curRoute; curRoute = route();
   readerHistory(prev); noteCardFrom(prev, curRoute);
-  UI.hops++; UI.reorder = ''; closeMenu(); render(true); if(route().name !== 'read' && route().name !== 'pdf') window.scrollTo(0, 0);
+  UI.hops++; UI.reorder = ''; closeMenu(); render(true);
+  // к результатам поиска «Назад» возвращает на то же место прокрутки (оно хранится в записи истории)
+  if(route().name !== 'read' && route().name !== 'pdf') window.scrollTo(0, (route().name === 'home' && history.state && history.state.sy) || 0);
 });
+// Слово поиска хранится в адресе (#/?q=слово): «Назад» из книги возвращает к тем же результатам.
+// Пока человек печатает, адрес меняется без новой записи в истории.
+function setSearch(q){
+  const h = q ? '#/?q=' + encodeURIComponent(q) : '#/';
+  if(location.hash !== h) history.replaceState(history.state && history.state.sy ? {...history.state, sy: 0} : history.state, '', h);
+  curRoute = route();
+  schedule();
+}
+const searchQ = () => { const r = route(); return r.name === 'home' ? (r.q.get('q') || '') : ''; };
+let syT = 0;
+window.addEventListener('scroll', () => {
+  if(RD.open || !searchQ()) return;
+  clearTimeout(syT);
+  syT = setTimeout(() => { if(searchQ()) try { history.replaceState({...(history.state || {}), sy: Math.round(window.scrollY)}, '', location.hash); } catch(e){} }, 250);
+}, {passive: true});
 // «Назад» из читалки книги: в карточку этой книги (шагом назад по истории, если карточка стоит перед читалкой)
 function readerBack(){
   const r = route();
@@ -332,8 +368,10 @@ function render(force){
   if(RD.open) rdClose();
   noteFullSync(r);
   sideMe();
-  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log'].includes(r.name) ? 'profile' : 'lib';
+  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
   $$('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
+  const sm = $('#side-me'); if(sm) sm.setAttribute('aria-current', tab === 'profile' ? 'page' : 'false');
+  const rv = $('#side-rev'); if(rv) rv.textContent = reviewCount() || '';
   const m = $('#main');
   if(!S.loaded){ m.innerHTML = '<div class="loading">Загружаю…</div>'; return; }
   // экран заметки не перерисовывается от живых обновлений, пока в нём редактор: иначе сбился бы ввод
@@ -380,26 +418,32 @@ function searchHits(q){
   if(!n) return null;
   const words = n.split(' ');
   const books = S.books.filter(b => { const s = b.search || norm(b.title + ' ' + authorsText(b)); return words.every(w => s.includes(w)); }).sort(titleSort);
-  const authors = S.authors.filter(a => words.every(w => (a.search || norm(a.name)).includes(w)));
+  // только авторы, у которых есть книги в библиотеке (автор книги на проверке не показывается)
+  const withBooks = new Set(S.books.flatMap(b => b.authors || []));
+  const authors = S.authors.filter(a => withBooks.has(a.id) && words.every(w => (a.search || norm(a.name)).includes(w)));
   return {books, authors};
 }
-VIEWS.home = () => {
-  const hits = searchHits(UI.q);
-  const head = `<header class="head"><h1>Библиотека</h1><span class="row-acts">${isAdmin() ? `<button type="button" class="btn primary sm" data-act="add-books">${ICON.upload}<span>Добавить книги</span></button>` : ''}
-      <a class="me-link" href="#/profile" aria-label="Профиль">${faceHTML(me(), 'sm')}</a></span></header>
-    <label class="search"><span class="sr">Поиск по названию и автору</span>${ICON.search}<input type="search" id="q" placeholder="Название или автор" value="${esc(UI.q)}" autocomplete="off" enterkeyhint="search"></label>`;
+VIEWS.home = r => {
+  const q = r.q.get('q') || '';
+  const hits = searchHits(q);
+  const head = `<header class="head"><h1>Библиотека</h1><span class="row-acts">${isAdmin() ? `<button type="button" class="btn primary sq" data-act="add-books" title="Добавить книги" aria-label="Добавить книги">${ICON.upload}</button>` : ''}
+      ${meLink()}</span></header>
+    <div class="search"><label for="q" class="sr">Поиск по названию и автору</label>${ICON.search}<input type="search" id="q" placeholder="Название или автор" value="${esc(q)}" autocomplete="off" enterkeyhint="search">
+      ${q ? `<button type="button" class="search-x" data-act="search-clear" aria-label="Очистить поиск" title="Очистить поиск">${ICON.close}</button>` : ''}</div>`;
   if(hits){
     return head + `<section class="block">${hits.authors.length ? `<h2>Авторы</h2><div class="chips">${hits.authors.slice(0, 12).map(a => `<a class="chip" href="#/a/${a.id}">${ICON.author}${esc(a.name)}</a>`).join('')}</div>` : ''}
       <h2>Книги · ${hits.books.length}</h2>${hits.books.length ? `<div class="rows">${hits.books.slice(0, 100).map(b => bookRow(b)).join('')}</div>` : '<p class="empty">Ничего не нашлось. Проверьте написание или поищите по одному слову.</p>'}</section>`;
   }
-  const cont = [...new Set(S.reading.filter(r => byId('books', r.book)).sort((a, b) => String(b.updated).localeCompare(String(a.updated))).map(r => r.book))]
-    .slice(0, 3).map(id => readingOf(id)).filter(Boolean);
+  // «Продолжить чтение»: только книги с отметкой «Читаю», сначала последняя открытая
+  const lastAt = m => { const rd = readingOf(m.book); return String((rd && rd.updated) || m.started_at || m.updated || ''); };
+  const cont = S.marks.filter(m => m.status === 'reading' && S.books.some(b => b.id === m.book)).sort((a, b) => lastAt(b).localeCompare(lastAt(a)));
   const common = shelfKids('', true), mine = shelfKids('', false);
   const recent = [...S.books].sort((a, b) => String(b.created).localeCompare(String(a.created))).slice(0, 12);
   return head + `
-    ${cont.length ? `<section class="block"><h2>Продолжить чтение</h2><div class="cont">${cont.map(r => { const b = byId('books', r.book), multi = bookFormats(b).length > 1;
-      return `<a class="cont-item" href="${readHref(b.id, readFmt(r))}">${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small>
-        <span class="prog wide"><i style="width:${progPct(r)}%"></i></span><small>${multi ? FORMATS[readFmt(r)] + ' · ' : ''}${progText(r)}</small></span></a>`; }).join('')}</div></section>` : ''}
+    <section class="block"><h2>Продолжить чтение</h2>${cont.length ? `<div class="cont">${cont.map(m => { const b = byId('books', m.book), r = readingOf(b.id), multi = bookFormats(b).length > 1;
+      return `<a class="cont-item" href="#/b/${b.id}">${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small>
+        ${r ? `<span class="prog wide"><i style="width:${progPct(r)}%"></i></span><small>${multi ? FORMATS[readFmt(r)] + ' · ' : ''}${progText(r)}</small>` : '<small>ещё не открывали</small>'}</span></a>`; }).join('')}</div>`
+      : '<p class="empty">Отметьте книгу «Читаю» в её карточке, и она появится здесь.</p>'}</section>
     <section class="block"><div class="block-h"><h2>Полки</h2><a class="more-link" href="#/shelves">Все полки</a></div>
       ${common.length ? `<div class="shelf-cards">${common.map(shelfCard).join('')}</div>` : `<p class="empty">${isAdmin() ? 'Общих полок пока нет. Создайте первую на вкладке «Полки».' : 'Общих полок пока нет.'}</p>`}</section>
     <section class="block"><div class="block-h"><h2>Мои полки</h2>${mine.length ? '' : '<a class="more-link" href="#/shelves">Создать</a>'}</div>
@@ -425,7 +469,7 @@ function shelfTree(parent, common, level){
 VIEWS.shelves = () => {
   const common = shelfKids('', true), mine = shelfKids('', false);
   const orderBtn = (scope, list) => list.length > 1 ? `<button type="button" class="btn sm ghost" data-act="reorder" data-scope="${scope}:">${UI.reorder === scope + ':' ? 'Готово' : 'Порядок'}</button>` : '';
-  return `<header class="head"><h1>Полки</h1></header>
+  return `<header class="head"><h1>Полки</h1>${meLink()}</header>
     <nav class="links">
       <a href="#/books">${ICON.library}Все книги<span class="n">${S.books.length}</span>${ICON.chev}</a>
       <a href="#/authors">${ICON.author}Авторы<span class="n">${new Set(S.books.flatMap(b => b.authors || [])).size}</span>${ICON.chev}</a>
@@ -567,6 +611,8 @@ VIEWS.b = r => {
     : f.status === 'processing' ? '<p class="soon">Книга обрабатывается: через минуту её можно будет открыть.</p>'
     : f.status === 'error' ? '<p class="soon">Этот файл не открывается: при обработке была ошибка.</p>'
     : `<a class="btn primary big" href="${readHref(b.id, fmt)}">${ICON.book}<span>${rd && (fmt === 'epub' ? rd.pct >= 1 : rd.page > 1) ? (fmt === 'epub' ? `Продолжить, ${Math.round(rd.pct)}%` : 'Продолжить со с. ' + rd.page) : 'Читать'}</span></a>`;
+  const pend = !!b.pending;
+  const offerer = isAdmin() && b.offered_by ? (S.users.find(u => u.id === b.offered_by) || {}) : null;
   const seg = fmts.length > 1 ? `<div class="fmt-seg" role="radiogroup" aria-label="Формат">${fmts.map(x => `<button type="button" role="radio" data-act="card-fmt" data-id="${b.id}" data-f="${x}" aria-checked="${x === fmt}">${FORMATS[x]}${x === 'djvu' ? '<small>читалка позже</small>' : ''}</button>`).join('')}</div>` : '';
   const facts = [b.year ? b.year + ' г.' : '', f && f.pages ? `${f.pages} ${plural(f.pages, PAGES_W)}` : '', fmts.length > 1 ? '' : FORMATS[fmt], isAdmin() && b.file_size ? fsize(b.file_size) : '',
     fmt === 'pdf' && isScan(b) ? 'скан без текста' : ''].filter(Boolean);
@@ -577,8 +623,10 @@ VIEWS.b = r => {
     highlights: hlAll.length ? 'Под этот фильтр выделений нет.' : 'Выделений пока нет. Откройте книгу, выделите текст и выберите цвет. На телефоне нажмите «Маркер» и проведите пальцем по строкам.'}[tab];
   const from = UI.cardFrom[b.id];
   const fromText = !from ? 'Библиотека' : from.name === 'sh' ? ((byId('shelves', from.id) || {}).name || 'Полка') : from.name === 'a' ? ((byId('authors', from.id) || {}).name || 'Автор')
-    : {books: 'Все книги', notes: 'Заметки', note: 'Заметка', shelves: 'Полки', authors: 'Авторы', profile: 'Профиль', log: 'Журнал чтения'}[from.name] || 'Библиотека';
-  return `${backLink('#/', fromText)}
+    : from.name === 'home' && from.q.get('q') ? 'Поиск'
+    : {books: 'Все книги', notes: 'Заметки', note: 'Заметка', shelves: 'Полки', authors: 'Авторы', profile: 'Профиль', log: 'Журнал чтения', review: 'На проверке'}[from.name] || 'Библиотека';
+  return `${backLink(pend ? '#/review/' + b.id : '#/', pend ? 'На проверке' : fromText)}
+    ${pend ? `<p class="pend-note">Книга на проверке: её видите только вы. <a href="#/review/${b.id}">Открыть проверку</a></p>` : ''}
     <article class="book">
       <div class="book-cover">${coverHTML(b, 'lg')}</div>
       <div class="book-info">
@@ -589,8 +637,10 @@ VIEWS.b = r => {
         ${b.status === 'processing' && !(f && f.status === 'processing') ? '<p class="tag wait">Обрабатывается</p>' : ''}
         ${errors}${adminNotes}
         <div class="book-acts">${readBtn}
-          <button type="button" class="btn" data-act="to-shelf" data-id="${b.id}">${ICON.shelves}<span>На полку</span></button>
+          ${pend ? '' : `<button type="button" class="btn" data-act="to-shelf" data-id="${b.id}">${ICON.shelves}<span>На полку</span></button>`}
           ${isAdmin() ? `<button type="button" class="icon-btn" data-act="book-menu" data-id="${b.id}" aria-label="Действия с книгой" aria-haspopup="menu" title="Действия с книгой">${ICON.more}</button>` : ''}</div>
+        ${pend ? '' : markRow(b)}
+        ${offerer ? `<p class="hint offered">Предложил: ${esc(offerer.name || offerer.email || 'читатель')}</p>` : ''}
         ${shelves.length ? `<p class="on-shelves">На полках: ${shelves.map(s => `<a class="chip sm" href="#/sh/${s.id}">${esc(shelfPath(s).map(p => p.name).join(' › '))}</a>`).join(' ')}</p>` : ''}
         ${b.description ? `<details class="desc"${UI.descOpen ? ' open' : ''}><summary>Описание</summary><p>${esc(b.description).replace(/\n/g, '<br>')}</p></details>` : ''}
       </div>
@@ -615,7 +665,7 @@ VIEWS.notes = () => {
   });
   if(UI.notesQ && UI.notesHits) list = list.filter(n => UI.notesHits.has(n.id));
   list.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
-  return `<header class="head"><h1>Заметки</h1>
+  return `<header class="head head-wrap"><h1>Заметки</h1>${meLink()}
       <span class="row-acts"><a class="btn sm" href="#/note/new">${ICON.plus}<span>Заметка</span></a>${isAdmin() ? `<a class="btn sm" href="#/note/new?kind=lesson">${ICON.plus}<span>Урок</span></a>` : ''}</span></header>
     <label class="search"><span class="sr">Поиск по тексту заметок и выделений</span>${ICON.search}<input type="search" id="nq" placeholder="Поиск по тексту, цитатам и мыслям" value="${esc(UI.notesQ)}" autocomplete="off"></label>
     <div class="seg" role="radiogroup" aria-label="Что показать">${kinds.map(([k, l]) => `<button type="button" role="radio" data-act="notes-kind" data-k="${k}" aria-checked="${UI.notesKind === k}">${l}</button>`).join('')}</div>
@@ -663,8 +713,10 @@ function faceHTML(u, cls){
 // Внизу бокового меню на компьютере: фото и имя
 function sideMe(){
   const el = $('#side-me'); if(!el) return;
-  const u = me(), html = `${faceHTML(u, 'sm')}<span>${esc(u.name || u.email || 'Профиль')}</span>`;
+  const u = me(), html = `<span class="face-wrap${reviewCount() ? ' dot' : ''}">${faceHTML(u, 'sm')}</span><span>${esc(u.name || u.email || 'Профиль')}</span>`;
   if(el.innerHTML !== html) el.innerHTML = html;
+  el.setAttribute('aria-label', 'Профиль' + (reviewCount() ? ', есть книги на проверке' : ''));
+  el.title = 'Профиль';
 }
 function avatarMenu(btn){
   const items = [{label: me().avatar ? 'Выбрать другое фото' : 'Выбрать фото', run: () => pickPhoto(f => cropPhoto(f))}];
@@ -822,22 +874,241 @@ document.addEventListener('keydown', e => {
   setFull(false);
 });
 
+/* ---------- Отметки «Читаю» и «Прочитано» ---------- */
+// Отметка у каждого своя (коллекция marks). «Продолжить чтение» на главной показывает только книги с «Читаю».
+// Место, где остановился, запоминается у любой открытой книги отдельно (reading).
+const markOf = id => S.marks.find(m => m.book === id);
+const dayOf = s => String(s || '').slice(0, 10);
+const todayStr = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+const nowStr = () => new Date().toISOString().replace('T', ' ');
+function markRow(b){
+  const m = markOf(b.id);
+  if(m && m.status === 'finished') return `<div class="mark-row">
+      <button type="button" class="mark-done" data-act="mark-finish" data-id="${b.id}" title="Изменить дату">${ICON.check}<span>Прочитано ${esc(fmtDate(m.finished_at))}</span></button>
+      <button type="button" class="btn sm" data-act="mark-again" data-id="${b.id}">Читать снова</button></div>`;
+  const on = m && m.status === 'reading';
+  return `<div class="mark-row">
+      <button type="button" class="btn sm mark-btn" data-act="mark-reading" data-id="${b.id}" aria-pressed="${!!on}" title="${on ? 'Снять отметку «Читаю»' : 'Книга появится в «Продолжить чтение» на главной'}">${on ? ICON.check : ICON.book}<span>Читаю</span></button>
+      <button type="button" class="btn sm" data-act="mark-finish" data-id="${b.id}">${ICON.check}<span>Прочитано</span></button></div>
+    ${on && m.finished_at ? `<p class="hint">Уже прочитана ${esc(fmtDate(m.finished_at))}.</p>` : ''}`;
+}
+async function markSave(bookId, patch){
+  const m = markOf(bookId);
+  const rec = m && !String(m.id).startsWith('tmp')
+    ? await pb.collection('marks').update(m.id, patch)
+    : await pb.collection('marks').create({user: me().id, book: bookId, ...patch});
+  upsert('marks', rec);
+  return rec;
+}
+async function markReading(bookId){
+  const m = markOf(bookId);
+  try {
+    if(m && m.status === 'reading'){
+      // снять «Читаю»: прочитанная раньше книга снова «Прочитано», иначе отметки нет
+      if(m.finished_at){ await markSave(bookId, {status: 'finished'}); toast('Отметка «Читаю» снята'); }
+      else { await pb.collection('marks').delete(m.id); removeLocal('marks', m.id); toast('Отметка «Читаю» снята'); }
+      return;
+    }
+    await markSave(bookId, {status: 'reading', started_at: nowStr()});
+    toast('Книга в «Продолжить чтение» на главной');
+  } catch(e){ toast(errText(e)); }
+}
+function markFinish(bookId){
+  const m = markOf(bookId), done = m && m.status === 'finished';
+  openForm({title: done ? 'Прочитано' : 'Отметить «Прочитано»', text: done ? 'Можно поменять дату прочтения или снять отметку.' : 'Книга появится в профиле в разделе «Прочитанные». Отметка «Читаю» снимется.',
+    fields: [{key: 'day', label: 'Дата прочтения', type: 'date', required: true}], values: {day: done ? dayOf(m.finished_at) : todayStr()},
+    html: done ? '<button type="button" class="btn ghost danger wide" data-dlg="unmark">Снять отметку «Прочитано»</button>' : '',
+    submit: done ? 'Сохранить' : 'Отметить',
+    async onClick(el){
+      if(el.dataset.dlg !== 'unmark') return;
+      await pb.collection('marks').delete(m.id); removeLocal('marks', m.id); dlg.close(); toast('Отметка снята');
+    },
+    async onSave(v){
+      if(v.day > todayStr()) throw {message: 'Дата прочтения не может быть в будущем.'};
+      await markSave(bookId, {status: 'finished', finished_at: v.day + ' 12:00:00.000Z'});
+      toast(done ? 'Дата сохранена' : 'Отмечено: прочитано');
+    }});
+  const inp = $('#fld-day'); if(inp) inp.max = todayStr();
+}
+async function markAgain(bookId){
+  try { await markSave(bookId, {status: 'reading', started_at: nowStr()}); toast('Книга снова в «Продолжить чтение»'); } catch(e){ toast(errText(e)); }
+}
+// Плашка в читалке: человек листает книгу без отметки (дальше 3 страниц или 3%) → один раз на книгу «Читаете эту книгу?»
+const ASK = {book: '', pages: new Set(), pct0: null};
+const askedKey = () => 'markAsked_' + me().id;
+function askCheck(bookId, page, pct){
+  if(!bookId || !S.loaded || markOf(bookId) || $('#mk-ask')) return;
+  const b = byId('books', bookId); if(!b || b.pending) return;
+  const asked = loadLS(askedKey(), []);
+  if(asked.includes(bookId)) return;
+  if(ASK.book !== bookId){ ASK.book = bookId; ASK.pages = new Set(); ASK.pct0 = pct == null ? null : pct; }
+  if(page) ASK.pages.add(page);
+  if(!(ASK.pages.size > 3 || (pct != null && ASK.pct0 != null && Math.abs(pct - ASK.pct0) >= 3))) return;
+  saveLS(askedKey(), [bookId, ...asked].slice(0, 1000));
+  const el = document.createElement('div');
+  el.className = 'mk-ask'; el.id = 'mk-ask'; el.dataset.book = bookId;
+  el.innerHTML = `<span>Читаете эту книгу?</span><button type="button" class="btn sm primary" data-rd="ask-mark">Отметить «Читаю»</button>
+    <button type="button" class="icon-btn" data-rd="ask-close" aria-label="Закрыть" title="Закрыть">${ICON.close}</button>`;
+  $('#reader').appendChild(el);
+}
+function askHide(){ const el = $('#mk-ask'); if(el) el.remove(); }
+
+/* ---------- Книги от читателей ---------- */
+// Читатель предлагает книгу (до 3 на проверке), администратор проверяет: одобряет с правками и полками или отклоняет с причиной.
+const OFFER_MAX = 3;
+const OFFER_ST = {pending: 'На проверке', approved: 'Добавлена в библиотеку', rejected: 'Отклонена'};
+const myOffers = () => S.offers.filter(o => o.user === me().id).sort((a, b) => String(b.created).localeCompare(String(a.created)));
+const offerBusy = () => myOffers().filter(o => o.status === 'pending').length + UP.items.filter(u => u.kind === 'offer' && (u.state === 'wait' || u.state === 'up')).length;
+function offerForm(){
+  if(offerBusy() >= OFFER_MAX){ info('Пока нельзя', `На проверке уже ${OFFER_MAX} ваши книги. Дождитесь решения по ним, потом предложите следующую.`); return; }
+  let file = null;
+  const fileLine = () => file ? `<b>${esc(file.name)}</b><small>${fsize(file.size)}</small>` : '<small>Файл не выбран</small>';
+  openForm({title: 'Предложить книгу', text: 'Администратор посмотрит книгу и добавит её в библиотеку. Подходят PDF, EPUB и DjVu до 500 МБ.',
+    html: `<div class="offer-file"><button type="button" class="btn" data-dlg="pick">${ICON.file}<span>Выбрать файл</span></button><span class="of-name" id="of-name">${fileLine()}</span></div>`,
+    fields: [{key: 'note', label: 'Пара слов о книге (необязательно)', type: 'textarea', rows: 3, max: 1000, placeholder: 'Например: почему её стоит добавить'}],
+    submit: 'Отправить',
+    async onClick(el){
+      if(el.dataset.dlg !== 'pick') return;
+      pickFile('.pdf,.epub,.djvu,.djv,application/pdf,application/epub+zip', false, ([f]) => {
+        if(!UP_EXT.offer.test(f.name)){ formErr('Подходят только PDF, EPUB и DjVu.'); return; }
+        if(f.size > UP_MAX.offer){ formErr('Файл больше 500 МБ.'); return; }
+        formErr(''); file = f; const n = $('#of-name'); if(n) n.innerHTML = fileLine();
+      });
+    },
+    async onSave(v){
+      if(!file) throw {message: 'Выберите файл книги.'};
+      addUploads([file], 'offer', v.note);
+    }});
+}
+function offerRow(o){
+  const b = o.status === 'approved' && o.book ? byId('books', o.book) : null;
+  const t = `<b>${esc(o.title || o.file_name || 'Книга')}</b>`;
+  return `<div class="offer-row ${o.status}">${b ? `<a href="#/b/${b.id}">${t}</a>` : t}
+    <small>${esc(fmtDate(o.created))} · <span class="st">${OFFER_ST[o.status] || ''}</span></small>
+    ${o.status === 'rejected' && o.reason ? `<small class="reason">Причина: ${esc(o.reason)}</small>` : ''}</div>`;
+}
+// Список «На проверке» и экран проверки одной книги (только администратор)
+function whoHTML(id){
+  const u = S.users.find(x => x.id === id);
+  return u ? `<span class="who-chip">${faceHTML(u, 'xs')}${esc(u.name || u.email)}</span>` : '<span class="who-chip">читатель</span>';
+}
+const offerOfBook = id => S.offers.find(o => o.book === id && o.status === 'pending') || S.offers.find(o => o.book === id);
+VIEWS.review = r => {
+  if(!isAdmin()) return notFound();
+  if(r.id) return reviewOne(r.id);
+  const list = [...S.pbooks].sort((a, b) => String(b.created).localeCompare(String(a.created)));
+  const done = S.offers.filter(o => o.status !== 'pending').sort((a, b) => String(b.decided_at || b.updated).localeCompare(String(a.decided_at || a.updated))).slice(0, 10);
+  return `<header class="head"><h1>На проверке</h1>${meLink()}</header>
+    <p class="hint">Книги, которые предложили читатели. Их видите только вы, пока не одобрите.</p>
+    ${list.length ? `<div class="rows rev-list">${list.map(b => { const o = offerOfBook(b.id) || {};
+      return `<a class="brow rev-row" href="#/review/${b.id}">${coverHTML(b, 'sm')}<span class="brow-t"><b>${esc(b.title)}</b><span>${esc(authorsText(b))}</span>
+        <small>${whoHTML(o.user || b.offered_by)} · ${esc(fmtWhen(o.created || b.created))}${b.status === 'processing' ? ' · обрабатывается' : b.status === 'error' ? ' · ошибка обработки' : ''}</small>
+        ${o.note ? `<small class="rev-note">«${esc(o.note)}»</small>` : ''}</span>${ICON.chev}</a>`; }).join('')}</div>`
+      : '<p class="empty">Новых книг на проверке нет.</p>'}
+    ${done.length ? `<section class="card"><h2>Недавние решения</h2><div class="rows">${done.map(o => `<div class="offer-row ${o.status}">${o.book && byId('books', o.book) ? `<a href="#/b/${o.book}"><b>${esc(o.title)}</b></a>` : `<b>${esc(o.title)}</b>`}
+      <small>${whoHTML(o.user)} · ${esc(fmtDate(o.decided_at || o.updated))} · <span class="st">${OFFER_ST[o.status]}</span></small>${o.reason ? `<small class="reason">Причина: ${esc(o.reason)}</small>` : ''}</div>`).join('')}</div></section>` : ''}`;
+};
+function reviewOne(id){
+  const b = S.pbooks.find(x => x.id === id);
+  if(!b){
+    const o = S.offers.find(x => x.book === id);
+    return `${backLink('#/review', 'На проверке')}<div class="card"><p>${o ? `Решение по этой книге уже принято: ${OFFER_ST[o.status].toLowerCase()}.` : 'Этой книги нет среди книг на проверке.'}</p>
+      ${o && o.status === 'approved' && byId('books', o.book) ? `<a class="btn" href="#/b/${o.book}">Открыть карточку</a>` : ''}</div>`;
+  }
+  const o = offerOfBook(b.id) || {};
+  const files = filesOfBook(b.id);
+  const fmt = defaultFormat(b), f = fileOf(b.id, fmt);
+  const busy = b.status === 'processing';
+  if(!UI.revShelves[b.id]) UI.revShelves[b.id] = new Set();
+  const chosen = UI.revShelves[b.id];
+  const flat = [];
+  const walk = (parent, lvl) => shelfKids(parent, true).forEach(sh => { flat.push({sh, lvl}); if(lvl < 3) walk(sh.id, lvl + 1); });
+  walk('', 1);
+  if(S.mail == null) loadMail();
+  const readBtn = busy ? '<p class="soon">Книга обрабатывается: через минуту её можно будет открыть.</p>'
+    : canRead(f) ? `<a class="btn" href="${readHref(b.id, fmt)}">${ICON.book}<span>Открыть в читалке</span></a>`
+    : f && f.format === 'djvu' ? '<p class="soon">DjVu: читалка появится позже.</p>' : '';
+  return `${backLink('#/review', 'На проверке')}
+    <article class="book">
+      <div class="book-cover">${coverHTML(b, 'lg')}</div>
+      <div class="book-info">
+        <h1>${esc(b.title)}</h1>
+        ${(b.authors || []).length ? `<p class="book-authors">${esc(authorsText(b))}</p>` : '<p class="hint">Автор не указан</p>'}
+        <p class="facts">${[b.year ? b.year + ' г.' : '', ...files.map(x => `${FORMATS[x.format]}${x.pages ? ', ' + x.pages + ' с.' : ''}, ${fsize(x.file_size || 0)}`)].filter(Boolean).map(esc).join(' · ')}</p>
+        ${files.map(x => x.orig_name ? `<p class="hint">Файл: ${esc(x.orig_name)}</p>` : '').join('')}
+        ${files.filter(x => x.status_note).map(x => `<p class="${x.status === 'error' ? 'form-err' : 'hint'}">${esc(x.status_note)}</p>`).join('')}
+        <div class="book-acts">${readBtn}
+          <button type="button" class="btn" data-act="rev-edit" data-id="${b.id}">${ICON.pen}<span>Данные книги</span></button>
+          <button type="button" class="btn" data-act="rev-cover" data-id="${b.id}">${ICON.camera}<span>Обложка</span></button></div>
+        ${b.description ? `<details class="desc"><summary>Описание</summary><p>${esc(b.description).replace(/\n/g, '<br>')}</p></details>` : ''}
+      </div>
+    </article>
+    <section class="card"><h2>Кто предложил</h2>
+      <p>${whoHTML(o.user || b.offered_by)} <span class="muted">${esc(fmtWhen(o.created || b.created))}</span></p>
+      ${o.note ? `<p class="rev-quote">${esc(o.note)}</p>` : '<p class="hint">Без комментария.</p>'}</section>
+    <section class="card"><h2>Общие полки</h2>
+      ${flat.length ? `<div class="rev-shelves">${flat.map(x => `<label class="check-row lvl${x.lvl}"><input type="checkbox" data-shelf="${x.sh.id}" data-book="${b.id}"${chosen.has(x.sh.id) ? ' checked' : ''}><span><b>${esc(x.sh.name)}</b></span></label>`).join('')}</div>
+        <p class="hint">Книга встанет на отмеченные полки, когда вы её одобрите.</p>` : '<p class="hint">Общих полок пока нет. Книгу можно поставить на полку и потом.</p>'}</section>
+    <div class="rev-acts">
+      <button type="button" class="btn primary big" data-act="rev-ok" data-id="${b.id}"${busy ? ' disabled' : ''}>${ICON.check}<span>Одобрить</span></button>
+      <button type="button" class="btn big danger" data-act="rev-no" data-id="${b.id}"${busy ? ' disabled' : ''}>Отклонить</button></div>
+    <p class="hint">${S.mail ? 'Человеку придёт письмо с решением.' : S.mail === false ? 'Почта в приложении не настроена: человек увидит решение у себя в профиле.' : ''}</p>`;
+}
+async function loadMail(){ S.mail = 0; try { S.mail = (await pb.send('/api/knigi/admin/mail', {})).ready; } catch(e){ S.mail = false; } schedule(); }
+async function reviewApprove(id, btn){
+  const o = offerOfBook(id); if(!o){ toast('Предложение не найдено. Обновите страницу.'); return; }
+  btn.disabled = true;
+  try {
+    await pb.send(`/api/knigi/offers/${o.id}/approve`, {method: 'POST', body: {shelves: [...(UI.revShelves[id] || [])]}});
+    delete UI.revShelves[id];
+    await loadAll(['books', 'pbooks', 'bfiles', 'sbooks', 'offers']);
+    toast('Книга добавлена в библиотеку');
+    go('#/review', true);
+  } catch(e){ toast(errText(e)); btn.disabled = false; }
+}
+function reviewReject(id){
+  const o = offerOfBook(id), b = byId('books', id); if(!o || !b){ toast('Предложение не найдено. Обновите страницу.'); return; }
+  openForm({title: 'Отклонить книгу?', text: `«${b.title}»: файл, текст и обложка удалятся с сервера. Человек увидит причину у себя в профиле${S.mail ? ' и получит письмо' : ''}.`,
+    fields: [{key: 'reason', label: 'Причина', type: 'textarea', rows: 3, max: 1000, required: true, placeholder: 'Например: такая книга уже есть в другом издании'}],
+    submit: 'Отклонить', danger: true,
+    async onSave(v){
+      await pb.send(`/api/knigi/offers/${o.id}/reject`, {method: 'POST', body: {reason: v.reason}});
+      removeLocal('pbooks', id); S.bfiles = S.bfiles.filter(x => x.book !== id);
+      loadAll(['offers', 'authors']).catch(() => {});
+      toast('Книга отклонена'); go('#/review', true);
+    }});
+}
+
 /* ---------- Профиль ---------- */
 VIEWS.profile = () => {
   const u = me();
   const inv = S.invites.slice().sort((a, b) => String(b.created).localeCompare(String(a.created)));
   const myNotes = S.notes.filter(n => n.owner === u.id).length;
   const used = i => (i.used_by || []).map(id => S.users.find(x => x.id === id)).filter(Boolean);
+  const reading = S.marks.filter(m => m.status === 'reading' && byId('books', m.book)).sort((a, b) => String(b.started_at || b.updated).localeCompare(String(a.started_at || a.updated)));
+  const finished = S.marks.filter(m => m.status === 'finished' && byId('books', m.book)).sort((a, b) => String(b.finished_at).localeCompare(String(a.finished_at)) || String(b.updated).localeCompare(String(a.updated)));
+  const FIN_SHOW = 5;
+  const offers = myOffers(), waiting = offers.filter(o => o.status === 'pending').length;
   return `<header class="head"><h1>Профиль</h1></header>
+    ${!isAdmin() && waiting ? '<p class="offer-sent">Ваша книга отправлена на проверку. Обычно это занимает около суток.</p>' : ''}
     <section class="card me-card">
       <button type="button" class="face-btn" data-act="avatar" aria-label="Фото профиля" aria-haspopup="menu" title="Фото профиля">${faceHTML(u, 'lg')}<span class="face-cam" aria-hidden="true">${ICON.camera}</span></button>
       <div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span><small>${isAdmin() ? 'Администратор библиотеки' : 'Читатель'}</small></div>
       <button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя" title="Изменить имя">${ICON.pen}</button></section>
+    <section class="card"><h2>Читаю${reading.length ? ` <span class="n">${reading.length}</span>` : ''}</h2>
+      ${reading.length ? `<div class="rows">${reading.map(m => bookRow(byId('books', m.book))).join('')}</div>` : '<p class="empty">Отметьте книгу «Читаю» в её карточке.</p>'}</section>
+    <section class="card"><h2>Прочитанные${finished.length ? ` <span class="n">${finished.length}</span>` : ''}</h2>
+      ${finished.length ? `<div class="rows">${(UI.finAll ? finished : finished.slice(0, FIN_SHOW)).map(m => bookRow(byId('books', m.book), `<small class="fin-day">прочитана ${esc(fmtDate(m.finished_at))}</small>`)).join('')}</div>
+        ${finished.length > FIN_SHOW ? `<button type="button" class="btn sm ghost" data-act="fin-all">${UI.finAll ? 'Свернуть' : 'Показать все · ' + finished.length}</button>` : ''}` : '<p class="empty">Здесь появятся книги с отметкой «Прочитано».</p>'}</section>
+    ${isAdmin() ? '' : `<section class="card"><div class="block-h"><h2>Мои предложенные книги</h2></div>
+      ${offers.length ? `<div class="rows">${offers.map(offerRow).join('')}</div>` : '<p class="hint">Если в библиотеке нет нужной книги, предложите её. Администратор проверит и добавит.</p>'}
+      <button type="button" class="btn" data-act="offer-book">${ICON.upload}<span>Предложить книгу</span></button></section>`}
     <section class="card"><h2>Оформление</h2>
       <div class="seg3" role="radiogroup" aria-label="Тема">${[['light','Светлая'],['dark','Тёмная'],['auto','Как в системе']].map(([k, l]) =>
         `<input type="radio" name="p-theme" id="p-theme-${k}" value="${k}"${themePref() === k ? ' checked' : ''}><label for="p-theme-${k}">${l}</label>`).join('')}</div></section>
     <nav class="links">
       <a href="#/notes">${ICON.notes}${isAdmin() ? 'Мои заметки и уроки' : 'Мои заметки'}<span class="n">${myNotes}</span>${ICON.chev}</a>
+      ${isAdmin() ? `<a href="#/review">${ICON.inbox}На проверке<span class="n${reviewCount() ? ' hot' : ''}">${reviewCount()}</span>${ICON.chev}</a>` : ''}
       ${isAdmin() ? `<a href="#/log">${ICON.log}Журнал чтения${ICON.chev}</a>` : ''}
     </nav>
     ${isAdmin() ? `<details class="fold" id="inv-fold"${UI.invOpen ? ' open' : ''}><summary><span>Приглашения</span>${ICON.chev}</summary><div class="fold-body">
@@ -867,7 +1138,7 @@ VIEWS.profile = () => {
 async function loadInvites(){ try { S.invites = await pb.collection('invites').getFullList(); schedule(); } catch(e){} }
 async function loadUsers(){ try { S.users = await pb.send('/api/knigi/admin/users', {}); schedule(); } catch(e){} }
 async function loadOwner(){ try { S.owner = await pb.send('/api/knigi/owner', {}); schedule(); } catch(e){} }
-async function loadDisk(){ try { S.disk = await pb.send('/api/knigi/disk', {}); schedule(); } catch(e){} }
+async function loadDisk(){ if(!isAdmin()) return; try { S.disk = await pb.send('/api/knigi/disk', {}); schedule(); } catch(e){} }
 
 /* ---------- Журнал чтения (только администратор) ---------- */
 VIEWS.log = () => {
@@ -1321,8 +1592,8 @@ function openShelfBooks(s){
 function bookMenu(btn, b){
   const fmts = bookFormats(b);
   const items = [{label: 'Изменить данные', run: () => openBookForm(b)}, {label: 'Заменить обложку', run: () => pickCover(b)}];
-  if(fmts.length < 3) items.push({label: 'Добавить формат', run: () => addFormat(b)});
-  items.push({label: 'Объединить с другой книгой', run: () => mergeBook(b)});
+  if(fmts.length < 3 && !b.pending) items.push({label: 'Добавить формат', run: () => addFormat(b)});
+  if(!b.pending) items.push({label: 'Объединить с другой книгой', run: () => mergeBook(b)});
   if(fmts.length > 1) items.push({label: 'Убрать формат', run: () => removeFormat(b)});
   if(b.status !== 'processing') items.push({label: 'Обработать заново', run: async () => {
     try { await pb.send(`/api/knigi/books/${b.id}/reprocess`, {method: 'POST'}); kickProcess(); toast('Книга снова обрабатывается'); loadAll(['books', 'bfiles']).catch(() => {}); } catch(e){ toast(errText(e)); } }});
@@ -1406,7 +1677,7 @@ function openBookForm(b){
     html: dl + filesOfBook(b.id).map(f => `<p class="hint">${FORMATS[f.format]}: ${esc(f.orig_name || '')}, ${fsize(f.file_size || 0)}</p>`).join(''),
     async onSave(v){
       const ids = await authorIds(v.authors);
-      upsert('books', await pb.collection('books').update(b.id, {title: v.title, authors: ids, year: +v.year || 0, description: v.description}, {fields: BOOK_FIELDS}));
+      upsert(bookKey(b.id), await pb.collection('books').update(b.id, {title: v.title, authors: ids, year: +v.year || 0, description: v.description}, {fields: BOOK_FIELDS + ',offered_by,pending'}));
       loadAll(['authors']).catch(() => {});
       toast('Сохранено');
     }});
@@ -1426,7 +1697,7 @@ function pickCover(b){
   pickFile('image/jpeg,image/png,image/webp,image/gif', false, async ([f]) => {
     if(f.size > 10 * MB){ toast('Картинка больше 10 МБ.'); return; }
     const fd = new FormData(); fd.append('cover', f);
-    try { const r = await pb.send(`/api/knigi/books/${b.id}/cover`, {method: 'POST', body: fd}); upsert('books', {id: b.id, cover: r.cover}); toast('Обложка заменена'); }
+    try { const r = await pb.send(`/api/knigi/books/${b.id}/cover`, {method: 'POST', body: fd}); upsert(bookKey(b.id), {id: b.id, cover: r.cover}); toast('Обложка заменена'); }
     catch(e){ toast(errText(e)); }
   });
 }
@@ -1447,12 +1718,13 @@ function confirmDeleteBook(b){
 /* ---------- Загрузка книг и файлов уроков (только администратор) ---------- */
 // Файл идёт кусками по 8 МБ, по одному файлу за раз. Оборвавшийся кусок отправляется заново.
 const UP = {items: [], running: false, hidden: false};
-const UP_EXT = {book: /\.(pdf|epub|djvu|djv)$/i, file: /\.(pdf|docx?|pptx?|jpe?g|png|webp|gif|heic)$/i};
-const UP_MAX = {book: 500 * MB, file: 50 * MB};
+const UP_EXT = {book: /\.(pdf|epub|djvu|djv)$/i, offer: /\.(pdf|epub|djvu|djv)$/i, file: /\.(pdf|docx?|pptx?|jpe?g|png|webp|gif|heic)$/i};
+const UP_MAX = {book: 500 * MB, offer: 500 * MB, file: 50 * MB};
+const upShown = u => u.kind === 'book' || u.kind === 'offer'; // в панели загрузок: книги и предложенные книги
 function addUploads(files, kind, note, book){
   for(const f of files){
     const it = {id: newId(), file: f, kind, note: note || '', book: book || '', state: 'wait', pct: 0, msg: '', bookId: ''};
-    if(!UP_EXT[kind].test(f.name)){ it.state = 'err'; it.msg = kind === 'book' ? 'Подходят только PDF, EPUB и DjVu.' : 'Этот вид файла не подходит.'; }
+    if(!UP_EXT[kind].test(f.name)){ it.state = 'err'; it.msg = kind !== 'file' ? 'Подходят только PDF, EPUB и DjVu.' : 'Этот вид файла не подходит.'; }
     else if(f.size > UP_MAX[kind]){ it.state = 'err'; it.msg = `Больше ${UP_MAX[kind] / MB} МБ.`; }
     else if(kind === 'book' && S.bfiles.some(x => x.orig_name === f.name && x.file_size === f.size)){ it.state = 'skip'; it.msg = 'Такой файл уже есть в библиотеке.'; }
     UP.items.push(it);
@@ -1462,7 +1734,7 @@ function addUploads(files, kind, note, book){
   render(true);
 }
 function upText(u){
-  return {wait: 'ждёт очереди', up: `загружается, ${u.pct}%`, proc: 'обрабатывается', done: 'готово', err: 'ошибка: ' + u.msg, skip: u.msg}[u.state] || '';
+  return {wait: 'ждёт очереди', up: `загружается, ${u.pct}%`, proc: 'обрабатывается', done: u.kind === 'offer' ? 'отправлена на проверку' : 'готово', err: 'ошибка: ' + u.msg, skip: u.msg, dup: u.msg}[u.state] || '';
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function xhrChunk(url, blob, onProg){
@@ -1511,6 +1783,20 @@ async function runUploads(){
       try {
         const res = await uploadOne(it);
         it.pct = 100;
+        if(res.kind === 'offer'){
+          // книга от читателя: повтор не принимается, новая уходит на проверку и обрабатывается сразу
+          if(res.duplicate || res.pending){
+            it.state = 'dup'; it.msg = res.message; it.bookId = res.duplicate ? res.duplicate.id : '';
+            const dupId = it.bookId;
+            thenOpen(() => openForm({title: res.message, text: res.duplicate ? `«${res.duplicate.title}» уже есть в библиотеке, второй раз её добавлять не нужно.` : 'Эту книгу уже предложили, и она ждёт проверки. Второй раз отправлять её не нужно.',
+              submit: dupId ? 'Открыть книгу' : 'Понятно', noCancel: !dupId, async onSave(){ if(dupId) go('#/b/' + dupId); }}));
+          } else {
+            it.state = 'done'; kickProcess();
+            thenOpen(() => info('Книга отправлена', 'Ваша книга отправлена на проверку. Обычно это занимает около суток. Решение появится в профиле, в разделе «Мои предложенные книги».'));
+          }
+          loadAll(['offers']).catch(() => {});
+          upPaint(); continue;
+        }
         if(res.kind === 'book'){ it.state = 'proc'; it.bookId = res.id; kickProcess(); }
         else { it.state = 'done'; }
         loadAll(it.kind === 'book' ? ['books', 'bfiles', 'authors'] : ['nfiles']).catch(() => {});
@@ -1531,18 +1817,19 @@ function upPaint(){ if(upRaf) return; upRaf = requestAnimationFrame(() => { upRa
 function renderUploadsPanel(){
   upCheckProc();
   let el = $('#uploads');
-  const books = UP.items.filter(u => u.kind === 'book');
+  const books = UP.items.filter(upShown);
   if(!books.length || UP.hidden || RD.open){ if(el) el.remove(); return; }
   if(!el){ el = document.createElement('section'); el.id = 'uploads'; el.className = 'uploads'; el.setAttribute('aria-label', 'Загрузка книг'); $('#app').appendChild(el); }
   const active = books.filter(u => u.state === 'wait' || u.state === 'up' || u.state === 'proc').length;
-  el.innerHTML = `<div class="up-head"><b>Загрузка книг${active ? ` · осталось ${active}` : ''}</b>
+  const onlyOffers = books.every(u => u.kind === 'offer');
+  el.innerHTML = `<div class="up-head"><b>${onlyOffers ? 'Отправка книги' : 'Загрузка книг'}${active ? ` · осталось ${active}` : ''}</b>
       <button type="button" class="icon-btn" data-act="up-close" aria-label="${active ? 'Свернуть' : 'Закрыть'}">${active ? ICON.down : ICON.close}</button></div>
     ${active ? '<p class="hint">Не закрывайте вкладку, пока файлы загружаются.</p>' : ''}
-    <div class="up-list">${books.map(u => `<div class="up-row ${u.state}"><span class="up-t"><b>${u.state === 'done' && u.bookId ? `<a href="#/b/${u.bookId}">${esc(u.file.name)}</a>` : esc(u.file.name)}</b>
-      <small>${fsize(u.file.size)} · ${esc(upText(u))}</small><span class="prog wide"><i style="width:${u.state === 'done' || u.state === 'proc' ? 100 : u.pct}%"></i></span></span>
+    <div class="up-list">${books.map(u => `<div class="up-row ${u.state}"><span class="up-t"><b>${(u.state === 'done' || u.state === 'dup') && u.bookId ? `<a href="#/b/${u.bookId}">${esc(u.file.name)}</a>` : esc(u.file.name)}</b>
+      <small>${fsize(u.file.size)} · ${esc(upText(u))}</small><span class="prog wide"><i style="width:${u.state === 'done' || u.state === 'proc' || u.state === 'dup' ? 100 : u.pct}%"></i></span></span>
       ${u.state === 'skip' ? `<button type="button" class="btn sm ghost" data-act="up-force" data-id="${u.id}">Всё равно</button>` : ''}
       ${u.state === 'wait' || u.state === 'up' ? `<button type="button" class="icon-btn" data-act="up-cancel" data-id="${u.id}" aria-label="Отменить">${ICON.close}</button>` : ''}</div>`).join('')}</div>
-    ${S.disk ? `<p class="hint">Свободно на диске сервера: ${fsize(S.disk.free)}.</p>` : ''}`;
+    ${S.disk && isAdmin() ? `<p class="hint">Свободно на диске сервера: ${fsize(S.disk.free)}.</p>` : ''}`;
 }
 
 /* ---------- Читалка PDF ---------- */
@@ -1737,6 +2024,7 @@ function rdDispose(){
   RD.doc = null; RD.task = null; RD.transport = null; RD.cache.clear(); RD.key = ''; RD.link = null; RD.outline = null; RD.pause = 0; RD.pending = []; RD.hls = []; RD.mk = null;
 }
 function rdClose(){
+  askHide();
   if(READER.mode === 'epub') epSave(true);
   else if(RD.doc) rdSave(true);
   hpHide();
@@ -1832,6 +2120,7 @@ async function rdGo(n, force){
     if(RD.zoom === 1) $('#rd-stage').scrollTo(0, 0);
     RD.seen.add(n);
     rdSaveSoon();
+    if(RD.src.kind === 'book') askCheck(RD.src.id, n, null);
     rdFlash();
     // следующую страницу готовим заранее, чтобы листалось без ожидания
     if(n < RD.pages) setTimeout(() => { if(seq === RD.seq) rdRender(n + 1).catch(() => {}); }, 250);
@@ -2296,6 +2585,8 @@ $('#reader').addEventListener('click', e => {
   else if(a === 'menu') rdMenu(b);
   else if(a === 'marker') toggleMarker();
   else if(a === 'resume') rdResume();
+  else if(a === 'ask-close') askHide();
+  else if(a === 'ask-mark'){ const id = (b.closest('#mk-ask') || {dataset: {}}).dataset.book; askHide(); if(id) markReading(id); }
   else if(a === 'full'){ if(document.fullscreenElement) document.exitFullscreen().catch(() => {}); else $('#reader').requestFullscreen().catch(() => {}); }
 });
 $('#reader').addEventListener('change', e => {
@@ -2559,6 +2850,7 @@ function epOnRelocate(ev){
     page: d.location ? d.location.current + 1 : 0, pages: d.location ? d.location.total : 0};
   if(EP.cur.page) EP.seen.add(EP.cur.page);
   epNum();
+  askCheck(EP.bookId, EP.cur.page, EP.cur.pct);
   hpHide();
   clearTimeout(EP.saveT); EP.saveT = setTimeout(() => epSave(false), 1500);
 }
@@ -3027,6 +3319,18 @@ async function confirmVerify(expired){
 
 
 /* ---------- Нажатия ---------- */
+// «Библиотека» в меню всегда открывает обычную главную: с поиском адрес меняется сам (#/?q= → #/), без поиска наверх
+document.addEventListener('click', e => {
+  const t = e.target.closest('.tab[data-tab="lib"]');
+  if(!t || e.metaKey || e.ctrlKey) return;
+  const r = route();
+  if(r.name === 'home' && !r.q.get('q')){ e.preventDefault(); window.scrollTo({top: 0, behavior: 'smooth'}); const q = $('#q'); if(q) q.blur(); }
+});
+// Esc на главной стирает поиск
+document.addEventListener('keydown', e => {
+  if(e.key !== 'Escape' || !searchQ() || dlg.open || cropDlg.open || menu || RD.open) return;
+  e.preventDefault(); setSearch('');
+});
 document.addEventListener('click', async e => {
   if(menu && !RD.open){
     const it = e.target.closest('.menu [data-i]');
@@ -3045,8 +3349,18 @@ document.addEventListener('click', async e => {
   if(!a || !S.loaded) return;
   const d = a.dataset;
   switch(d.act){
+    case 'search-clear': setSearch(''); { const q = $('#q'); if(q && !touchUI()) q.focus(); } break;
+    case 'mark-reading': markReading(d.id); break;
+    case 'mark-finish': markFinish(d.id); break;
+    case 'mark-again': markAgain(d.id); break;
+    case 'fin-all': UI.finAll = !UI.finAll; render(true); break;
+    case 'offer-book': offerForm(); break;
+    case 'rev-edit': { const b = byId('books', d.id); if(b) openBookForm(b); break; }
+    case 'rev-cover': { const b = byId('books', d.id); if(b) pickCover(b); break; }
+    case 'rev-ok': reviewApprove(d.id, a); break;
+    case 'rev-no': reviewReject(d.id); break;
     case 'add-books': pickFile('.pdf,.epub,.djvu,.djv,application/pdf,application/epub+zip', true, files => { loadDisk(); addUploads(files, 'book'); }); break;
-    case 'up-close': UP.hidden = true; if(!UP.items.some(u => ['wait','up','proc'].includes(u.state))) UP.items = UP.items.filter(u => u.kind !== 'book'); renderUploadsPanel(); break;
+    case 'up-close': UP.hidden = true; if(!UP.items.some(u => ['wait','up','proc'].includes(u.state))) UP.items = UP.items.filter(u => !upShown(u)); renderUploadsPanel(); break;
     case 'up-cancel': { const it = UP.items.find(u => u.id === d.id); if(!it) return; if(it.state === 'wait'){ it.state = 'err'; it.msg = 'отменено'; } else it.cancel = true; renderUploadsPanel(); break; }
     case 'up-force': { const it = UP.items.find(u => u.id === d.id); if(it){ it.state = 'wait'; it.msg = ''; runUploads(); renderUploadsPanel(); } break; }
     case 'new-shelf': openShelfForm({common: !!d.common}); break;
@@ -3090,11 +3404,12 @@ document.addEventListener('change', e => {
   if(t.id === 'books-fmt'){ UI.booksFmt = t.value; render(true); return; }
   if(t.id === 'books-scan'){ UI.booksScan = t.checked; render(true); return; }
   if(t.id === 'hl-thought'){ UI.hlThought = t.checked; render(true); return; }
+  if(t.dataset && t.dataset.shelf){ const set = UI.revShelves[t.dataset.book] || (UI.revShelves[t.dataset.book] = new Set()); t.checked ? set.add(t.dataset.shelf) : set.delete(t.dataset.shelf); return; }
   if(t.id === 'log-user' || t.id === 'log-book' || t.id === 'log-days'){ UI.logQ[t.id.slice(4)] = t.value; UI.log = null; render(true); return; }
   if(t.id === 'note-files'){ const files = [...t.files]; t.value = ''; if(files.length) addUploads(files, 'file', t.dataset.note); return; }
 });
 document.addEventListener('input', e => {
-  if(e.target.id === 'q'){ UI.q = e.target.value; schedule(); }
+  if(e.target.id === 'q') setSearch(e.target.value);
   if(e.target.id === 'nq'){ UI.notesQ = e.target.value; notesSearch(); schedule(); }
 });
 document.addEventListener('toggle', e => {
