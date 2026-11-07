@@ -27,7 +27,7 @@ const BOOK_RE = /\.(pdf|epub|djvu|djv|fb2|fbz|fb2\.zip|mobi|azw3|txt)$/i;
 const BOOK_TYPES = 'PDF, EPUB, DjVu, FB2, MOBI, AZW3 и TXT';
 const BOOK_FIELDS = 'id,title,authors,year,description,formats,file_size,pages,has_text,text_file,status,status_note,cover,search,created,updated';
 const BFILE_FIELDS = 'id,book,format,file_size,orig_size,ocr,pages,has_text,status,status_note,created';
-const NOTE_FIELDS = 'id,owner,book,book_title,kind,title,page,shared,group,quote,color,format,place,created,updated,body_text:excerpt(400,true)';
+const NOTE_FIELDS = 'id,owner,book,book_title,kind,title,page,shared,group,quote,color,format,place,ai,created,updated,body_text:excerpt(400,true)';
 // Цвета выделений: в базе слово, на экране полупрозрачная заливка под текстом
 const HL = {yellow: ['Жёлтый', '#F7D53E'], green: ['Зелёный', '#7DD87A'], blue: ['Голубой', '#6DB9F2'], pink: ['Розовый', '#F38DC3']};
 const HL_KEYS = Object.keys(HL);
@@ -38,6 +38,7 @@ const ICON = {
   library: sv('<path d="M4 4h3v16H4zM9 4h3v16H9z"/><path d="M14.5 5.2l2.9-.8 4 15.2-2.9.8z"/>'),
   shelves: sv('<path d="M3 5h18M3 12h18M3 19h18"/><path d="M6 5V3M18 12v-2M10 19v-2"/>'),
   notes: sv('<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="M9 12h7M9 16h5"/>'),
+  ai: sv('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>'),
   profile: sv('<circle cx="12" cy="8" r="4"/><path d="M4 20c0-3.6 3.6-6 8-6s8 2.4 8 6"/>'),
   back: sv('<path d="M15 5l-7 7 7 7"/>'),
   more: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="fill" cx="5" cy="12" r="1.8"/><circle class="fill" cx="12" cy="12" r="1.8"/><circle class="fill" cx="19" cy="12" r="1.8"/></svg>',
@@ -410,7 +411,7 @@ function render(force){
   if(RD.open) rdClose();
   noteFullSync(r);
   sideMe();
-  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : (r.name === 'note' && r.q.get('g')) || ['groups','g','join'].includes(r.name) ? 'groups' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
+  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : (r.name === 'note' && r.q.get('g')) || ['groups','g','join'].includes(r.name) ? 'groups' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log','ai'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
   $$('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   // точка на «Группы»: новые заметки, комментарии или новая книга с прошлого захода
   const gnew = S.loaded && anyGroupNew();
@@ -608,7 +609,7 @@ function noteRow(n, opts){
   return `<a class="note-row" href="#/note/${n.id}">${n.kind === 'lesson' ? ICON.lesson : ICON.notes}
     <span class="nr-t"><b>${esc(n.title || 'Без заголовка')}</b>${n.body_text ? `<span class="nr-x">${esc(n.body_text.slice(0, 160))}</span>` : ''}
       <small>${[where, esc(placeText(n, b)), fmtWhen(n.updated)].filter(Boolean).join(' · ')}</small></span>
-    ${n.shared && n.owner === me().id ? '<span class="tag">Видна всем</span>' : ''}${n.group && n.owner === me().id ? '<span class="tag grp">Видно группе</span>' : ''}${ICON.chev}</a>`;
+    ${n.shared && n.owner === me().id ? '<span class="tag">Видна всем</span>' : ''}${n.group && n.owner === me().id ? '<span class="tag grp">Видно группе</span>' : ''}${n.ai ? `<span class="tag ai" title="Создано ${esc(n.ai)}">${esc(n.ai)}</span>` : ''}${ICON.chev}</a>`;
 }
 // Цитата в списке: цветная полоска, текст (до 3 строк, дальше «ещё»), мысль, место и дата
 function hlRow(n, opts){
@@ -706,11 +707,12 @@ VIEWS.b = r => {
 
 /* ---------- Мои заметки ---------- */
 VIEWS.notes = () => {
-  const kinds = isAdmin() ? [['', 'Все'], ['note', 'Заметки'], ['lesson', 'Уроки'], ['highlight', 'Цитаты']]
+  const kinds = isAdmin() ? [['', 'Все'], ['note', 'Заметки'], ['lesson', 'Уроки'], ['highlight', 'Цитаты'], ['ai', 'От ИИ']]
     : [['', 'Все мои'], ['note', 'Заметки'], ['highlight', 'Цитаты'], ['shared', 'От автора библиотеки']];
   let list = S.notes.filter(n => {
     if(UI.notesKind === 'shared') return n.owner !== me().id && n.shared;
     if(n.owner !== me().id) return false;
+    if(UI.notesKind === 'ai') return !!n.ai; // созданные ИИ-помощником (этап 4)
     return !UI.notesKind || n.kind === UI.notesKind;
   });
   if(UI.notesQ && UI.notesHits) list = list.filter(n => UI.notesHits.has(n.id));
@@ -720,7 +722,7 @@ VIEWS.notes = () => {
     <label class="search"><span class="sr">Поиск по тексту заметок и цитат</span>${ICON.search}<input type="search" id="nq" placeholder="Поиск по тексту, цитатам и мыслям" value="${esc(UI.notesQ)}" autocomplete="off"></label>
     <div class="seg" role="radiogroup" aria-label="Что показать">${kinds.map(([k, l]) => `<button type="button" role="radio" data-act="notes-kind" data-k="${k}" aria-checked="${UI.notesKind === k}">${l}</button>`).join('')}</div>
     ${UI.notesQ && !UI.notesHits ? '<p class="hint">Ищу…</p>' : ''}
-    <div class="rows">${list.map(n => noteRow(n)).join('') || `<p class="empty">${UI.notesQ ? 'Ничего не нашлось.' : 'Здесь появятся заметки ко всем книгам. Новую заметку можно начать в карточке книги или прямо в читалке.'}</p>`}</div>`;
+    <div class="rows">${list.map(n => noteRow(n)).join('') || `<p class="empty">${UI.notesQ ? 'Ничего не нашлось.' : UI.notesKind === 'ai' ? 'Здесь появятся заметки, которые создал ИИ-помощник (Claude, ChatGPT, Perplexity). Подключить его: Профиль → «Подключение к ИИ».' : 'Здесь появятся заметки ко всем книгам. Новую заметку можно начать в карточке книги или прямо в читалке.'}</p>`}</div>`;
 };
 let nqTimer = 0;
 function notesSearch(){
@@ -1685,6 +1687,7 @@ VIEWS.profile = () => {
       <a href="#/notes">${ICON.notes}${isAdmin() ? 'Мои заметки и уроки' : 'Мои заметки'}<span class="n">${myNotes}</span>${ICON.chev}</a>
       ${isAdmin() ? `<a href="#/review">${ICON.inbox}На проверке<span class="n${reviewCount() ? ' hot' : ''}">${reviewCount()}</span>${ICON.chev}</a>` : ''}
       ${isAdmin() ? `<a href="#/log">${ICON.log}Журнал чтения${ICON.chev}</a>` : ''}
+      ${isAdmin() ? `<a href="#/ai">${ICON.ai}Подключение к ИИ${ICON.chev}</a>` : ''}
     </nav>
     ${isAdmin() ? `<p class="hint">Групп в библиотеке: ${S.gcount == null ? '…' : S.gcount}</p>` : ''}
     ${isAdmin() ? ocrSection() : ''}
@@ -1811,6 +1814,55 @@ async function ocrCancel(id, btn){
   catch(e){ toast(errText(e)); }
 }
 
+/* ---------- Подключение к ИИ-помощникам (этап 4, только администратор) ---------- */
+// Адрес сервера MCP, как подключить Claude, ChatGPT и Perplexity, список подключений с «Отключить»
+// и журнал последних 100 обращений. Данные даёт маршрут /api/knigi/admin/mcp.
+const MCP_TOOL = {search_books: 'поиск книг', list_shelves: 'полки', get_book: 'книга', read_book: 'текст книги', search_in_books: 'поиск в тексте',
+  list_notes: 'заметки', get_note: 'заметка', list_groups: 'группы', get_group_notes: 'заметки группы', create_note: 'новая заметка', search: 'поиск', fetch: 'найденное'};
+VIEWS.ai = () => {
+  if(!isAdmin()) return notFound();
+  const M = UI.mcp;
+  const head = `${backLink('#/profile', 'Профиль')}<header class="head"><h1>Подключение к ИИ</h1></header>`;
+  if(!M){ loadMcp(); return head + '<div class="loading">Загружаю…</div>'; }
+  if(!UI.mcpBusy && Date.now() - (UI.mcpAt || 0) > 15000) setTimeout(loadMcp, 0); // при каждом заходе свежий список
+  const url = M.url;
+  const step = (name, items) => `<details class="fold ai-how"><summary><span>${name}</span>${ICON.chev}</summary><div class="fold-body"><ol class="ai-steps">${items.map(x => `<li>${x}</li>`).join('')}</ol></div></details>`;
+  const conns = M.connections || [];
+  return head + `
+    ${M.enabled ? '' : '<p class="form-err">Подключение выключено на сервере (MCP_ENABLED=0): помощники не войдут, пока вы не включите его в knigi.env.</p>'}
+    <section class="card"><h2>Адрес библиотеки для помощника</h2>
+      <p class="hint">Claude, ChatGPT или Perplexity смогут искать книги, читать их текст, ваши заметки, цитаты и заметки групп, а также сохранять новые заметки с пометкой «Создано …». Подключать можете только вы.</p>
+      <div class="ai-url"><code>${esc(url)}</code><button type="button" class="btn sm" data-act="mcp-copy">Скопировать</button></div>
+      ${step('Claude', ['claude.ai → «Настройки» → «Коннекторы» → «Добавить свой коннектор».', 'Название: Библиотека. Адрес: вставьте адрес выше. Нажмите «Добавить».', 'Нажмите «Подключить»: откроется окно «Библиотеки». Войдите и нажмите «Разрешить».', 'В новом чате откройте меню инструментов (кнопка «+» или значок с ползунками) и включите «Библиотека». На iPhone так же, коннектор уже будет в списке.'])}
+      ${step('ChatGPT', ['chatgpt.com → «Настройки» → «Приложения и коннекторы» → «Дополнительные настройки» → включите «Режим разработчика».', 'Там же «Создать»: название Библиотека, адрес выше, вход OAuth. Отметьте, что доверяете приложению, нажмите «Создать».', 'Откроется окно «Библиотеки»: войдите и нажмите «Разрешить».', 'В новом чате: «+» → «Режим разработчика» → включите «Библиотека». В приложении на iPhone коннектор появится сам после входа тем же аккаунтом.'])}
+      ${step('Perplexity', ['perplexity.ai → «Настройки» → «Коннекторы» → «+ Свой коннектор» → Remote (удалённый).', 'Название: Библиотека. Адрес выше, вход OAuth, транспорт Streamable HTTP. Сохраните.', 'Нажмите «Подключить»: войдите в окне «Библиотеки» и нажмите «Разрешить».', 'В строке запроса откройте список источников и включите «Библиотека». В приложении на iPhone так же.'])}
+    </section>
+    <section class="card"><h2>Подключения${conns.length ? ` <span class="n">${conns.length}</span>` : ''}</h2>
+      ${conns.length ? `<div class="rows">${conns.map(c => `<div class="ai-conn">${ICON.ai}<span class="ai-t"><b>${esc(c.service || c.host)}</b>
+          <small>подключено ${esc(fmtWhen(c.created))} · ${c.last_used ? 'последний раз ' + esc(fmtWhen(c.last_used)) : 'ещё не пользовались'}</small></span>
+          <button type="button" class="btn sm ghost danger" data-act="mcp-off" data-id="${esc(c.id)}">Отключить</button></div>`).join('')}</div>
+        <p class="hint">«Отключить» сразу закрывает доступ этому подключению. Чтобы помощник снова работал, подключите его заново.</p>`
+        : '<p class="empty">Подключений пока нет.</p>'}
+    </section>
+    <section class="card"><h2>Последние обращения</h2>
+      ${(M.log || []).length ? `<div class="ai-log">${(UI.mcpAll ? M.log : M.log.slice(0, 20)).map(l => `<div class="ai-row${l.error ? ' bad' : ''}"><span class="ai-when">${esc(fmtWhen(l.created))}</span>
+          <span class="ai-what"><b>${esc(l.service)}</b> · ${esc(MCP_TOOL[l.tool] || l.tool)}${l.book ? ` · ${byId('books', l.book) ? `<a href="#/b/${esc(l.book)}">${esc(l.book_title)}</a>` : esc(l.book_title)}` : ''}${l.note ? `<br><small>${esc(l.note)}</small>` : ''}</span></div>`).join('')}</div>
+        ${M.log.length > 20 ? `<button type="button" class="btn sm ghost" data-act="mcp-all">${UI.mcpAll ? 'Свернуть' : 'Показать все · ' + M.log.length}</button>` : ''}
+        <p class="hint">Здесь последние 100 обращений, журнал хранится 90 дней.</p>` : '<p class="empty">Обращений пока не было.</p>'}
+    </section>`;
+};
+async function loadMcp(){
+  if(UI.mcpBusy) return; UI.mcpBusy = true;
+  try { UI.mcp = await pb.send('/api/knigi/admin/mcp', {}); UI.mcpAt = Date.now(); }
+  catch(e){ UI.mcp = {url: location.origin + '/mcp', enabled: true, connections: [], log: []}; toast(errText(e)); }
+  finally { UI.mcpBusy = false; render(true); }
+}
+async function mcpOff(id, btn){
+  if(btn && !arm(btn, 'Точно отключить?')) return;
+  try { await pb.send('/api/knigi/admin/mcp/' + encodeURIComponent(id), {method: 'DELETE'}); toast('Помощник отключён'); UI.mcp = null; render(true); }
+  catch(e){ toast(errText(e)); }
+}
+
 /* ---------- Журнал чтения (только администратор) ---------- */
 VIEWS.log = () => {
   if(!isAdmin()) return notFound();
@@ -1913,7 +1965,7 @@ VIEWS.note = r => {
       : `${S.owner ? faceHTML(S.owner, 'xs') : ''}<p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'} автора библиотеки</p>`;
     return `${backLink(back, backText)}
       <article class="card note-view"><div class="note-top">${who}<span class="ed-state"></span>${fullBtnHTML()}</div>
-        <h1>${esc(n.title || 'Без заголовка')}</h1><p class="note-meta">${bookLine}${epubPlace ? ' · ' + (epubHref ? `<a class="page-link" href="${esc(epubHref)}">${esc(placeText(n, b))}</a>` : esc(epubPlace)) : n.page ? ' · ' + pageLink(n.page) : ''} · изменено ${esc(fmtWhen(n.updated))}</p>
+        <h1>${esc(n.title || 'Без заголовка')}</h1>${n.ai ? `<p class="note-ai">${ICON.ai}Создано ${esc(n.ai)}</p>` : ''}<p class="note-meta">${bookLine}${epubPlace ? ' · ' + (epubHref ? `<a class="page-link" href="${esc(epubHref)}">${esc(placeText(n, b))}</a>` : esc(epubPlace)) : n.page ? ' · ' + pageLink(n.page) : ''} · изменено ${esc(fmtWhen(n.updated))}</p>
         <div class="prose" id="note-body"><p class="muted">Загружаю…</p></div></article>
       ${kind === 'lesson' ? filesBlock(n, false) : ''}${commentsHTML(n)}`;
   }
@@ -1926,6 +1978,7 @@ VIEWS.note = r => {
         <span class="ed-state" id="ed-state" role="status">${esc(ED.state)}</span>
         <button type="button" class="icon-btn" data-act="note-menu" aria-label="Действия с заметкой" aria-haspopup="menu">${ICON.more}</button></div>
       <label class="sr" for="ed-title">Заголовок</label><input type="text" id="ed-title" class="ed-title" maxlength="300" placeholder="Заголовок" value="${esc(n ? n.title : '')}">
+      ${n && n.ai ? `<p class="note-ai">${ICON.ai}Создано ${esc(n.ai)}</p>` : ''}
       <div class="note-meta">${bookLine}${epubPlace || isEpView(fmt) ? `<span class="ed-place">${esc(FORMATS[fmt] || 'EPUB')}, ${esc(epubPlace || 'место не указано')}</span>${epubHref ? `<a class="btn sm ghost" href="${esc(epubHref)}">Открыть книгу</a>` : ''}`
         : `<label class="ed-page">страница <input type="number" id="ed-page" min="0" max="99999" inputmode="numeric" value="${esc(page)}"></label>${pdfOk ? `<a class="btn sm ghost" id="ed-open" data-f="${pageFmt}" href="${readHref(b.id, pageFmt, page ? '&p=' + page : '')}">Открыть книгу</a>` : ''}`}</div>
       <div id="ed-box" class="ed-box"><p class="muted">Загружаю редактор…</p></div>
@@ -4224,6 +4277,9 @@ document.addEventListener('click', async e => {
     case 'mark-finish': markFinish(d.id); break;
     case 'mark-again': markAgain(d.id); break;
     case 'fin-all': UI.finAll = !UI.finAll; render(true); break;
+    case 'mcp-copy': try { await navigator.clipboard.writeText(UI.mcp.url); toast('Адрес скопирован'); } catch(_){ window.prompt && window.prompt('Скопируйте:', UI.mcp.url); } break;
+    case 'mcp-off': mcpOff(d.id, a); break;
+    case 'mcp-all': UI.mcpAll = !UI.mcpAll; render(true); break;
     case 'ocr-book': ocrBook(d.id); break;
     case 'ocr-all': ocrAllAsk(); break;
     case 'ocr-cancel': ocrCancel(d.id, a); break;

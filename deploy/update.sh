@@ -82,6 +82,10 @@ add_setting GROUP_MAX_PER_USER 5 "Группы чтения: в скольких
 add_setting GROUP_MAX_MEMBERS 25 "Группы чтения: сколько участников может быть в одной группе."
 add_setting GROUP_PLAN 1 "Группы чтения: план чтения у создателя группы. 1 включён, 0 спрятан (этапы в базе сохраняются)."
 add_setting OCR_LANGS rus+eng "Распознавание текста в сканах: языки через +. Например rus+eng+grc (древнегреческий). Для нового языка запустите обновление: оно поставит пакет tesseract-ocr-ЯЗЫК."
+add_setting MCP_ENABLED 1 "ИИ-помощники (Claude, ChatGPT, Perplexity) через адрес /mcp: 1 включено, 0 выключено (помощники не войдут и не получат новых токенов, подключения и журнал сохраняются)."
+add_setting MCP_REDIRECT_HOSTS "claude.ai,chatgpt.com,perplexity.ai" "ИИ-помощники: сайты, на которые можно вернуться после входа (через запятую; поддомены тоже подходят, например www.perplexity.ai). Отклонённые адреса видны в journalctl -u knigi строкой «Отклонён адрес возврата»."
+add_setting MCP_IP_ALLOW "" "ИИ-помощники: с каких адресов принимать запросы к /mcp (диапазоны через запятую). Пусто = с любых, главная защита всё равно токен. Anthropic (Claude): 160.79.104.0/21. OpenAI (ChatGPT): список https://openai.com/chatgpt-connectors.json, меняется. Perplexity адреса не публикует. Если оставить только один диапазон, другие помощники перестанут работать."
+add_setting MCP_MAX_CHARS 40000 "ИИ-помощники: сколько знаков текста книги отдавать за один вызов read_book."
 
 # ---------- 5. Копия базы и новая версия кода ----------
 echo "Делаю резервную копию базы перед обновлением…"
@@ -105,6 +109,13 @@ systemctl start $NAME
 sleep 4
 if systemctl is-active --quiet $NAME; then
   echo "Готово: приложение обновлено и работает (версия $($GIT log -1 --format=%h))."
+  # этап 4: адрес для ИИ-помощников отвечает (описание ресурса MCP)
+  URL="$(grep '^APP_URL=' "$ENV" 2>/dev/null | tail -1 | cut -d= -f2-)"
+  if curl -fsS --max-time 5 http://127.0.0.1:8093/.well-known/oauth-protected-resource 2>/dev/null | grep -q '"resource"'; then
+    echo "Адрес для ИИ-помощников (Claude, ChatGPT, Perplexity): ${URL:-https://ВАШ-АДРЕС}/mcp"
+  else
+    echo "Внимание: адрес для ИИ-помощников не ответил. Покажите помощнику вывод: journalctl -u knigi -n 50"
+  fi
   djvu="$(ls "$APP/books"/*.djvu 2>/dev/null | wc -l)"
   [ "$djvu" -gt 0 ] && echo "Книги DjVu ($djvu) переводятся в PDF в фоне, по одной. Это может занять несколько минут на книгу."
   exit 0

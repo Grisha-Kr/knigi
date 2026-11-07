@@ -161,7 +161,7 @@ function cleanHtml(html) {
 // Текст без оформления: для поиска (и на этапе 3 для Claude)
 function plainText(html) {
   return String(html || "")
-    .replace(/<\/(p|h2|h3|li|blockquote)>|<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|h2|h3|li|blockquote)>|<br\s*\/?>|<(ul|ol)>/gi, "\n")
     .replace(/<[^>]+>/g, "")
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
     .replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim();
@@ -181,6 +181,8 @@ function checkNote(e) {
   }
   // выделение не превращается в заметку или урок и наоборот: для этого есть «Сделать заметкой»
   const o = r.isNew() ? null : r.original();
+  // «Создано Claude» (этап 4) ставит только сервер MCP; правка в приложении пометку не меняет
+  r.set("ai", o ? o.getString("ai") : "");
   if (o && (o.getString("kind") === "highlight") !== (kind === "highlight")) {
     throw new BadRequestError("Цитату нельзя превратить в заметку. Нажмите «Сделать заметкой»: появится новая заметка, а цитата останется.");
   }

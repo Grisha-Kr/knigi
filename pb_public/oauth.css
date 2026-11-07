@@ -1,0 +1,61 @@
+/* Страница входа и согласия для ИИ-помощников (/oauth/authorize), этап 4. Цвета как в app.css */
+@font-face{font-family:"Literata";font-style:normal;font-weight:600;font-display:swap;src:url(fonts/literata-cyrillic-600-normal.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:"Literata";font-style:normal;font-weight:600;font-display:swap;src:url(fonts/literata-latin-600-normal.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+2000-206F,U+2122,U+2212,U+FEFF,U+FFFD}
+@font-face{font-family:"Golos Text";font-style:normal;font-weight:400;font-display:swap;src:url(fonts/golos-text-cyrillic-400-normal.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:"Golos Text";font-style:normal;font-weight:400;font-display:swap;src:url(fonts/golos-text-latin-400-normal.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+2000-206F,U+2122,U+2212,U+FEFF,U+FFFD}
+@font-face{font-family:"Golos Text";font-style:normal;font-weight:600;font-display:swap;src:url(fonts/golos-text-cyrillic-600-normal.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:"Golos Text";font-style:normal;font-weight:600;font-display:swap;src:url(fonts/golos-text-latin-600-normal.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+2000-206F,U+2122,U+2212,U+FEFF,U+FFFD}
+:root{
+  --bg:#F4EFE6; --card:#FFFCF6; --ink:#26231F; --muted:#6E665A; --line:#E4DCCD; --field:#FFFFFF; --field-line:#D3C9B7;
+  --accent:#2C4A66; --on-accent:#FFFFFF; --accent-text:#2C4A66; --soft:#E3E8EC; --soft-ink:#21384E; --ochre:#A8742F;
+  --danger:#A33A2C; --shadow:0 1px 2px rgb(60 45 20 / .08), 0 2px 8px rgb(60 45 20 / .06);
+  --f-head:"Literata", Georgia, "Times New Roman", serif;
+  --f-body:"Golos Text", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#15181B; --card:#1E2226; --ink:#ECE6DA; --muted:#A39B8D; --line:#2E343A; --field:#23282D; --field-line:#3E464E;
+  --accent:#8DB3D6; --on-accent:#0F1A24; --accent-text:#9DBEDC; --soft:#23313D; --soft-ink:#C9DCEC; --ochre:#D8A660;
+  --danger:#E58A78; --shadow:none; color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#15181B; --card:#1E2226; --ink:#ECE6DA; --muted:#A39B8D; --line:#2E343A; --field:#23282D; --field-line:#3E464E;
+  --accent:#8DB3D6; --on-accent:#0F1A24; --accent-text:#9DBEDC; --soft:#23313D; --soft-ink:#C9DCEC; --ochre:#D8A660;
+  --danger:#E58A78; --shadow:none; color-scheme:dark;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.5}
+button,input{font:inherit;color:inherit}
+a{color:var(--accent-text)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.oa{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:calc(24px + env(safe-area-inset-top,0px)) 16px calc(24px + env(safe-area-inset-bottom,0px))}
+.oa-card{width:min(440px,100%);background:var(--card);border-radius:18px;padding:26px 22px 22px;display:flex;flex-direction:column;gap:18px;box-shadow:var(--shadow)}
+.oa-brand{display:flex;align-items:center;gap:10px}
+.oa-logo{width:40px;height:40px;border-radius:10px;background:#F0E6DA url(icons/logo-128.png?v=2) center/cover no-repeat;box-shadow:0 0 0 1px rgb(0 0 0 / .06);flex:none}
+.oa-name{font-family:var(--f-head);font-size:20px;font-weight:600}
+#oa-body{display:flex;flex-direction:column;gap:14px}
+.oa-title{font-family:var(--f-head);font-size:22px;font-weight:600;line-height:1.3;margin:0}
+.oa-title b{color:var(--accent-text);font-weight:600}
+.oa-muted{color:var(--muted);margin:0;font-size:14px}
+.oa-who{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--soft);color:var(--soft-ink);border-radius:12px;padding:10px 12px;font-size:14px}
+.oa-who span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.oa-link{background:none;border:0;padding:6px 0;color:var(--accent-text);text-decoration:underline;cursor:pointer;font-size:14px;flex:none}
+.oa-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.oa-list li{display:flex;gap:10px;align-items:flex-start}
+.oa-list li::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ochre);margin-top:7px;flex:none}
+.oa-note{font-size:13.5px;color:var(--muted);margin:0}
+.oa-acts{display:flex;gap:10px;flex-wrap:wrap}
+.oa-btn{flex:1 1 140px;min-height:48px;border-radius:12px;border:1px solid var(--field-line);background:var(--card);font-weight:600;cursor:pointer;padding:10px 16px}
+.oa-btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.oa-btn:disabled{opacity:.6;cursor:default}
+.oa-field{display:flex;flex-direction:column;gap:6px}
+.oa-field label{font-size:14px;font-weight:600}
+.oa-field input{min-height:48px;border-radius:12px;border:1px solid var(--field-line);background:var(--field);padding:10px 12px;font-size:16px}
+.oa-err{color:var(--danger);font-size:14px;margin:0}
+.oa-err:empty{display:none}
+.oa-warn{background:var(--soft);color:var(--soft-ink);border-radius:12px;padding:12px;margin:0}
+.oa-foot{color:var(--muted);font-size:13px;text-align:center;max-width:440px;margin:0}
+@media (min-width: 900px){ .oa-card{padding:32px 30px 28px} }
+.oa-gap{margin-top:12px}
+#oa-login .oa-err{margin-top:10px}

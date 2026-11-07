@@ -858,3 +858,26 @@ dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 32px)}
 .ocr-t small{font-size:12.5px;color:var(--muted)}
 .ocr-t small.form-err{color:var(--danger);margin:0}
 .ocr-row .btn{flex:none}
+
+/* Этап 4: подключение к ИИ-помощникам */
+.tag.ai{background:var(--soft);color:var(--soft-ink)}
+.note-ai{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);margin:-2px 0 4px}
+.note-ai svg{width:15px;height:15px;stroke:var(--ochre);flex:none}
+.note-view .note-ai{margin:4px 0 0}
+.ai-url{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--soft);border-radius:12px;padding:10px 12px;margin:10px 0 6px}
+.ai-url code{font-size:15px;color:var(--soft-ink);word-break:break-all;flex:1 1 220px}
+.ai-how{margin-top:4px}
+.ai-steps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
+.ai-conn{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
+.ai-conn:first-child{border-top:0}
+.ai-conn svg{width:22px;height:22px;stroke:var(--ochre);flex:none}
+.ai-t{display:flex;flex-direction:column;min-width:0;flex:1}
+.ai-t small{color:var(--muted)}
+.ai-log{display:flex;flex-direction:column}
+.ai-row{display:flex;gap:12px;padding:8px 0;border-top:1px solid var(--line);font-size:14px}
+.ai-row:first-child{border-top:0}
+.ai-row.bad .ai-what small{color:var(--danger)}
+.ai-when{flex:none;width:118px;color:var(--muted)}
+.ai-what{min-width:0;overflow-wrap:anywhere}
+.ai-what small{color:var(--muted)}
+@media (max-width: 420px){ .ai-row{flex-direction:column;gap:0} .ai-when{width:auto;font-size:13px} }
