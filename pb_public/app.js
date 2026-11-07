@@ -2773,7 +2773,7 @@ async function rdShow(r){
   try {
     const [lib, link] = await Promise.all([loadPdfjs(), rdGetLink(true)]);
     if(RD.key !== key) return;
-    RD.lib = lib; RD.mark = link.mark || '';
+    RD.lib = lib; RD.mark = link.mark || ''; RD.markCfg = link.mark_cfg || null;
     RD.transport = rdMakeTransport(lib, link.size);
     const task = lib.getDocument({range: RD.transport, length: link.size, rangeChunkSize: CHUNK_PDF, disableAutoFetch: true, disableStream: true,
       isEvalSupported: false, enableXfa: false, cMapUrl: '/vendor/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/vendor/pdfjs/standard_fonts/'});
@@ -2823,35 +2823,52 @@ function rdClose(){
 function rdFit(page){
   const st = $('#rd-stage');
   const vp = page.getViewport({scale: 1});
-  const W = Math.max(200, st.clientWidth - 16), H = Math.max(200, st.clientHeight - 16);
+  // снизу поверх страницы лежит ползунок: оставляем под него место, чтобы он не закрывал нижнее поле страницы
+  // (там номер страницы и строка подписи читателя)
+  const W = Math.max(200, st.clientWidth - 16), H = Math.max(200, st.clientHeight - 64);
   return Math.min(W / vp.width, H / vp.height);
 }
-// Подпись прямо на холсте: по диагонали через страницу и мелко внизу
-function rdWatermark(ctx, w, h, text){
+// Подпись читателя прямо на холсте (настройки WATERMARK_MODE и WATERMARK_OPACITY приходят со ссылкой):
+// мелкая приглушённая строка «Имя · почта · дата» на нижнем поле и одна бледная тонкая надпись по диагонали.
+// dark: рисуем светлым по тёмному фону (подпись EPUB в тёмной теме). Одинаковая прозрачность на тёмном фоне
+// заметнее, чем на светлом (глаз чувствительнее к разнице в темноте), поэтому там она умножается на DARK_K:
+// тогда разница светлоты с фоном в обеих темах примерно одна (около 2,5 единицы L* при 4%).
+const WM_DARK_K = 0.65;
+function rdWatermark(ctx, w, h, text, cfg, dark, inverted){
   text = text == null ? RD.mark : text; if(!text) return;
-  const diag = Math.hypot(w, h);
-  ctx.save();
-  ctx.translate(w / 2, h / 2); ctx.rotate(-Math.atan2(h, w));
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  let fs = h * 0.055;
-  ctx.font = `600 ${fs}px "Golos Text", Arial, sans-serif`;
-  const mw = ctx.measureText(text).width;
-  if(mw > diag * 0.78){ fs *= diag * 0.78 / mw; ctx.font = `600 ${fs}px "Golos Text", Arial, sans-serif`; }
-  ctx.fillStyle = 'rgba(40, 40, 40, 0.12)';
-  ctx.fillText(text, 0, 0);
-  ctx.restore();
-  ctx.save();
-  const small = Math.max(9, w / 64);
-  ctx.font = `500 ${small}px "Golos Text", Arial, sans-serif`;
-  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-  ctx.fillStyle = 'rgba(40, 40, 40, 0.3)';
-  const d = new Date();
-  ctx.fillText(`${text} · ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`, w / 2, h - small * 0.6);
-  ctx.restore();
+  cfg = cfg || RD.markCfg || {};
+  const mode = cfg.mode || 'both', op = Math.min(30, Math.max(1, +cfg.opacity || 4)) / 100;
+  // inverted: страница PDF в «Тёмных страницах» (холст переворачивается CSS): чернила те же, бледность как в тёмной теме
+  const k = dark || inverted ? WM_DARK_K : 1, ink = dark ? '232, 226, 214' : '40, 40, 40';
+  if(mode !== 'edge'){
+    const diag = Math.hypot(w, h);
+    ctx.save();
+    ctx.translate(w / 2, h / 2); ctx.rotate(-Math.atan2(h, w));
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    let fs = h * 0.045;
+    ctx.font = `400 ${fs}px "Golos Text", Arial, sans-serif`;
+    const mw = ctx.measureText(text).width;
+    if(mw > diag * 0.7){ fs *= diag * 0.7 / mw; ctx.font = `400 ${fs}px "Golos Text", Arial, sans-serif`; }
+    ctx.fillStyle = `rgba(${ink}, ${(op * k).toFixed(3)})`;
+    ctx.fillText(text, 0, 0);
+    ctx.restore();
+  }
+  if(mode !== 'center'){
+    ctx.save();
+    const small = Math.max(8, Math.min(w / 95, h / 70));
+    ctx.font = `400 ${small}px "Golos Text", Arial, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillStyle = `rgba(${ink}, ${(0.2 * k).toFixed(3)})`;
+    const d = new Date();
+    // у самого нижнего края: на поле страницы, ниже текста
+    ctx.fillText(`${text} · ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`, w / 2, cfg.bottom || h - Math.max(2, small * 0.35));
+    ctx.restore();
+  }
 }
 // Нарисовать страницу n в новый элемент (холст, слой выделений и, если можно, текстовый слой)
 async function rdRender(n){
-  const key = n + '@' + RD.zoom + '@' + window.innerWidth + 'x' + window.innerHeight;
+  const inv = !!loadLS('darkPages', false);
+  const key = n + '@' + RD.zoom + '@' + window.innerWidth + 'x' + window.innerHeight + (inv ? '@d' : '');
   const hit = RD.cache.get(n);
   if(hit && hit.key === key) return hit.el;
   const page = await RD.doc.getPage(n);
@@ -2871,7 +2888,7 @@ async function rdRender(n){
   const ctx = canvas.getContext('2d', {alpha: false});
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
   await page.render({canvasContext: ctx, viewport: vp, transform: out !== 1 ? [out, 0, 0, out, 0, 0] : null}).promise;
-  rdWatermark(ctx, canvas.width, canvas.height);
+  rdWatermark(ctx, canvas.width, canvas.height, null, null, false, inv);
   const hl = document.createElement('div'); hl.className = 'hl-layer'; el.appendChild(hl);
   const tmp = document.createElement('div'); tmp.className = 'hl-layer hl-tmp'; el.appendChild(tmp);
   if(rdText()){
@@ -2997,7 +3014,7 @@ function rdMenu(btn){
     return;
   }
   openMenu(btn, [
-    {label: dark ? 'Обычные страницы' : 'Тёмные страницы', run: () => { saveLS('darkPages', !dark); $('#reader').classList.toggle('dark-pages', !dark); }},
+    {label: dark ? 'Обычные страницы' : 'Тёмные страницы', run: () => { saveLS('darkPages', !dark); $('#reader').classList.toggle('dark-pages', !dark); if(RD.mark && RD.doc){ RD.cache.clear(); rdGo(RD.page, true); } }},
     {label: 'Перейти к странице', run: rdGoto},
     ...grpItems,
   ]);
@@ -3622,7 +3639,7 @@ async function epShow(r, b, again){
   try {
     const [lib, link] = await Promise.all([loadFoliate(), pb.send(`/api/knigi/books/${b.id}/link?f=${fmt}`, {})]);
     if(EP.key !== key) return;
-    EP.lib = lib; EP.mark = link.mark || '';
+    EP.lib = lib; EP.mark = link.mark || ''; EP.markCfg = link.mark_cfg || null;
     let blob;
     try { blob = await epFetch(link); }
     catch(err){
@@ -3817,6 +3834,7 @@ function epHoldPage(at){
 function toggleBars(){
   RD.bars = !RD.bars;
   $('#reader').classList.toggle('bars-off', !RD.bars);
+  if(READER.mode === 'epub') setTimeout(epMarkDraw, 260); // строка подписи над ползунком или у края
   if(!RD.bars){
     const n = loadLS('barsHint', 0);
     if(n < 3){ saveLS('barsHint', n + 1); toast('Панели спрятаны. Нажмите в середину страницы, чтобы вернуть их.'); }
@@ -4026,8 +4044,10 @@ function epMarkDraw(){
   const ctx = c.getContext('2d');
   ctx.clearRect(0, 0, c.width, c.height);
   if(!EP.mark) return;
-  rdWatermark(ctx, c.width, c.height, EP.mark);
-  if(isDark()){ ctx.globalCompositeOperation = 'source-in'; ctx.fillStyle = 'rgba(230, 224, 212, 0.16)'; ctx.fillRect(0, 0, c.width, c.height); ctx.globalCompositeOperation = 'source-over'; }
+  // строка внизу: над ползунком (он лежит поверх нижнего края страницы), без панелей у самого края
+  const sl = $('#reader .rd-slider'), sr = st.getBoundingClientRect(), r = sl && sl.offsetParent ? sl.getBoundingClientRect() : null;
+  const bottom = r && r.top < sr.bottom && r.top > sr.top + sr.height / 2 ? (r.top - sr.top - 4) * k : 0;
+  rdWatermark(ctx, c.width, c.height, EP.mark, Object.assign({}, EP.markCfg, {bottom}), isDark());
 }
 darkMQ.addEventListener && darkMQ.addEventListener('change', () => { if(READER.mode === 'epub' && EP.view){ epStyle(); epMarkDraw(); } });
 

@@ -20,6 +20,10 @@ function envFlag(name, def) {
 }
 const S = {
   watermark: () => envFlag("WATERMARK", true),
+  // подпись читателя: both (поле внизу и центр), edge (только поле), center (только центр)
+  watermarkMode: () => { const v = String($os.getenv("WATERMARK_MODE") || "").trim().toLowerCase(); return v === "edge" || v === "center" ? v : "both"; },
+  // бледность надписи по центру в процентах (1–30), по умолчанию 4
+  watermarkOpacity: () => Math.min(30, Math.max(1, envNum("WATERMARK_OPACITY", 4))),
   readLog: () => envFlag("READ_LOG", true),
   logDays: () => Math.max(1, envNum("READ_LOG_DAYS", 180)),
   maxBytesHour: () => Math.max(0, envNum("MAX_MB_PER_HOUR", 200)) * MB, // 0 = без ограничения
@@ -135,6 +139,8 @@ function linkUser(e, kind, id) {
   return u;
 }
 // Подпись на страницах: имя и почта читателя. Администратору не ставится.
+// Как рисовать подпись (приложение получает вместе со ссылкой на файл)
+function watermarkCfg() { return { mode: S.watermarkMode(), opacity: S.watermarkOpacity() }; }
 function watermarkFor(user) {
   if (!S.watermark() || user.getString("role") === "admin") return "";
   const name = user.getString("name").trim();
@@ -1166,7 +1172,7 @@ function mergeBooks(book, other) {
 
 module.exports = {
   MB, S, booksDir, filesDir, coversDir, textDir, ensureDirs, rmFile, exists, freeBytes, checkFree,
-  fileKey, LINK_TTL, setCookie, clearCookie, cookieUser, makeLink, linkUser, watermarkFor,
+  fileKey, LINK_TTL, setCookie, clearCookie, cookieUser, makeLink, linkUser, watermarkFor, watermarkCfg,
   MAX_SPAN, EPUB_MAX, parseRange, noStore, takeBytes, logBytes, logPages, cleanLog,
   CHUNK, KINDS, startUpload, saveChunk, finishUpload, dropUpload, uploadDir, uploadKind, cleanUploads, fromFileName,
   OFFER_MAX, approveOffer, rejectOffer,

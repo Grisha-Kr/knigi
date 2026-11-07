@@ -233,7 +233,7 @@ routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
   const size = F.exists($filepath.join(F.booksDir(), f.getString("file"))) ? f.getInt("file_size") : 0;
   if (!size) throw new NotFoundError("Файл книги не найден на сервере.");
   if (view === "epub" && size > F.EPUB_MAX) throw new BadRequestError("Эта книга слишком большая для читалки.");
-  return e.json(200, { url: F.makeLink(e, "book", f.id, e.auth.id), size, ttl: F.LINK_TTL, mark: F.watermarkFor(e.auth), chunk: 512 * 1024,
+  return e.json(200, { url: F.makeLink(e, "book", f.id, e.auth.id), size, ttl: F.LINK_TTL, mark: F.watermarkFor(e.auth), mark_cfg: F.watermarkCfg(), chunk: 512 * 1024,
     file: f.id, format: fmt, view, whole: view === "epub" });
 }, $apis.requireAuth("users"));
 
@@ -285,7 +285,7 @@ routerAdd("GET", "/api/knigi/files/{id}/link", (e) => {
     if (!n || !n.getBool("shared") || f.getString("ext") !== "pdf") throw new NotFoundError("Файл не найден.");
   }
   return e.json(200, { url: F.makeLink(e, "file", f.id, e.auth.id), size: f.getInt("size"), name: f.getString("name"), ext: f.getString("ext"),
-    ttl: F.LINK_TTL, mark: own ? "" : F.watermarkFor(e.auth), chunk: 512 * 1024 });
+    ttl: F.LINK_TTL, mark: own ? "" : F.watermarkFor(e.auth), mark_cfg: F.watermarkCfg(), chunk: 512 * 1024 });
 }, $apis.requireAuth("users"));
 routerAdd("GET", "/api/knigi/f/file/{id}", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
