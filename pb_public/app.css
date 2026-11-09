@@ -921,3 +921,5 @@ dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 32px)}
 .usr-row{display:flex;flex-direction:column;gap:8px}
 .usr-log{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;font-size:13px;line-height:1.45;overflow-wrap:anywhere}
 .usr-log .d{font-weight:700}
+.usr-mark{align-self:flex-start}
+.tag.nomark{background:var(--chip);color:var(--muted)}

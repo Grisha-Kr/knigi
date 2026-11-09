@@ -25,9 +25,11 @@ onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).checkInvite(e
 onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).checkInvite(e); e.next(); }, "invites");
 
 // Срок и пауза другого человека не видны никому, кроме него самого (участники групп видят только имя и фото).
+// «Без подписи на страницах» (no_mark, правки 4.2) не видит и сам читатель: это решение администратора.
 onRecordEnrich((e) => {
   const auth = e.requestInfo.auth;
   if (!(auth && (auth.isSuperuser() || auth.id === e.record.id))) e.record.hide("access_until", "suspended");
+  if (!(auth && (auth.isSuperuser() || auth.getString("role") === "admin"))) e.record.hide("no_mark");
   e.next();
 }, "users");
 

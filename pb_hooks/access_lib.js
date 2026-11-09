@@ -108,7 +108,7 @@ function adminUsers(e) {
     return {
       id: u.id, name: u.getString("name"), email: u.getString("email"), role: u.getString("role") || "user",
       avatar: u.getString("avatar"), created: u.getString("created"),
-      access_until: st.until, suspended: st.suspended, active: st.active, reason: st.reason,
+      access_until: st.until, suspended: st.suspended, active: st.active, reason: st.reason, no_mark: u.getBool("no_mark"),
       log: (logs[u.id] || []).slice(0, 20),
     };
   });
@@ -146,6 +146,9 @@ function adminAccess(e) {
     case "suspend": u.set("suspended", true); break;
     case "resume": u.set("suspended", false); break;
     case "note": if (!note) throw new BadRequestError("Заметка пустая."); break;
+    // подпись на страницах только у этого читателя (правки 4.2); журнал и ограничение скорости не меняются
+    case "mark_off": u.set("no_mark", true); break;
+    case "mark_on": u.set("no_mark", false); break;
     default: throw new BadRequestError("Неизвестное действие.");
   }
   $app.runInTransaction((tx) => {

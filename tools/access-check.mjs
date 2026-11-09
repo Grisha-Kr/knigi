@@ -457,6 +457,32 @@ async function partB(T) {
   ok(list.data.every((x) => x.role !== "admin" || x.access_until === ""), "администратор в списке бессрочный");
   const ai = (await req("GET", "/api/knigi/admin/users", { token: admin })).data;
   ok(ai.filter((x) => x.role !== "admin" && x.id !== veraId).every((x) => x.access_until === "" && !x.suspended && x.active), "остальные читатели бессрочные");
+
+  section("Б6. «Без подписи на страницах» у отдельного читателя (правки 4.2)");
+  const markOf = async (t) => (await req("GET", `/api/knigi/books/${pdfBook.id}/link?f=pdf`, { token: t })).data;
+  let m = await markOf(vera);
+  ok(m && m.mark === "Вера · " + VERA.email, "по умолчанию у Веры подпись есть", m);
+  ok(vr.no_mark === false, "в списке «Пользователи» no_mark = false");
+  r = await act(admin, veraId, "mark_off");
+  ok(r.status === 200, "администратор выключил подпись у Веры", r.text);
+  m = await markOf(vera);
+  ok(m && m.mark === "", "у Веры подпись пустая (ни строки внизу, ни надписи по центру)", m);
+  const bm = await markOf(boris);
+  ok(bm && bm.mark.indexOf("Борис") === 0, "у Бориса подпись осталась", bm);
+  const self3 = await req("PATCH", `/api/collections/users/records/${veraId}`, { token: vera, json: { no_mark: false } });
+  ok(self3.status >= 400, "сама Вера поле поменять не может", self3.text);
+  const me3 = await req("GET", `/api/collections/users/records/${veraId}`, { token: vera });
+  ok(me3.status === 200 && me3.data.no_mark === undefined, "и не видит его в своей записи", me3.data);
+  ok((await req("GET", `/api/collections/users/records?${flt("no_mark = true")}`, { token: vera })).status === 400, "фильтр по полю не принимается");
+  ok((await act(vera, veraId, "mark_on")).status === 403, "включить подпись себе обратно через маршрут администратора нельзя");
+  ok((await act(admin, uid(admin), "mark_off")).status === 400, "у администратора переключателя нет");
+  let ul = (await req("GET", "/api/knigi/admin/users", { token: admin })).data.find((x) => x.id === veraId);
+  ok(ul.no_mark === true && ul.log[0].action === "mark_off" && ul.log[0].by === "Григорий", "в «Пользователях» пометка и запись в истории «Подпись выключена» с автором", ul.log[0]);
+  r = await act(admin, veraId, "mark_on");
+  m = await markOf(vera);
+  ok(m && m.mark === "Вера · " + VERA.email, "администратор включил подпись: она снова есть", m);
+  ul = (await req("GET", "/api/knigi/admin/users", { token: admin })).data.find((x) => x.id === veraId);
+  ok(ul.no_mark === false && ul.log[0].action === "mark_on", "в истории «Подпись включена»");
 }
 
 /* ---------- Запуск ---------- */

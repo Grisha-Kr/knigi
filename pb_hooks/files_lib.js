@@ -142,7 +142,8 @@ function linkUser(e, kind, id) {
 // Как рисовать подпись (приложение получает вместе со ссылкой на файл)
 function watermarkCfg() { return { mode: S.watermarkMode(), opacity: S.watermarkOpacity() }; }
 function watermarkFor(user) {
-  if (!S.watermark() || user.getString("role") === "admin") return "";
+  // общая настройка WATERMARK=0, администратор и читатель с «Без подписи на страницах» (правки 4.2, users.no_mark)
+  if (!S.watermark() || user.getString("role") === "admin" || user.getBool("no_mark")) return "";
   const name = user.getString("name").trim();
   return [name, user.getString("email")].filter(Boolean).join(" · ");
 }

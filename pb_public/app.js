@@ -435,14 +435,30 @@ function readerHistory(prev){
   history.replaceState(prev ? null : {knRoot: 1}, '', '#/b/' + r.id);
   history.pushState({kn: 1}, '', h);
 }
-// Откуда пришли в карточку книги: подпись и адрес её кнопки «Назад»
-function noteCardFrom(prev, cur){
-  if(cur.name !== 'b' || !prev || prev.name === 'read' || (prev.name === 'b' && prev.id === cur.id)) return;
+// Откуда пришли в карточку книги: подпись её кнопки «Назад» (правки 4.2).
+// Запоминается только при переходе на новую запись истории. Возврат в карточку из заметки, цитаты, урока,
+// файла урока или читалки идёт шагом назад по истории (запись уже помечена kix), и место, откуда книгу открыли,
+// не меняется: стрелка в карточке с одного нажатия ведёт в библиотеку, на полку, к автору, в поиск, «Заметки» или группу.
+// Адрес источника хранится и в самой записи истории (state.from), поэтому подпись верна и после перезагрузки.
+let curHash = location.hash;
+function noteCardFrom(prev, cur, prevHash){
+  if(cur.name !== 'b' || !prev || prev.name === 'read' || prev.name === 'pdf' || (prev.name === 'b' && prev.id === cur.id)) return;
   UI.cardFrom[cur.id] = prev;
+  try { history.replaceState({...(history.state || {}), from: prevHash}, '', location.hash); } catch(e){}
 }
+function cardFromRoute(bookId){
+  const st = history.state;
+  if(st && st.from && route().name === 'b' && route().id === bookId){ const h = String(st.from).replace(/^#\/?/, '').split('?'); const p = h[0].split('/').filter(Boolean); return {name: p[0] || 'home', id: p[1] || '', q: new URLSearchParams(h[1] || '')}; }
+  return UI.cardFrom[bookId];
+}
+// Вкладки карточки («Заметки», «Уроки», «Цитаты») меняют адрес без новой записи в истории
+function swapHash(h){ history.replaceState(history.state, '', h); curRoute = route(); curHash = location.hash; render(true); }
 window.addEventListener('hashchange', () => {
-  const prev = curRoute; curRoute = route();
-  readerHistory(prev); noteCardFrom(prev, curRoute);
+  const prev = curRoute, prevHash = curHash; curRoute = route(); curHash = location.hash;
+  readerHistory(prev);
+  // новая запись истории получает метку kix; у записи, на которую вернулись «Назад», метка уже есть
+  const fresh = !(history.state && history.state.kix);
+  if(fresh){ try { history.replaceState({...(history.state || {}), kix: Date.now()}, '', location.hash); } catch(e){} noteCardFrom(prev, curRoute, prevHash); }
   UI.hops++; UI.reorder = ''; UI.cmEdit = ''; closeMenu(); render(true);
   if(S.loaded && curRoute.name === 'g' && !curRoute.q.get('gb') && !(prev && prev.name === 'g' && prev.id === curRoute.id)) gVisit(curRoute.id);
   // к результатам поиска «Назад» возвращает на то же место прокрутки (оно хранится в записи истории)
@@ -453,7 +469,7 @@ window.addEventListener('hashchange', () => {
 function setSearch(q){
   const h = q ? '#/?q=' + encodeURIComponent(q) : '#/';
   if(location.hash !== h) history.replaceState(history.state && history.state.sy ? {...history.state, sy: 0} : history.state, '', h);
-  curRoute = route();
+  curRoute = route(); curHash = location.hash;
   schedule();
 }
 const searchQ = () => { const r = route(); return r.name === 'home' ? (r.q.get('q') || '') : ''; };
@@ -748,13 +764,17 @@ VIEWS.b = r => {
   const adminNotes = isAdmin() ? files.filter(x => x.status !== 'error' && x.status_note).map(x => `<p class="hint">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note)}</p>`).join('') : '';
   const errors = files.filter(x => x.status === 'error').map(x => `<p class="form-err">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note || 'Файл не удалось обработать.')}</p>`).join('');
   const tabs = [['notes', 'Заметки'], ...(isAdmin() ? [['lessons', 'Уроки']] : []), ['highlights', 'Цитаты']];
+  // число у вкладки: сколько моих заметок, уроков и цитат к этой книге (ноль не пишем)
+  const mineOf = k => notesOfBook(b.id).filter(n => n.owner === me().id && n.kind === k).length;
+  const tabN = {notes: mineOf('note'), lessons: isAdmin() ? mineOf('lesson') : 0, highlights: mineOf('highlight')};
   const emptyText = {notes: 'Заметок к этой книге пока нет.', lessons: 'Уроков к этой книге пока нет.',
     highlights: hlAll.length ? 'Под этот фильтр цитат нет.' : 'Цитат пока нет. Откройте книгу, выделите текст и выберите цвет: так сохраняется цитата. На телефоне нажмите «Маркер» и проведите пальцем по строкам.'}[tab];
   const inGroups = groupsOfBook(b.id);
-  const from = UI.cardFrom[b.id];
+  const from = cardFromRoute(b.id);
   const fromText = !from ? 'Библиотека' : from.name === 'sh' ? ((byId('shelves', from.id) || {}).name || 'Полка') : from.name === 'a' ? ((byId('authors', from.id) || {}).name || 'Автор')
+    : from.name === 'g' ? ((byId('groups', from.id) || {}).name || 'Группа')
     : from.name === 'home' && from.q.get('q') ? 'Поиск'
-    : {books: 'Все книги', notes: 'Заметки', note: 'Заметка', shelves: 'Полки', authors: 'Авторы', profile: 'Профиль', log: 'Журнал чтения', review: 'На проверке'}[from.name] || 'Библиотека';
+    : {books: 'Все книги', notes: 'Заметки', note: 'Заметка', shelves: 'Полки', authors: 'Авторы', profile: 'Профиль', log: 'Журнал чтения', review: 'На проверке', groups: 'Группы', ai: 'Подключение к ИИ'}[from.name] || 'Библиотека';
   return `${backLink(pend ? '#/review/' + b.id : '#/', pend ? 'На проверке' : fromText)}
     ${pend ? `<p class="pend-note">Книга на проверке: её видите только вы. <a href="#/review/${b.id}">Открыть проверку</a></p>` : ''}
     ${b.hidden && isAdmin() && !pend ? `<p class="pend-note hid-bar">${ICON.lock}<span>Видна только вам. Открыть всем: «⋯» → «Настройки» → «Видна всем читателям».</span></p>` : ''}
@@ -779,7 +799,7 @@ VIEWS.b = r => {
       </div>
     </article>
     <section class="card notes-card">
-      <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<a role="tab" href="#/b/${b.id}${k === 'notes' ? '' : '?tab=' + k}" aria-selected="${tab === k}">${l}${k === 'highlights' && hlAll.length && tab !== k ? ` <span class="n">${hlAll.length}</span>` : ''}</a>`).join('')}</div>
+      <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<a role="tab" data-swap="1" href="#/b/${b.id}${k === 'notes' ? '' : '?tab=' + k}" aria-selected="${tab === k}">${l}${tabN[k] ? ` <span class="n">${tabN[k]}</span>` : ''}</a>`).join('')}</div>
       ${kind === 'highlight' ? hlFilters(hlAll) : ''}
       <div class="rows">${mine.map(n => noteRow(n, {noBook: true})).join('') || `<p class="empty">${emptyText}</p>`}</div>
       ${kind !== 'highlight' && !ro ? `<a class="btn" href="#/note/new?book=${b.id}${tab === 'lessons' ? '&kind=lesson' : ''}">${ICON.plus}<span>${tab === 'lessons' ? 'Урок' : 'Заметка'}</span></a>` : ''}
@@ -1807,8 +1827,9 @@ VIEWS.profile = () => {
 };
 /* ---------- Раздел «Пользователи»: срок доступа (правки 4.1, только администратору) ---------- */
 const ACC_PERIODS = {'': 'бессрочно', '1m': '1 месяц', '3m': '3 месяца', '6m': '6 месяцев'};
-const ACC_DONE = {extend: 'Доступ продлён', set: 'Дата доступа изменена', unlimited: 'Доступ бессрочный', suspend: 'Доступ приостановлен', resume: 'Доступ возобновлён', note: 'Заметка сохранена'};
-const ACC_LOG = {set: 'новая дата', unlimited: 'бессрочно', suspend: 'приостановлен', resume: 'возобновлён', note: 'заметка'};
+const ACC_DONE = {extend: 'Доступ продлён', set: 'Дата доступа изменена', unlimited: 'Доступ бессрочный', suspend: 'Доступ приостановлен', resume: 'Доступ возобновлён', note: 'Заметка сохранена',
+  mark_off: 'Подпись на страницах выключена', mark_on: 'Подпись на страницах включена'};
+const ACC_LOG = {set: 'новая дата', unlimited: 'бессрочно', suspend: 'приостановлен', resume: 'возобновлён', note: 'заметка', mark_off: 'Подпись выключена', mark_on: 'Подпись включена'};
 function accLogText(a){
   const m = /^extend:(\d+)$/.exec(a || '');
   return m ? `продлён на ${m[1]} ${plural(+m[1], MONTHS_W)}` : ACC_LOG[a] || a;
@@ -1834,8 +1855,9 @@ function usersSection(){
       const log = (x.log || []).map(l => `<li><span class="d">${fmtDate(l.created)}</span> ${esc(accLogText(l.action))}${l.until_before !== l.until_after ? `: ${untilText(l.until_before)} → ${untilText(l.until_after)}` : ''}${l.note ? ` · ${esc(l.note)}` : ''}${l.by ? ` <span class="muted">(${esc(l.by)})</span>` : ''}</li>`).join('');
       return `<div class="usr">
         <div class="usr-head">${faceHTML(x, 'md')}
-          <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}${adm ? 'администратор' : 'читатель'} · с ${esc(fmtDate(x.created))}</span><span>${userState(x, t)}</span></div></div>
-        ${adm ? '' : `<div class="usr-acts">${[1, 3, 6].map(m => `<button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="${m}" data-id="${id}">+${m} ${plural(m, MONTHS_W)}</button>`).join('')}${x.suspended ? `<button type="button" class="btn sm" data-act="acc" data-action="resume" data-id="${id}">Возобновить</button>` : `<button type="button" class="btn sm ghost danger" data-act="acc" data-action="suspend" data-id="${id}">Приостановить</button>`}</div>`}
+          <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}${adm ? 'администратор' : 'читатель'} · с ${esc(fmtDate(x.created))}</span><span>${userState(x, t)}${x.no_mark ? ' <span class="tag nomark">без подписи</span>' : ''}</span></div></div>
+        ${adm ? '' : `<div class="usr-acts">${[1, 3, 6].map(m => `<button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="${m}" data-id="${id}">+${m} ${plural(m, MONTHS_W)}</button>`).join('')}${x.suspended ? `<button type="button" class="btn sm" data-act="acc" data-action="resume" data-id="${id}">Возобновить</button>` : `<button type="button" class="btn sm ghost danger" data-act="acc" data-action="suspend" data-id="${id}">Приостановить</button>`}</div>
+          <label class="check-chip sm usr-mark"><input type="checkbox" data-nomark="${id}"${x.no_mark ? ' checked' : ''}><span>Без подписи на страницах</span></label>`}
         <details class="usr-more"${UI.openUser === x.id ? ' open' : ''} data-user="${id}"><summary>${adm ? 'Заметки' : 'Дата, заметка и история'}</summary>
           ${adm ? '' : `<div class="usr-row"><div class="field"><label for="ud-${id}">Доступ до (своя дата)</label><input type="date" id="ud-${id}" value="${esc(x.access_until || '')}"></div><div class="usr-btns"><button type="button" class="btn sm" data-act="acc" data-action="set" data-id="${id}">Поставить дату</button><button type="button" class="btn sm ghost" data-act="acc" data-action="unlimited" data-id="${id}">Бессрочно</button></div></div>`}
           <div class="usr-row"><div class="field"><label for="un-${id}">Заметка (видите только вы; добавится и к продлению)</label><input type="text" id="un-${id}" maxlength="1000" placeholder="Например: оплатил 500 ₽ 1 ноября"></div><div class="usr-btns"><button type="button" class="btn sm ghost" data-act="acc" data-action="note" data-id="${id}">Сохранить заметку</button></div></div>
@@ -2238,7 +2260,7 @@ async function edSave(){
       rec = await pb.collection('notes').create({id, owner: me().id, kind, book, ...extra, ...d, ...(group ? {group} : {})});
       UI.noteCtx = null;
       ED.isNew = false;
-      if(route().name === 'note' && route().id === 'new'){ history.replaceState(null, '', '#/note/' + id + (r.q.get('g') ? '?g=' + r.q.get('g') : '')); UI.fullFor = id; }
+      if(route().name === 'note' && route().id === 'new'){ history.replaceState(history.state, '', '#/note/' + id + (r.q.get('g') ? '?g=' + r.q.get('g') : '')); UI.fullFor = id; curRoute = route(); curHash = location.hash; }
     } else {
       rec = await pb.collection('notes').update(id, d);
     }
@@ -4435,9 +4457,13 @@ document.addEventListener('click', async e => {
     if(it){ m.items[+it.dataset.i].run(); return; }
     if(e.target.closest('[data-act$="-menu"]') === m.btn) return;
   }
-  // «Назад»: по истории, если пришли изнутри приложения
+  // вкладки карточки: без новой записи в истории
+  const sw = e.target.closest('#main a[data-swap]');
+  if(sw && !e.metaKey && !e.ctrlKey){ e.preventDefault(); swapHash(sw.getAttribute('href')); return; }
+  // «Назад»: по истории, если пришли изнутри приложения (у карточки книги источник записан в state.from)
   const bk = e.target.closest('#main a[data-back]');
   if(bk && !e.metaKey && !e.ctrlKey){
+    if(history.state && history.state.from){ e.preventDefault(); history.back(); return; }
     if(history.state && history.state.knRoot){ e.preventDefault(); go(bk.dataset.back, true); return; }
     if(UI.hops > 0){ e.preventDefault(); history.back(); return; }
   }
@@ -4546,6 +4572,16 @@ document.addEventListener('change', e => {
   if(t.id === 'books-fmt'){ UI.booksFmt = t.value; render(true); return; }
   if(t.id === 'books-scan'){ UI.booksScan = t.checked; render(true); return; }
   if(t.id === 'books-hidden'){ UI.booksHidden = t.checked; render(true); return; }
+  // «Без подписи на страницах» у читателя (правки 4.2): решает сервер при выдаче ссылки на книгу
+  if(t.dataset && t.dataset.nomark){
+    const id = t.dataset.nomark, action = t.checked ? 'mark_off' : 'mark_on';
+    t.disabled = true;
+    pb.send('/api/knigi/admin/access', {method: 'POST', body: {user: id, action}})
+      .then(() => { UI.openUser = id; toast(ACC_DONE[action]); return loadUsers(); })
+      .catch(err => { t.checked = !t.checked; toast(errText(err)); })
+      .finally(() => { t.disabled = false; render(true); });
+    return;
+  }
   if(t.id === 'hl-thought'){ UI.hlThought = t.checked; render(true); return; }
   if(t.dataset && t.dataset.shelf){ const set = UI.revShelves[t.dataset.book] || (UI.revShelves[t.dataset.book] = new Set()); t.checked ? set.add(t.dataset.shelf) : set.delete(t.dataset.shelf); return; }
   if(t.id === 'log-user' || t.id === 'log-book' || t.id === 'log-days'){ UI.logQ[t.id.slice(4)] = t.value; UI.log = null; render(true); return; }
