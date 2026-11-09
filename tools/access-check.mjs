@@ -326,6 +326,139 @@ async function partA(T) {
   return { A, B, group: g, sh, hl };
 }
 
+
+/* ---------- Часть Б: срок доступа ---------- */
+const khToday = () => new Date(Date.now() + 10 * 3600e3).toISOString().slice(0, 10);
+function addMonths(iso, n) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const last = new Date(Date.UTC(y, m - 1 + n + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(y, m - 1 + n, Math.min(d, last))).toISOString().slice(0, 10);
+}
+const addDays = (iso, n) => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const access = (t) => req("GET", "/api/knigi/access", { token: t });
+const act = (admin, user, action, extra) => req("POST", "/api/knigi/admin/access", { token: admin, json: { user, action, ...(extra || {}) } });
+
+async function partB(T) {
+  const { admin, boris } = T;
+  section("Б1. Приглашение со сроком 1 месяц");
+  const bad = await invite(admin, "7d");
+  ok(bad.r.status === 400, "срок не из списка (7 дней) не принимается", bad.r.text);
+  const { code } = await invite(admin, "1m");
+  const reg = await req("POST", "/api/collections/users/records", { json: { ...VERA, passwordConfirm: VERA.password, invite: code, access_until: "2099-01-01", suspended: false } });
+  ok(reg.status === 200, "Вера зарегистрировалась по приглашению на 1 месяц", reg.text);
+  let vera = await login(VERA);
+  const veraId = uid(vera);
+  let a = await access(vera);
+  const t = khToday();
+  ok(a.status === 200 && a.data.until === addMonths(t, 1) && a.data.active, `доступ до ${addMonths(t, 1)} (сегодня + 1 месяц, присланная дата не принята)`, a.data);
+  ok(a.data.contact === "owner@example.com", "в ответе почта для связи из CONTACT_EMAIL", a.data);
+  const self = await req("PATCH", `/api/collections/users/records/${veraId}`, { token: vera, json: { access_until: "2099-01-01" } });
+  ok(self.status >= 400, "сама себе срок Вера не меняет", self.text);
+  const self2 = await req("PATCH", `/api/collections/users/records/${veraId}`, { token: vera, json: { suspended: true } });
+  ok(self2.status >= 400, "и паузу тоже");
+
+  section("Б2. Продление +3 месяца считается от даты окончания");
+  const until1 = a.data.until;
+  let r = await act(admin, veraId, "extend", { months: 3, note: "оплатила 1500 ₽" });
+  ok(r.status === 200, "администратор продлил на 3 месяца", r.text);
+  a = await access(vera);
+  ok(a.data.until === addMonths(until1, 3), `новая дата ${addMonths(until1, 3)} (от ${until1}, а не от сегодня)`, a.data);
+  r = await act(admin, veraId, "extend", { months: 6 });
+  ok(r.status === 200 && (await access(vera)).data.until === addMonths(addMonths(until1, 3), 6), "+6 месяцев тоже от даты окончания");
+  ok((await act(admin, veraId, "extend", { months: 30 })).status === 400, "продлить больше чем на 24 месяца нельзя");
+
+  section("Б3. До окончания срока Вера пользуется библиотекой");
+  const books = (await req("GET", "/api/collections/books/records?perPage=50&" + flt("hidden = false"), { token: vera })).data.items;
+  const pdfBook = books.find((b) => (b.formats || []).indexOf("pdf") >= 0);
+  ok(!!pdfBook, "Вера видит открытые книги");
+  let rf = await readFile(vera, pdfBook.id);
+  ok(rf.link.status === 200 && rf.file === 206, "Вера открывает книгу", rf.link.text);
+  const oldLink = rf.link;
+  const hl = await req("POST", "/api/collections/notes/records", { token: vera, json: { owner: veraId, kind: "highlight", book: pdfBook.id, format: "pdf", page: 1, quote: "quick brown fox", color: "yellow", anchor: { v: 1, rects: [[0.1, 0.1, 0.2, 0.02]], s: 0, e: 5 } } });
+  ok(hl.status === 200, "Вера сохранила цитату", hl.text);
+  const sh = await req("POST", "/api/collections/shelves/records", { token: vera, json: { name: "Полка Веры", owner: veraId, common: false, sort: 1 } });
+  ok(sh.status === 200, "Вера создала свою полку", sh.text);
+  const gr = await req("POST", "/api/knigi/groups", { token: vera, json: { name: "Группа Веры", book: pdfBook.id } });
+  ok(gr.status === 200, "Вера создала группу", gr.text);
+  const g = (await req("GET", `/api/collections/groups/records/${gr.data.id}`, { token: vera })).data;
+  await req("POST", `/api/knigi/join/${g.invite_code}`, { token: boris, json: {} });
+  const bv = await req("GET", `/api/collections/users/records/${veraId}`, { token: boris });
+  ok(bv.status === 200 && bv.data.access_until === undefined && bv.data.suspended === undefined, "участник группы не видит срок и паузу Веры", bv.data);
+  const bn = await req("GET", `/api/collections/users/records?${flt(`access_until != ''`)}`, { token: boris });
+  ok(bn.status === 400, "фильтр по сроку доступа другого человека не принимается", bn.text);
+
+  section("Б4. Срок закончился: читать и менять нельзя, смотреть можно");
+  r = await act(admin, veraId, "set", { date: addDays(t, -1) });
+  ok(r.status === 200, "администратор поставил вчерашнюю дату");
+  a = await access(vera);
+  ok(!a.data.active && a.data.reason === "expired", "доступа нет: срок закончился", a.data);
+  rf = await readFile(vera, pdfBook.id);
+  ok(rf.link.status === 403 && /Срок доступа закончился/.test(rf.link.data.message) && /owner@example\.com/.test(rf.link.data.message), "ссылку на книгу сервер не выдаёт, в ответе почта для связи", rf.link.text);
+  const ck = (oldLink.headers.get("set-cookie") || "").split(";")[0];
+  const old = await fetch(BASE + oldLink.data.url, { headers: { Cookie: ck, Range: "bytes=0-1023" } });
+  ok(old.status === 403, "выданная раньше ссылка тоже перестала работать", old.status);
+  ok((await progress(vera, pdfBook.id, { format: "pdf", page: 2, pages: 5 })).status === 403, "прогресс не пишется");
+  let w = await req("POST", "/api/collections/notes/records", { token: vera, json: { owner: veraId, kind: "note", book: pdfBook.id, title: "Новая", body: "<p>x</p>" } });
+  ok(w.status === 403 && /напишите: owner@example\.com/.test(w.data.message), "заметку не создать (ответ по-русски с почтой)", w.text);
+  ok((await req("PATCH", `/api/collections/notes/records/${hl.data.id}`, { token: vera, json: { body: "<p>мысль</p>" } })).status === 403, "цитату не изменить");
+  ok((await req("DELETE", `/api/collections/notes/records/${hl.data.id}`, { token: vera })).status === 403, "цитату не удалить");
+  const mine = await req("GET", `/api/collections/notes/records?${flt(`owner = '${veraId}'`)}`, { token: vera });
+  ok(mine.status === 200 && mine.data.items.length === 1 && mine.data.items[0].quote === "quick brown fox", "свою цитату Вера видит");
+  ok((await req("GET", `/api/collections/books/records/${pdfBook.id}`, { token: vera })).status === 200, "карточку книги видит");
+  ok((await req("GET", `/api/collections/shelves/records/${sh.data.id}`, { token: vera })).status === 200, "свою полку видит");
+  ok((await req("POST", "/api/collections/shelves/records", { token: vera, json: { name: "Ещё", owner: veraId, common: false, sort: 2 } })).status === 403, "новую полку не создать");
+  ok((await req("POST", "/api/collections/shelf_books/records", { token: vera, json: { shelf: sh.data.id, book: pdfBook.id, sort: 1 } })).status === 403, "книгу на полку не поставить");
+  ok((await req("POST", "/api/collections/marks/records", { token: vera, json: { user: veraId, book: pdfBook.id, status: "reading" } })).status === 403, "«Читаю» не поставить");
+  ok((await req("POST", "/api/knigi/upload/start", { token: vera, json: { name: "x.pdf", size: 1000, kind: "offer" } })).status === 403, "книгу не предложить");
+  ok((await req("POST", "/api/collections/note_comments/records", { token: vera, json: { note: hl.data.id, user: veraId, group: g.id, text: "x" } })).status === 403, "комментарий не написать");
+  ok((await req("POST", "/api/knigi/groups", { token: vera, json: { name: "Вторая", book: pdfBook.id } })).status === 403, "группу не создать");
+  ok((await req("POST", `/api/knigi/groups/${g.id}/link`, { token: vera, json: {} })).status === 403, "новую ссылку группы не сделать");
+  ok((await req("GET", `/api/collections/groups/records/${g.id}`, { token: vera })).status === 200, "свою группу видит");
+  ok((await req("PATCH", `/api/collections/users/records/${veraId}`, { token: vera, json: { name: "Вера Новая" } })).status === 403, "имя не поменять");
+  const th = await req("PATCH", `/api/collections/users/records/${veraId}`, { token: vera, json: { theme: "dark" } });
+  ok(th.status === 200 && th.data.theme === "dark", "тему поменять можно", th.text);
+  const pw = await req("PATCH", `/api/collections/users/records/${veraId}`, { token: vera, json: { oldPassword: VERA.password, password: VERA.password + "x", passwordConfirm: VERA.password + "x" } });
+  ok(pw.status === 200, "пароль поменять можно", pw.text);
+  VERA.password += "x";
+  vera = await login(VERA);
+  const own = await req("POST", `/api/knigi/groups/${g.id}/owner`, { token: vera, json: { user: uid(boris) } });
+  ok(own.status === 200, "роль создателя группы передать можно", own.text);
+  const lv = await req("POST", `/api/knigi/groups/${g.id}/leave`, { token: vera, json: {} });
+  ok(lv.status === 200, "выйти из группы можно", lv.text);
+  ok((await req("GET", "/api/knigi/admin/users", { token: vera })).status === 403, "раздел «Пользователи» Вере закрыт");
+  ok((await req("GET", "/api/collections/access_log/records", { token: vera })).status >= 400, "историю продлений через API не прочитать");
+  ok((await act(vera, veraId, "extend", { months: 1 })).status === 403, "продлить себе доступ нельзя");
+
+  section("Б5. Приостановить и возобновить; администратор не ограничен");
+  r = await act(admin, veraId, "unlimited");
+  a = await access(vera);
+  ok(a.data.active && a.data.until === "", "«Бессрочно»: доступ снова есть", a.data);
+  rf = await readFile(vera, pdfBook.id);
+  ok(rf.link.status === 200 && rf.file === 206, "книга снова открывается");
+  r = await act(admin, veraId, "suspend");
+  a = await access(vera);
+  ok(!a.data.active && a.data.reason === "suspended", "«Приостановить»: доступ закрыт", a.data);
+  rf = await readFile(vera, pdfBook.id);
+  ok(rf.link.status === 403 && /Доступ приостановлен/.test(rf.link.data.message), "книга не открывается: «Доступ приостановлен»", rf.link.text);
+  r = await act(admin, veraId, "resume");
+  a = await access(vera);
+  ok(a.data.active, "«Возобновить»: доступ снова есть", a.data);
+  ok((await req("POST", "/api/collections/notes/records", { token: vera, json: { owner: veraId, kind: "note", title: "После возобновления", body: "<p>x</p>" } })).status === 200, "заметка снова создаётся");
+  ok((await act(admin, uid(admin), "suspend")).status === 400, "администратора приостановить нельзя");
+  const am = await access(admin);
+  ok(am.data.active && am.data.admin, "у администратора доступ всегда есть");
+  rf = await readFile(admin, pdfBook.id);
+  ok(rf.link.status === 200, "администратор открывает книги");
+  r = await act(admin, veraId, "note", { note: "проверка заметки" });
+  const list = await req("GET", "/api/knigi/admin/users", { token: admin });
+  const vr = list.data.find((x) => x.id === veraId);
+  ok(vr && vr.log.length >= 7 && vr.log.some((l) => l.action === "extend:3" && l.note === "оплатила 1500 ₽" && l.by === "Григорий"), "история: продление с заметкой и кто сделал", vr && vr.log);
+  ok(vr && vr.log[0].action === "note" && vr.log[0].note === "проверка заметки", "заметка о человеке в истории");
+  ok(list.data.every((x) => x.role !== "admin" || x.access_until === ""), "администратор в списке бессрочный");
+  const ai = (await req("GET", "/api/knigi/admin/users", { token: admin })).data;
+  ok(ai.filter((x) => x.role !== "admin" && x.id !== veraId).every((x) => x.access_until === "" && !x.suspended && x.active), "остальные читатели бессрочные");
+}
+
 /* ---------- Запуск ---------- */
 async function main() {
   const s = await req("GET", "/api/knigi/setup");

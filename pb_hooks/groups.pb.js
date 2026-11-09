@@ -52,6 +52,7 @@ onRealtimeSubscribeRequest((e) => {
 /* ---------- Группа: название и описание меняет создатель ---------- */
 // Создатель, код ссылки и книга меняются только маршрутами ниже.
 onRecordUpdateRequest((e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); // срок доступа (правки 4.1) проверяется первым
   if (!e.hasSuperuserAuth()) {
     const o = e.record.original();
     for (const f of ["owner", "invite_code", "book"]) e.record.set(f, o.getString(f));
@@ -70,16 +71,17 @@ onRecordDelete((e) => {
 }, "users");
 
 /* ---------- План чтения: только создатель ---------- */
-onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/groups_lib.js`).checkPlan(e); e.next(); }, "group_plan");
-onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/groups_lib.js`).checkPlan(e); e.next(); }, "group_plan");
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/groups_lib.js`).checkPlan(e); e.next(); }, "group_plan");
+onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/groups_lib.js`).checkPlan(e); e.next(); }, "group_plan");
 onRecordDeleteRequest((e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); 
   if (!e.hasSuperuserAuth() && !require(`${__hooks}/groups_lib.js`).CFG.plan()) throw new BadRequestError("План чтения сейчас выключен.");
   e.next();
 }, "group_plan");
 
 /* ---------- Комментарии ---------- */
-onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/groups_lib.js`).checkCommentCreate(e); e.next(); }, "note_comments");
-onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/groups_lib.js`).checkCommentUpdate(e); e.next(); }, "note_comments");
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/groups_lib.js`).checkCommentCreate(e); e.next(); }, "note_comments");
+onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/groups_lib.js`).checkCommentUpdate(e); e.next(); }, "note_comments");
 
 /* ---------- Маршруты ---------- */
 const GROUP_AUTH = $apis.requireAuth("users");
@@ -95,6 +97,7 @@ routerAdd("GET", "/api/knigi/admin/groups-count", (e) => {
 
 // Создать группу {name, description, book}: создатель сразу участник, первая книга становится текущей.
 routerAdd("POST", "/api/knigi/groups", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); // без доступа (правки 4.1) нельзя
   const G = require(`${__hooks}/groups_lib.js`);
   const body = e.requestInfo().body || {};
   const name = String(body.name || "").replace(/\s+/g, " ").trim();
@@ -137,6 +140,7 @@ routerAdd("GET", "/api/knigi/join/{code}", (e) => {
   });
 }, GROUP_AUTH);
 routerAdd("POST", "/api/knigi/join/{code}", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); // без доступа (правки 4.1) нельзя
   const G = require(`${__hooks}/groups_lib.js`);
   const g = G.groupByCode($app, e.request.pathValue("code"));
   if (!G.isMember($app, g.id, e.auth.id)) {
@@ -152,6 +156,7 @@ routerAdd("POST", "/api/knigi/join/{code}", (e) => {
 
 // Новая ссылка: старая сразу перестаёт работать.
 routerAdd("POST", "/api/knigi/groups/{id}/link", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); // без доступа (правки 4.1) нельзя
   const G = require(`${__hooks}/groups_lib.js`);
   const g = G.ownGroup($app, e.request.pathValue("id"), e.auth.id);
   g.set("invite_code", G.newCode());
@@ -172,6 +177,7 @@ routerAdd("POST", "/api/knigi/groups/{id}/owner", (e) => {
 
 // Исключить участника (только создатель). Его заметки в группе становятся личными, комментарии остаются.
 routerAdd("POST", "/api/knigi/groups/{id}/remove", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); // без доступа (правки 4.1) нельзя
   const G = require(`${__hooks}/groups_lib.js`);
   const g = G.ownGroup($app, e.request.pathValue("id"), e.auth.id);
   const user = String((e.requestInfo().body || {}).user || "");
@@ -198,6 +204,7 @@ routerAdd("POST", "/api/knigi/groups/{id}/leave", (e) => {
 
 // «Книга прочитана, выбрать следующую» {book}: текущая уходит в прочитанные с датой, план по ней закрывается.
 routerAdd("POST", "/api/knigi/groups/{id}/book", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); // без доступа (правки 4.1) нельзя
   const G = require(`${__hooks}/groups_lib.js`);
   const g = G.ownGroup($app, e.request.pathValue("id"), e.auth.id);
   const b = G.groupBook($app, (e.requestInfo().body || {}).book);

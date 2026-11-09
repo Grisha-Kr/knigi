@@ -9,6 +9,8 @@
 onRecordCreateRequest((e) => {
   if (e.hasSuperuserAuth()) { e.next(); return; }
   const invite = require(`${__hooks}/lib.js`).checkRegistration(e);
+  // срок доступа (правки 4.1): по приглашению «сегодня + срок», первый пользователь бессрочный
+  require(`${__hooks}/access_lib.js`).applyInvite(e.record, invite);
   e.next();
   if (invite) {
     invite.set("uses", invite.getInt("uses") + 1);
@@ -123,12 +125,14 @@ onRecordEnrich((e) => {
 }, "book_files");
 
 /* ---------- Полки ---------- */
-onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkShelfCreate(e); e.next(); }, "shelves");
-onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkShelfUpdate(e); e.next(); }, "shelves");
-onRecordDeleteRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkShelfDelete(e); e.next(); }, "shelves");
+// Первой строкой проверка срока доступа (правки 4.1, access_lib.js): порядок хуков из разных файлов не гарантирован.
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkShelfCreate(e); e.next(); }, "shelves");
+onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkShelfUpdate(e); e.next(); }, "shelves");
+onRecordDeleteRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkShelfDelete(e); e.next(); }, "shelves");
 
 // Книга на полке: одна и та же книга на полке один раз; полку и книгу у записи не меняют.
 onRecordCreateRequest((e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); 
   if (!e.hasSuperuserAuth()) {
     let b = null;
     try { b = $app.findRecordById("books", e.record.getString("book")); } catch (_) {}
@@ -142,6 +146,7 @@ onRecordCreateRequest((e) => {
   e.next();
 }, "shelf_books");
 onRecordUpdateRequest((e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); 
   const o = e.record.original();
   e.record.set("shelf", o.getString("shelf"));
   e.record.set("book", o.getString("book"));
@@ -151,8 +156,9 @@ onRecordUpdateRequest((e) => {
 /* ---------- Заметки и уроки ---------- */
 // Оформление чистится по списку разрешённых тегов, текст для поиска ставит сервер.
 // Делиться (shared) и писать уроки может только администратор.
-onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkNote(e); e.next(); }, "notes");
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkNote(e); e.next(); }, "notes");
 onRecordUpdateRequest((e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); 
   if (!e.hasSuperuserAuth()) {
     const o = e.record.original();
     e.record.set("owner", o.getString("owner"));
@@ -178,8 +184,8 @@ onRecordEnrich((e) => {
 onRecordEnrich((e) => { e.record.hide("file"); e.next(); }, "note_files");
 
 /* ---------- Отметки «Читаю» и «Прочитано» (правки 2.2) ---------- */
-onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkMark(e); e.next(); }, "marks");
-onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkMark(e); e.next(); }, "marks");
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkMark(e); e.next(); }, "marks");
+onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkMark(e); e.next(); }, "marks");
 
 // Файл урока удалили (сам или вместе с уроком): убираем его с диска.
 onRecordAfterDeleteSuccess((e) => {
@@ -221,6 +227,7 @@ routerAdd("GET", "/api/knigi/f/cover/{id}", (e) => {
 // переведённым в PDF, FB2, MOBI, AZW3 и TXT переведёнными в EPUB (правки 3.1): view говорит, какой читалкой открывать.
 routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
+  require(`${__hooks}/access_lib.js`).requireBooks(e.auth); // срок доступа (правки 4.1): без доступа книги не открываются
   // скрытая книга (правки 4.1): ссылку получает только администратор, читателю «Книга временно недоступна»
   const b = require(`${__hooks}/lib.js`).openBook(e.request.pathValue("id"), e.auth);
   const fmt = String((e.requestInfo().query || {}).f || "pdf");
@@ -245,6 +252,7 @@ routerAdd("GET", "/api/knigi/f/book/{id}", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   const id = e.request.pathValue("id");
   const user = F.linkUser(e, "book", id);
+  require(`${__hooks}/access_lib.js`).requireBooks(user); // выданная раньше ссылка тоже перестаёт работать
   let f = null;
   try { f = $app.findRecordById("book_files", id); } catch (_) {}
   if (!f) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
@@ -275,6 +283,7 @@ routerAdd("GET", "/api/knigi/f/book/{id}", (e) => {
 // Читатель получает только PDF общего урока.
 routerAdd("GET", "/api/knigi/files/{id}/link", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
+  require(`${__hooks}/access_lib.js`).requireBooks(e.auth);
   let f = null;
   try { f = $app.findRecordById("note_files", e.request.pathValue("id")); } catch (_) {}
   if (!f) throw new NotFoundError("Файл не найден: возможно, его удалили.");
@@ -291,6 +300,7 @@ routerAdd("GET", "/api/knigi/f/file/{id}", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   const id = e.request.pathValue("id");
   const user = F.linkUser(e, "file", id);
+  require(`${__hooks}/access_lib.js`).requireBooks(user);
   let f = null;
   try { f = $app.findRecordById("note_files", id); } catch (_) {}
   if (!f) throw new NotFoundError("Файл не найден: возможно, его удалили.");
@@ -324,6 +334,7 @@ routerAdd("GET", "/api/knigi/f/file/{id}", (e) => {
 
 // Прогресс чтения и какие страницы открыты (для журнала). Пишет только сервер.
 routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e);
   const F = require(`${__hooks}/files_lib.js`);
   const b = require(`${__hooks}/lib.js`).openBook(e.request.pathValue("id"), e.auth);
   const body = e.requestInfo().body || {};
@@ -371,6 +382,7 @@ routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
 // она попадает на проверку, не больше 3 книг на проверке от одного человека (правки 2.2).
 // Продолжить, закончить и отменить загрузку может только тот, кто её начал (uploadMeta проверяет владельца).
 routerAdd("POST", "/api/knigi/upload/start", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e); // без доступа книгу не предложить
   const lib = require(`${__hooks}/lib.js`);
   const body = e.requestInfo().body || {};
   if (body.kind === "offer") {
@@ -379,11 +391,13 @@ routerAdd("POST", "/api/knigi/upload/start", (e) => {
   return e.json(200, require(`${__hooks}/files_lib.js`).startUpload(e, body));
 }, $apis.requireAuth("users"));
 routerAdd("POST", "/api/knigi/upload/{up}/finish", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e);
   const F = require(`${__hooks}/files_lib.js`);
   if (F.uploadKind(e.request.pathValue("up"), e.auth.id) !== "offer") require(`${__hooks}/lib.js`).requireAdmin(e);
   return e.json(200, F.finishUpload(e, e.request.pathValue("up")));
 }, $apis.requireAuth("users"));
 routerAdd("POST", "/api/knigi/upload/{up}/{n}", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e);
   const F = require(`${__hooks}/files_lib.js`);
   if (F.uploadKind(e.request.pathValue("up"), e.auth.id) !== "offer") require(`${__hooks}/lib.js`).requireAdmin(e);
   return e.json(200, F.saveChunk(e, e.request.pathValue("up"), e.request.pathValue("n")));
@@ -561,13 +575,7 @@ routerAdd("GET", "/api/knigi/owner", (e) => {
   return e.json(200, { id: u.id, name: u.getString("name"), avatar: u.getString("avatar") });
 }, $apis.requireAuth("users"));
 
-// Все пользователи с фото (только администратору): раздел «Пользователи» и имена у приглашений.
-routerAdd("GET", "/api/knigi/admin/users", (e) => {
-  require(`${__hooks}/lib.js`).requireAdmin(e);
-  const users = $app.findRecordsByFilter("users", "id != ''", "created", 0, 0);
-  return e.json(200, users.map((u) => ({ id: u.id, name: u.getString("name"), email: u.getString("email"), role: u.getString("role"),
-    avatar: u.getString("avatar"), created: u.getString("created") })));
-}, $apis.requireAuth("users"));
+// Все пользователи с фото, сроком доступа и историей (только администратору): маршрут /api/knigi/admin/users в access.pb.js.
 
 /* ---------- Прочее ---------- */
 // Сведения для экрана входа и политики конфиденциальности.

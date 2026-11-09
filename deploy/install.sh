@@ -133,6 +133,7 @@ add_setting MCP_ENABLED 1 "ИИ-помощники (Claude, ChatGPT, Perplexity)
 add_setting MCP_REDIRECT_HOSTS "claude.ai,chatgpt.com,perplexity.ai" "ИИ-помощники: сайты, на которые можно вернуться после входа (через запятую; поддомены тоже подходят, например www.perplexity.ai). Отклонённые адреса видны в journalctl -u knigi строкой «Отклонён адрес возврата»."
 add_setting MCP_IP_ALLOW "" "ИИ-помощники: с каких адресов принимать запросы к /mcp (диапазоны через запятую). Пусто = с любых, главная защита всё равно токен. Anthropic (Claude): 160.79.104.0/21. OpenAI (ChatGPT): список https://openai.com/chatgpt-connectors.json, меняется. Perplexity адреса не публикует. Если оставить только один диапазон, другие помощники перестанут работать."
 add_setting MCP_MAX_CHARS 40000 "ИИ-помощники: сколько знаков текста книги отдавать за один вызов read_book."
+add_setting APP_TZ_OFFSET 10 "Срок доступа читателей: «сегодня» считается по этому часовому поясу (часы от UTC, 10 = Хабаровск)."
 
 # Модуль для книг Kindle (MOBI, AZW3): pip в отдельную папку venv, системный Python не трогается
 if ! "$APP_DIR/venv/bin/python3" -c "import mobi, ocrmypdf" >/dev/null 2>&1; then

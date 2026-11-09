@@ -16,7 +16,7 @@
 <link rel="icon" href="/icons/favicon-32.png?v=2" sizes="32x32" type="image/png">
 <link rel="icon" href="/icons/favicon-64.png?v=2" sizes="64x64" type="image/png">
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=2">
-<link rel="stylesheet" href="/app.css?v=10">
+<link rel="stylesheet" href="/app.css?v=11">
 <script>try{var t=JSON.parse(localStorage.getItem('kn_theme')||'""');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
 </head>
 <body>
@@ -32,6 +32,7 @@
 <nav class="side" id="side" aria-label="Разделы приложения"></nav>
 <div class="page">
   <div class="update-bar" id="update-bar" hidden><div><span>Вышло обновление приложения.</span><button type="button" class="btn sm primary" id="update-btn">Обновить</button><button type="button" class="icon-btn" id="update-close" aria-label="Скрыть">×</button></div></div>
+  <div class="access-bar" id="access-bar" role="status" hidden><div><p id="access-text"></p><button type="button" class="icon-btn" id="access-close" aria-label="Скрыть до следующего входа">×</button></div></div>
   <div class="notice" id="notice" hidden><div id="notice-text"></div></div>
   <main id="main"><div class="loading">Загружаю…</div></main>
 </div>
@@ -57,6 +58,6 @@
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="/vendor/pocketbase.umd.js"></script>
-<script src="/app.js?v=10"></script>
+<script src="/app.js?v=11"></script>
 </body>
 </html>

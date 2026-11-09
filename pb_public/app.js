@@ -90,7 +90,8 @@ const ICON = {
 // people (участники общих групп: имя и фото), gcfg (лимиты и включён ли план), gcount (сколько групп, только администратору)
 const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], marks:[], offers:[], pbooks:[], invites:[], users:[], owner:null, loaded:false, disk:null, mail:null,
   groups:[], gmembers:[], gbooks:[], gplan:[], comments:[], people:[], gcfg:{maxPerUser: 5, maxMembers: 25, plan: true}, gcount:null,
-  ocr:null}; // ocr: очередь распознавания (правки 3.1, только администратору, GET /api/knigi/ocr)
+  ocr:null, // ocr: очередь распознавания (правки 3.1, только администратору, GET /api/knigi/ocr)
+  access:null}; // access: срок доступа (правки 4.1, GET /api/knigi/access)
 const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files', marks:'marks', offers:'book_offers', pbooks:'books',
   groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users'};
 const KEYS = Object.keys(PBN);
@@ -109,6 +110,8 @@ const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
 const isAdmin = () => me().role === 'admin';
+// Срок доступа закончился или стоит пауза (правки 4.1): книги не открываются, записи только смотреть
+const readOnly = () => !!(S.access && !S.access.active);
 
 /* ---------- Тема оформления: auto (как в системе), light, dark ---------- */
 const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
@@ -191,7 +194,7 @@ const isScan = b => filesOfBook(b.id).some(scanFile) && !filesOfBook(b.id).some(
 const pageFileOf = id => filesOfBook(id).find(f => viewOf(f.format) === 'pdf' && canRead(f));
 const readHref = (bookId, fmt, extra) => `#/read/${bookId}?f=${fmt}${extra || ''}`;
 const myShelf = s => !s.common && s.owner === me().id;
-const canEditShelf = s => s && (s.common ? isAdmin() : s.owner === me().id);
+const canEditShelf = s => s && !readOnly() && (s.common ? isAdmin() : s.owner === me().id);
 const shelfKids = (parent, common) => S.shelves.filter(s => (s.parent || '') === (parent || '') && (parent ? true : (common ? s.common : myShelf(s)))).sort(bySort);
 const shelfBooks = id => { const s = byId('shelves', id); return S.sbooks.filter(x => x.shelf === id).map(x => byId('books', x.book)).filter(b => b && !(s && s.common && bookNA(b))); };
 function shelfPath(s){ const out = []; let cur = s, g = 0; while(cur && g++ < 5){ out.unshift(cur); cur = cur.parent ? byId('shelves', cur.parent) : null; } return out; }
@@ -235,7 +238,7 @@ async function loadAll(keys = loadKeys()){
 let subscribed = false;
 async function subscribeAll(){
   if(subscribed) return; subscribed = true;
-  await pb.collection('users').subscribe(me().id, e => { if(e.action === 'update'){ pb.authStore.save(pb.authStore.token, e.record); themeFromUser(); schedule(); } });
+  await pb.collection('users').subscribe(me().id, e => { if(e.action === 'update'){ pb.authStore.save(pb.authStore.token, e.record); themeFromUser(); loadAccess(); schedule(); } });
   // книгу скрыли или открыли (правки 4.1): тем, кому она перестала быть видна, PocketBase событие не шлёт,
   // поэтому сервер рассылает короткое сообщение, и приложение читателя перечитывает книги, файлы и полки
   let visT = 0;
@@ -292,6 +295,7 @@ async function startApp(){
     await Promise.all([loadAll(), loadGroupCfg()]);
     S.loaded = true; $('#notice').hidden = true; render(true);
     if(isAdmin()){ loadInvites(); loadUsers(); loadOcr(); } else loadOwner();
+    loadAccess();
     subscribeAll().catch(() => {});
     if(route().name === 'g') gVisit(route().id);
     if(route().name === 'profile' && isAdmin()) loadGCount();
@@ -313,9 +317,54 @@ document.addEventListener('visibilitychange', () => {
   if(S.loaded && pb.authStore.isValid){
     if(Date.now() - lastSession > 3600e3){ lastSession = Date.now(); pb.send('/api/knigi/session', {}).catch(() => {}); }
     loadAll().catch(() => {});
+    loadAccess();
   }
 });
 window.addEventListener('pagehide', () => { RD.doc && rdSave(true); });
+
+/* ---------- Срок доступа (правки 4.1, по образцу «Молитвенного дневника») ---------- */
+// Состояние приходит с сервера: «сегодня» он считает по времени Хабаровска. Без доступа вверху красная полоска
+// (она не закрывается), за 7 дней до конца срока жёлтая (её можно закрыть до следующего входа, kn_accHide).
+const dnum = iso => { const [y, m, d] = String(iso).split('-').map(Number); return Date.UTC(y, m - 1, d) / 864e5; };
+const fmtDay = iso => { const [y, m, d] = String(iso || '').split('-').map(Number); return !y ? '' : d + ' ' + MONF[m - 1] + (y !== new Date().getFullYear() ? ' ' + y : ''); };
+const DAYS_W = ['день', 'дня', 'дней'], MONTHS_W = ['месяц', 'месяца', 'месяцев'];
+const contactHTML = c => /^[^\s@]+@[^\s@]+$/.test(c || '') ? `<a href="mailto:${esc(c)}">${esc(c)}</a>` : esc(c || 'администратору');
+const daysLeft = a => Math.round(dnum(a.until) - dnum(a.today));
+const leftText = k => k <= 0 ? 'сегодня последний день' : `осталось ${k} ${plural(k, DAYS_W)}`;
+const accHead = a => a.reason === 'suspended' ? 'Доступ приостановлен' : 'Срок доступа закончился';
+async function loadAccess(){
+  if(!pb.authStore.isValid) return;
+  const was = readOnly();
+  try { S.access = await pb.send('/api/knigi/access', {}); } catch(e){ return; }
+  renderAccessBar();
+  if(was !== readOnly() && S.loaded) render(true); else schedule();
+}
+const accKey = a => [me().id, a.reason, a.until].join('|');
+function renderAccessBar(){
+  const a = S.access, bar = $('#access-bar');
+  if(!bar) return;
+  let html = '', off = false;
+  if(a && !a.active){
+    off = true;
+    html = `<b>${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}.</b> Книги сейчас не открываются, свои цитаты и заметки можно смотреть. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+  } else if(a && a.until && !a.admin && daysLeft(a) <= 7){
+    html = `Доступ действует до ${fmtDay(a.until)} (${leftText(daysLeft(a))}). Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+  }
+  bar.classList.toggle('off', off);
+  $('#access-close').hidden = off;
+  $('#access-text').innerHTML = html;
+  bar.hidden = !html || (!off && loadLS('accHide', '') === accKey(a));
+}
+document.addEventListener('click', e => { if(e.target.closest('#access-close') && S.access){ saveLS('accHide', accKey(S.access)); $('#access-bar').hidden = true; } });
+function accessLine(){
+  const a = S.access;
+  if(!a) return '';
+  if(a.admin) return 'Вы администратор, доступ бессрочный.';
+  if(!a.active) return `${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}: книги не открываются, а добавлять и менять ничего нельзя. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+  return a.until ? `Доступ действует до ${fmtDay(a.until)} включительно.` : 'Доступ бессрочный.';
+}
+// Короткая строка вместо кнопки, которая без доступа не работает
+const roNote = () => `<p class="na-note">${ICON.lock}<span>${accessLine()}</span></p>`;
 
 /* ---------- Проверка новой версии ---------- */
 // Сравниваем ?v= у app.js и app.css в открытой странице и в свежем index.html с сервера
@@ -549,7 +598,7 @@ VIEWS.shelves = () => {
     </nav>
     <section class="card"><div class="block-h"><h2>Общие полки</h2><span class="row-acts">${isAdmin() ? orderBtn('common', common) + `<button type="button" class="btn sm" data-act="new-shelf" data-common="1">${ICON.plus}<span>Полка</span></button>` : ''}</span></div>
       ${common.length ? shelfTree('', true, 1) : '<p class="empty">Общих полок пока нет.</p>'}</section>
-    <section class="card"><div class="block-h"><h2>Мои полки</h2><span class="row-acts">${orderBtn('mine', mine)}<button type="button" class="btn sm" data-act="new-shelf" data-common="">${ICON.plus}<span>Полка</span></button></span></div>
+    <section class="card"><div class="block-h"><h2>Мои полки</h2><span class="row-acts">${readOnly() ? '' : orderBtn('mine', mine) + `<button type="button" class="btn sm" data-act="new-shelf" data-common="">${ICON.plus}<span>Полка</span></button>`}</span></div>
       ${mine.length ? shelfTree('', false, 1) : '<p class="empty">Своих полок пока нет. Их видите только вы.</p>'}</section>`;
 };
 VIEWS.sh = r => {
@@ -684,8 +733,8 @@ VIEWS.b = r => {
   if(kind === 'highlight') mine = mine.filter(n => (!UI.hlColor || n.color === UI.hlColor) && (!UI.hlThought || n.body_text));
   const shared = isAdmin() ? [] : notesOfBook(b.id).filter(n => n.owner !== me().id && n.shared).sort((x, y) => (x.kind === 'highlight') - (y.kind === 'highlight') || hlOrder(x, y));
   const ep = isEpView(fmt);
-  const na = bookNA(b);
-  const readBtn = na ? `<p class="na-note">${ICON.lock}<span>Книга временно недоступна. Ваши цитаты, заметки и место, где вы остановились, сохранены.</span></p>`
+  const na = bookNA(b), ro = readOnly();
+  const readBtn = ro && !na ? roNote() : na ? `<p class="na-note">${ICON.lock}<span>Книга временно недоступна. Ваши цитаты, заметки и место, где вы остановились, сохранены.</span></p>`
     : !f ? '<p class="soon">Файла книги нет.</p>'
     : f.status === 'processing' ? `<p class="soon">${VIEW[fmt] !== fmt ? `${FORMATS[fmt]} переводится для читалки ${FORMATS[VIEW[fmt]]}: это идёт в фоне, большая книга может занять несколько минут.` : 'Книга обрабатывается: через минуту её можно будет открыть.'}</p>`
     : f.status === 'error' ? '<p class="soon">Этот файл не открывается: при обработке была ошибка.</p>'
@@ -719,9 +768,9 @@ VIEWS.b = r => {
         ${b.status === 'processing' && !(f && f.status === 'processing') ? '<p class="tag wait">Обрабатывается</p>' : ''}
         ${ocrLine}${errors}${adminNotes}
         <div class="book-acts">${readBtn}
-          ${pend || na ? '' : `<button type="button" class="btn" data-act="to-shelf" data-id="${b.id}">${ICON.shelves}<span>На полку</span></button>`}
+          ${pend || na || ro ? '' : `<button type="button" class="btn" data-act="to-shelf" data-id="${b.id}">${ICON.shelves}<span>На полку</span></button>`}
           ${isAdmin() ? `<button type="button" class="icon-btn" data-act="book-menu" data-id="${b.id}" aria-label="Действия с книгой" aria-haspopup="menu" title="Действия с книгой">${ICON.more}</button>` : ''}</div>
-        ${pend ? '' : markRow(b)}
+        ${pend || ro ? '' : markRow(b)}
         ${isAdmin() && !pend ? ocrCardHTML(b, f) : ''}
         ${offerer ? `<p class="hint offered">Предложил: ${esc(offerer.name || offerer.email || 'читатель')}</p>` : ''}
         ${shelves.length ? `<p class="on-shelves">На полках: ${shelves.map(s => `<a class="chip sm" href="#/sh/${s.id}">${esc(shelfPath(s).map(p => p.name).join(' › '))}</a>`).join(' ')}</p>` : ''}
@@ -733,7 +782,7 @@ VIEWS.b = r => {
       <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<a role="tab" href="#/b/${b.id}${k === 'notes' ? '' : '?tab=' + k}" aria-selected="${tab === k}">${l}${k === 'highlights' && hlAll.length && tab !== k ? ` <span class="n">${hlAll.length}</span>` : ''}</a>`).join('')}</div>
       ${kind === 'highlight' ? hlFilters(hlAll) : ''}
       <div class="rows">${mine.map(n => noteRow(n, {noBook: true})).join('') || `<p class="empty">${emptyText}</p>`}</div>
-      ${kind !== 'highlight' ? `<a class="btn" href="#/note/new?book=${b.id}${tab === 'lessons' ? '&kind=lesson' : ''}">${ICON.plus}<span>${tab === 'lessons' ? 'Урок' : 'Заметка'}</span></a>` : ''}
+      ${kind !== 'highlight' && !ro ? `<a class="btn" href="#/note/new?book=${b.id}${tab === 'lessons' ? '&kind=lesson' : ''}">${ICON.plus}<span>${tab === 'lessons' ? 'Урок' : 'Заметка'}</span></a>` : ''}
       ${shared.length ? `<h3 class="sub-h owner-h">${S.owner ? faceHTML(S.owner, 'xs') : ''}<span>Заметки автора библиотеки</span></h3><div class="rows">${shared.map(n => noteRow(n, {noBook: true})).join('')}</div>` : ''}
     </section>`;
 };
@@ -751,7 +800,7 @@ VIEWS.notes = () => {
   if(UI.notesQ && UI.notesHits) list = list.filter(n => UI.notesHits.has(n.id));
   list.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
   return `<header class="head head-wrap"><h1>Заметки</h1>${meLink()}
-      <span class="row-acts"><a class="btn sm" href="#/note/new">${ICON.plus}<span>Заметка</span></a>${isAdmin() ? `<a class="btn sm" href="#/note/new?kind=lesson">${ICON.plus}<span>Урок</span></a>` : ''}</span></header>
+      <span class="row-acts">${readOnly() ? '' : `<a class="btn sm" href="#/note/new">${ICON.plus}<span>Заметка</span></a>`}${isAdmin() ? `<a class="btn sm" href="#/note/new?kind=lesson">${ICON.plus}<span>Урок</span></a>` : ''}</span></header>
     <label class="search"><span class="sr">Поиск по тексту заметок и цитат</span>${ICON.search}<input type="search" id="nq" placeholder="Поиск по тексту, цитатам и мыслям" value="${esc(UI.notesQ)}" autocomplete="off"></label>
     <div class="seg" role="radiogroup" aria-label="Что показать">${kinds.map(([k, l]) => `<button type="button" role="radio" data-act="notes-kind" data-k="${k}" aria-checked="${UI.notesKind === k}">${l}</button>`).join('')}</div>
     ${UI.notesQ && !UI.notesHits ? '<p class="hint">Ищу…</p>' : ''}
@@ -1428,7 +1477,7 @@ VIEWS.groups = () => {
   return `<header class="head"><h1>Группы</h1>${meLink()}</header>
     ${list.length ? `<div class="groups">${cards}</div>`
       : '<section class="card"><p>Группа нужна, чтобы читать одну книгу вместе: видеть, кто сегодня читал, делиться цитатами и заметками и обсуждать их.</p><p class="hint">Создайте группу и отправьте ссылку тем, с кем хотите читать. Вступить смогут те, у кого уже есть аккаунт в библиотеке.</p></section>'}
-    <button type="button" class="${list.length ? 'dashed' : 'btn primary big wide'}" data-act="g-new"${full ? ' disabled' : ''}>${full ? `Вы уже в ${max} ${plural(max, GROUPS_W)}` : list.length ? '+ Создать группу' : 'Создать группу'}</button>
+    ${readOnly() ? roNote() : ''}<button type="button" class="${list.length ? 'dashed' : 'btn primary big wide'}" data-act="g-new"${full || readOnly() ? ' disabled' : ''}>${full ? `Вы уже в ${max} ${plural(max, GROUPS_W)}` : list.length ? '+ Создать группу' : 'Создать группу'}</button>
     ${full ? `<p class="hint">Можно состоять не больше чем в ${max} ${plural(max, GROUPS_W)}, вместе с созданными. Чтобы создать новую, выйдите из одной из старых.</p>` : ''}`;
 };
 VIEWS.g = r => {
@@ -1446,7 +1495,7 @@ VIEWS.g = r => {
   const alone = own && ms.length < 2 ? `<section class="card"><h2>Пригласите участников</h2><p class="hint">Отправьте ссылку тем, с кем хотите читать эту книгу. Вступить смогут те, у кого уже есть аккаунт в библиотеке.</p>
       <button type="button" class="btn primary" data-act="g-invite" data-id="${g.id}">Пригласить</button></section>` : '';
   const past = gbooksOf(g.id).filter(x => x.finished_at);
-  return `<div class="nav-head">${backLink('#/groups', 'Группы')}<span class="row-acts">${own ? `<button type="button" class="btn sm" data-act="g-invite" data-id="${g.id}">Пригласить</button>` : ''}
+  return `<div class="nav-head">${backLink('#/groups', 'Группы')}<span class="row-acts">${own && !readOnly() ? `<button type="button" class="btn sm" data-act="g-invite" data-id="${g.id}">Пригласить</button>` : ''}
       <button type="button" class="icon-btn" data-act="g-menu" data-id="${g.id}" aria-label="Действия с группой" aria-haspopup="menu" title="Действия с группой">${ICON.more}</button></span></div>
     ${banner}
     <header class="g-head"><h1>${esc(g.name)}</h1>
@@ -1486,7 +1535,7 @@ VIEWS.join = r => {
   if(d.full) return head + `<section class="card join-card">${top}<p>В группе уже ${d.max} участников, больше вступить нельзя.</p><a class="btn wide" href="#/groups">К группам</a></section>`;
   return head + `<section class="card join-card">${top}
     <p class="hint">Участники увидят ваше имя и фото, сколько вы читаете книгу группы и где вы в ней, а ещё цитаты и заметки, которые вы сами отправите в группу. Остальные ваши заметки по-прежнему видите только вы.</p>
-    <button type="button" class="btn primary big wide" data-act="g-join" data-code="${esc(code)}">Вступить</button>
+    ${readOnly() ? roNote() : `<button type="button" class="btn primary big wide" data-act="g-join" data-code="${esc(code)}">Вступить</button>`}
     <a class="btn ghost wide" href="#/groups">Не сейчас</a></section>`;
 };
 async function loadJoin(code){
@@ -1612,6 +1661,8 @@ function deleteGroup(g){
     async onSave(){ await pb.collection('groups').delete(g.id); await loadAll(G_KEYS); toast('Группа удалена'); go('#/groups', true); }});
 }
 function groupMenu(btn, g){
+  // без доступа (правки 4.1): только участники (передать роль создателя) и выход
+  if(readOnly()){ openMenu(btn, [{label: 'Участники', run: () => openMembers(g)}, {label: 'Выйти из группы', run: () => leaveGroup(g)}]); return; }
   const own = isGroupOwner(g);
   openMenu(btn, [
     ...(own ? [{label: 'Пригласить', run: () => openInvite(g)}] : []),
@@ -1660,8 +1711,8 @@ function commentsHTML(n){
   return `<section class="card comments" id="cm-box" data-note="${n.id}"><h2>Комментарии${list.length ? ` <span class="n">${list.length}</span>` : ''}</h2>
     <p class="hint sm">Видят участники группы «${esc(g ? g.name : '')}».</p>
     ${rows ? `<div class="cm-list">${rows}</div>` : ''}
-    <div class="cm-form"><label class="sr" for="cm-text">Комментарий</label><textarea id="cm-text" rows="2" maxlength="2000" placeholder="Написать комментарий">${esc(UI.cmDraft[n.id] || '')}</textarea>
-      <button type="button" class="btn primary" data-act="cm-send" data-id="${n.id}">Отправить</button></div></section>`;
+    ${readOnly() ? roNote() : `<div class="cm-form"><label class="sr" for="cm-text">Комментарий</label><textarea id="cm-text" rows="2" maxlength="2000" placeholder="Написать комментарий">${esc(UI.cmDraft[n.id] || '')}</textarea>
+      <button type="button" class="btn primary" data-act="cm-send" data-id="${n.id}">Отправить</button></div>`}</section>`;
 }
 // Перерисовать только комментарии (экран заметки с редактором не перерисовывается целиком)
 function cmPaint(){
@@ -1712,7 +1763,8 @@ VIEWS.profile = () => {
     <section class="card me-card">
       <button type="button" class="face-btn" data-act="avatar" aria-label="Фото профиля" aria-haspopup="menu" title="Фото профиля">${faceHTML(u, 'lg')}<span class="face-cam" aria-hidden="true">${ICON.camera}</span></button>
       <div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span><small>${isAdmin() ? 'Администратор библиотеки' : 'Читатель'}</small></div>
-      <button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя" title="Изменить имя">${ICON.pen}</button></section>
+      ${readOnly() ? '' : `<button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя" title="Изменить имя">${ICON.pen}</button>`}</section>
+    ${S.access && !isAdmin() ? `<p class="acc-line${S.access.active ? '' : ' off'}">${accessLine()}</p>` : ''}
     <section class="card"><h2>Читаю${reading.length ? ` <span class="n">${reading.length}</span>` : ''}</h2>
       ${reading.length ? `<div class="rows">${reading.map(m => bookRow(byId('books', m.book))).join('')}</div>` : '<p class="empty">Отметьте книгу «Читаю» в её карточке.</p>'}</section>
     <section class="card"><h2>Прочитанные${finished.length ? ` <span class="n">${finished.length}</span>` : ''}</h2>
@@ -1720,7 +1772,7 @@ VIEWS.profile = () => {
         ${finished.length > FIN_SHOW ? `<button type="button" class="btn sm ghost" data-act="fin-all">${UI.finAll ? 'Свернуть' : 'Показать все · ' + finished.length}</button>` : ''}` : '<p class="empty">Здесь появятся книги с отметкой «Прочитано».</p>'}</section>
     ${isAdmin() ? '' : `<section class="card"><div class="block-h"><h2>Мои предложенные книги</h2></div>
       ${offers.length ? `<div class="rows">${offers.map(offerRow).join('')}</div>` : '<p class="hint">Если в библиотеке нет нужной книги, предложите её. Администратор проверит и добавит.</p>'}
-      <button type="button" class="btn" data-act="offer-book">${ICON.upload}<span>Предложить книгу</span></button></section>`}
+      ${readOnly() ? roNote() : `<button type="button" class="btn" data-act="offer-book">${ICON.upload}<span>Предложить книгу</span></button>`}</section>`}
     <section class="card"><h2>Оформление</h2>
       <div class="seg3" role="radiogroup" aria-label="Тема">${[['light','Светлая'],['dark','Тёмная'],['auto','Как в системе']].map(([k, l]) =>
         `<input type="radio" name="p-theme" id="p-theme-${k}" value="${k}"${themePref() === k ? ' checked' : ''}><label for="p-theme-${k}">${l}</label>`).join('')}</div></section>
@@ -1737,16 +1789,13 @@ VIEWS.profile = () => {
       <div class="field"><label for="i-note">Для кого (заметка)</label><input type="text" id="i-note" placeholder="Например: мама"></div>
       <div class="field"><label for="i-max">Сколько регистраций</label><select id="i-max"><option value="1">1 человек</option><option value="5">до 5 человек</option><option value="0">без ограничения</option></select></div>
       <div class="field"><label for="i-exp">Действует до (необязательно)</label><input type="date" id="i-exp"></div>
+      <div class="field"><label for="i-period">Срок доступа для новых пользователей</label><select id="i-period">${Object.entries(ACC_PERIODS).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
       <button type="button" class="btn primary" data-act="new-invite">Создать и скопировать ссылку</button>
-      <div>${inv.length ? inv.map(i => `<div class="inv"><code>${esc(i.code)}</code><span class="muted">${i.note ? esc(i.note) + ' · ' : ''}использовано ${i.uses || 0}${i.max_uses > 0 ? ' из ' + i.max_uses : ', без ограничения'}${i.expires ? ' · до ' + fmtDate(i.expires) : ''}</span>
+      <div>${inv.length ? inv.map(i => `<div class="inv"><code>${esc(i.code)}</code><span class="muted">${i.note ? esc(i.note) + ' · ' : ''}использовано ${i.uses || 0}${i.max_uses > 0 ? ' из ' + i.max_uses : ', без ограничения'}${i.expires ? ' · до ' + fmtDate(i.expires) : ''} · доступ ${esc(ACC_PERIODS[i.access_period || ''] || i.access_period)}</span>
         ${used(i).length ? `<span class="inv-who">${used(i).map(x => `<span class="who-chip">${faceHTML(x, 'xs')}${esc(x.name || x.email)}</span>`).join('')}</span>` : ''}
         <div class="acts"><button type="button" class="btn sm" data-act="copy-invite" data-code="${esc(i.code)}">Скопировать ссылку</button><button type="button" class="btn sm ghost danger" data-act="del-invite" data-id="${esc(i.id)}">Удалить</button></div></div>`).join('') : '<p class="hint">Приглашений пока нет.</p>'}</div>
     </div></details>
-    <details class="fold" id="users-fold"${UI.usersOpen ? ' open' : ''}><summary><span>Пользователи · ${S.users.length}</span>${ICON.chev}</summary><div class="fold-body">
-      ${S.users.map(x => `<div class="user-row">${faceHTML(x, 'md')}<span class="ur-t"><b>${esc(x.name || 'Без имени')}</b><small>${esc(x.email)}</small>
-        <small>${x.role === 'admin' ? 'администратор' : 'читатель'} · с ${esc(fmtDate(x.created))}</small></span></div>`).join('') || '<p class="hint">Пока никого.</p>'}
-      <p class="hint">Удалить пользователя можно в панели администратора: <a href="/_/" target="_blank" rel="noopener">${esc(location.host)}/_/</a>, коллекция users.</p>
-    </div></details>` : ''}
+    ${usersSection()}` : ''}
     <details class="fold"><summary><span>Сменить пароль</span>${ICON.chev}</summary><div class="fold-body">
       <div class="field"><label for="p-old">Текущий пароль</label><input type="password" id="p-old" autocomplete="current-password"></div>
       <div class="field"><label for="p-new">Новый пароль (не короче 8 символов)</label><input type="password" id="p-new" autocomplete="new-password"></div>
@@ -1756,6 +1805,47 @@ VIEWS.profile = () => {
     <button type="button" class="btn wide" data-act="logout">Выйти</button>
     <p class="hint"><a href="/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a></p>`;
 };
+/* ---------- Раздел «Пользователи»: срок доступа (правки 4.1, только администратору) ---------- */
+const ACC_PERIODS = {'': 'бессрочно', '1m': '1 месяц', '3m': '3 месяца', '6m': '6 месяцев'};
+const ACC_DONE = {extend: 'Доступ продлён', set: 'Дата доступа изменена', unlimited: 'Доступ бессрочный', suspend: 'Доступ приостановлен', resume: 'Доступ возобновлён', note: 'Заметка сохранена'};
+const ACC_LOG = {set: 'новая дата', unlimited: 'бессрочно', suspend: 'приостановлен', resume: 'возобновлён', note: 'заметка'};
+function accLogText(a){
+  const m = /^extend:(\d+)$/.exec(a || '');
+  return m ? `продлён на ${m[1]} ${plural(+m[1], MONTHS_W)}` : ACC_LOG[a] || a;
+}
+function userState(x, today){
+  if(x.role === 'admin') return '<span class="tag">администратор</span>';
+  if(x.suspended) return '<span class="tag bad">приостановлен</span>';
+  if(x.access_until && today && x.access_until < today) return `<span class="tag bad">срок закончился ${fmtDay(x.access_until)}</span>`;
+  if(!x.access_until) return '<span class="tag ok">бессрочно</span>';
+  const k = today ? Math.round(dnum(x.access_until) - dnum(today)) : 99;
+  return `<span class="tag${k <= 7 ? ' warn' : ' ok'}">до ${fmtDay(x.access_until)}${k <= 7 ? ', ' + leftText(k) : ''}</span>`;
+}
+const untilText = d => d ? fmtDay(d) : 'бессрочно';
+function usersSection(){
+  const t = S.access && S.access.today;
+  // сначала без доступа, потом с датой (ближайшие сверху), потом бессрочные, вы в конце
+  const rank = x => x.role === 'admin' ? 3 : x.active === false ? 0 : x.access_until ? 1 : 2;
+  const list = S.users.slice().sort((a, b) => rank(a) - rank(b) || (a.access_until || '').localeCompare(b.access_until || '') || collator.compare(a.name || a.email || '', b.name || b.email || ''));
+  return `<details class="fold" id="users-fold"${UI.usersOpen ? ' open' : ''}><summary><span>Пользователи · ${S.users.length}</span>${ICON.chev}</summary><div class="fold-body">
+    <p class="hint">Когда срок доступа заканчивается или вы ставите паузу, человек видит карточки книг, полки и свои записи, но книги не открываются, а добавлять и менять ничего нельзя. Всё сохраняется, после продления работает как раньше. Продление считается от даты окончания, если она ещё не прошла, иначе от сегодня (по времени Хабаровска).</p>
+    <div class="users">${list.map(x => {
+      const id = esc(x.id), adm = x.role === 'admin';
+      const log = (x.log || []).map(l => `<li><span class="d">${fmtDate(l.created)}</span> ${esc(accLogText(l.action))}${l.until_before !== l.until_after ? `: ${untilText(l.until_before)} → ${untilText(l.until_after)}` : ''}${l.note ? ` · ${esc(l.note)}` : ''}${l.by ? ` <span class="muted">(${esc(l.by)})</span>` : ''}</li>`).join('');
+      return `<div class="usr">
+        <div class="usr-head">${faceHTML(x, 'md')}
+          <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}${adm ? 'администратор' : 'читатель'} · с ${esc(fmtDate(x.created))}</span><span>${userState(x, t)}</span></div></div>
+        ${adm ? '' : `<div class="usr-acts">${[1, 3, 6].map(m => `<button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="${m}" data-id="${id}">+${m} ${plural(m, MONTHS_W)}</button>`).join('')}${x.suspended ? `<button type="button" class="btn sm" data-act="acc" data-action="resume" data-id="${id}">Возобновить</button>` : `<button type="button" class="btn sm ghost danger" data-act="acc" data-action="suspend" data-id="${id}">Приостановить</button>`}</div>`}
+        <details class="usr-more"${UI.openUser === x.id ? ' open' : ''} data-user="${id}"><summary>${adm ? 'Заметки' : 'Дата, заметка и история'}</summary>
+          ${adm ? '' : `<div class="usr-row"><div class="field"><label for="ud-${id}">Доступ до (своя дата)</label><input type="date" id="ud-${id}" value="${esc(x.access_until || '')}"></div><div class="usr-btns"><button type="button" class="btn sm" data-act="acc" data-action="set" data-id="${id}">Поставить дату</button><button type="button" class="btn sm ghost" data-act="acc" data-action="unlimited" data-id="${id}">Бессрочно</button></div></div>`}
+          <div class="usr-row"><div class="field"><label for="un-${id}">Заметка (видите только вы; добавится и к продлению)</label><input type="text" id="un-${id}" maxlength="1000" placeholder="Например: оплатил 500 ₽ 1 ноября"></div><div class="usr-btns"><button type="button" class="btn sm ghost" data-act="acc" data-action="note" data-id="${id}">Сохранить заметку</button></div></div>
+          ${log ? `<ul class="usr-log">${log}</ul>` : '<p class="hint">Истории пока нет.</p>'}
+        </details>
+      </div>`;
+    }).join('') || '<p class="hint">Пока никого.</p>'}</div>
+    <p class="hint">Удалить пользователя совсем можно в панели администратора: <a href="/_/" target="_blank" rel="noopener">${esc(location.host)}/_/</a>, коллекция users.</p>
+  </div></details>`;
+}
 async function loadInvites(){ try { S.invites = await pb.collection('invites').getFullList(); schedule(); } catch(e){} }
 async function loadUsers(){ try { S.users = await pb.send('/api/knigi/admin/users', {}); schedule(); } catch(e){} }
 async function loadGroupCfg(){ try { S.gcfg = await pb.send('/api/knigi/group-config', {}); } catch(e){} }
@@ -1984,6 +2074,8 @@ VIEWS.note = r => {
   const bookId = isNew ? r.q.get('book') || '' : n.book;
   const b = bookId ? byId('books', bookId) : null;
   const own = isNew || n.owner === me().id;
+  // без доступа (правки 4.1) своя заметка открывается только для чтения
+  if(isNew && readOnly()) return `${backLink(bookId ? '#/b/' + bookId : '#/notes', 'Назад')}<section class="card">${roNote()}</section>`;
   const fromG = r.q.get('g') ? byId('groups', r.q.get('g')) : null; // открыли из ленты группы: «Назад» в группу
   const back = fromG ? '#/g/' + fromG.id : b ? '#/b/' + b.id + (kind === 'lesson' ? '?tab=lessons' : '') : '#/notes';
   const backText = fromG ? fromG.name : b ? b.title : 'Заметки';
@@ -1999,16 +2091,16 @@ VIEWS.note = r => {
   const pageLink = p => pdfOk && p ? `<a class="page-link" href="${readHref(b.id, pageFmt, '&p=' + p)}">с. ${p}</a>` : p ? `с. ${p}` : '';
   const epubPlace = isEpView(fmt) ? (isNew ? (ctx && ctx.place) : n.place) || '' : '';
   const epubHref = !isNew && isEpView(fmt) ? noteHref(n) : '';
-  if(!own){
-    // заметка участника группы или общая заметка автора библиотеки
+  if(!own || readOnly()){
+    // заметка участника группы или общая заметка автора библиотеки (или своя без доступа)
     const grpNote = n.group && !n.shared;
-    const who = grpNote ? `${faceHTML(person(n.owner), 'xs')}<p class="note-kind">Заметка · ${esc(isMemberOf(n.group, n.owner) ? nameOf(person(n.owner)) : 'бывший участник')}</p>`
+    const who = own ? `<p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'}</p>` : grpNote ? `${faceHTML(person(n.owner), 'xs')}<p class="note-kind">Заметка · ${esc(isMemberOf(n.group, n.owner) ? nameOf(person(n.owner)) : 'бывший участник')}</p>`
       : `${S.owner ? faceHTML(S.owner, 'xs') : ''}<p class="note-kind">${kind === 'lesson' ? 'Урок' : 'Заметка'} автора библиотеки</p>`;
     return `${backLink(back, backText)}
       <article class="card note-view"><div class="note-top">${who}<span class="ed-state"></span>${fullBtnHTML()}</div>
         <h1>${esc(n.title || 'Без заголовка')}</h1>${n.ai ? `<p class="note-ai">${ICON.ai}Создано ${esc(n.ai)}</p>` : ''}<p class="note-meta">${bookLine}${epubPlace ? ' · ' + (epubHref ? `<a class="page-link" href="${esc(epubHref)}">${esc(placeText(n, b))}</a>` : esc(epubPlace)) : n.page ? ' · ' + pageLink(n.page) : ''} · изменено ${esc(fmtWhen(n.updated))}</p>
         <div class="prose" id="note-body"><p class="muted">Загружаю…</p></div></article>
-      ${kind === 'lesson' ? filesBlock(n, false) : ''}${commentsHTML(n)}`;
+      ${own ? roNote() : ''}${kind === 'lesson' ? filesBlock(n, false) : ''}${commentsHTML(n)}`;
   }
   // «Видно группе»: у новой заметки из группового режима сразу включено, у отправленной в группу можно выключить
   const ng = kind !== 'note' ? null : isNew ? newNoteGroup(r, bookId) : n.group ? byId('groups', n.group) : null;
@@ -2041,7 +2133,7 @@ function hlPage(n, b, own, back, backText){
       <blockquote class="hl-quote">${esc(n.quote || '')}</blockquote>
       <div class="prose hl-thought" id="note-body">${n.body_text ? `<p>${esc(n.body_text)}</p>` : ''}</div>
       <p class="note-meta">${b ? `<a href="#/b/${b.id}">${noteBookText(n, b)}</a>` : noteBookText(n, null) || 'Без книги'}${where ? ' · ' + (href ? `<a class="page-link" href="${esc(href)}">${esc(where)}</a>` : esc(where)) : ''} · ${esc(fmtWhen(n.created))}</p>
-      ${own ? `<div class="row-acts hl-acts"><button type="button" class="btn sm" data-act="hl-thought" data-id="${n.id}">${ICON.pen}<span>Мысль</span></button>
+      ${own && !readOnly() ? `<div class="row-acts hl-acts"><button type="button" class="btn sm" data-act="hl-thought" data-id="${n.id}">${ICON.pen}<span>Мысль</span></button>
         ${groupsOfBook(n.book).length || n.group ? `<button type="button" class="btn sm" data-act="hl-group" data-id="${n.id}">${ICON.people}<span>Видно группе</span></button>` : ''}
         <button type="button" class="btn sm ghost danger" data-act="hl-del" data-id="${n.id}">Удалить цитату</button></div>` : ''}
     </article>
@@ -2061,7 +2153,7 @@ function filesBlock(n, own){
     ${own && isAdmin() && files.some(f => f.ext !== 'pdf') ? '<p class="hint">Если урок виден всем, читатели видят только PDF, остальные файлы видите только вы.</p>' : ''}</section>`;
 }
 async function edMount(r){
-  const own = r.id === 'new' || ((ED.rec && ED.rec.id === r.id ? ED.rec : byId('notes', r.id)) || {}).owner === me().id;
+  const own = !readOnly() && (r.id === 'new' || ((ED.rec && ED.rec.id === r.id ? ED.rec : byId('notes', r.id)) || {}).owner === me().id);
   if(r.id === 'new'){
     if(!ED.isNew || !ED.id){ ED.id = newId(); ED.isNew = true; ED.rec = null; ED.state = ''; }
   } else if(ED.id !== r.id){ ED.id = r.id; ED.isNew = false; ED.rec = null; ED.state = ''; }
@@ -2785,6 +2877,8 @@ async function rdShow(r){
   let fmt = 'pdf';
   if(r.name === 'read'){
     const b = byId('books', r.id);
+    // срок доступа закончился (правки 4.1): книги не открываются
+    if(readOnly()){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(`${accHead(S.access)}: книги сейчас не открываются. Чтобы продлить, напишите: ${S.access.contact || 'администратору'}.`); return; }
     // скрытая книга (правки 4.1): читатель её не открывает
     if(!isAdmin() && (b ? b.hidden : S.notes.some(n => n.book === r.id))){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(NA_TEXT); return; }
     fmt = r.q.get('f') || (b ? defaultFormat(b) : 'pdf');
@@ -4396,7 +4490,7 @@ document.addEventListener('click', async e => {
       try { await pb.collection('note_files').delete(f.id); removeLocal('nfiles', f.id); upPaint(); toast('Файл удалён'); } catch(err){ toast(errText(err)); }
       break;
     }
-    case 'avatar': avatarMenu(a); break;
+    case 'avatar': if(readOnly()){ toast('Без доступа фото не меняется.'); break; } avatarMenu(a); break;
     case 'card-fmt': UI.cardFmt[d.id] = d.f; render(true); break;
     case 'hl-color': UI.hlColor = d.c; render(true); break;
     case 'hl-more': { UI.hlOpen.has(d.id) ? UI.hlOpen.delete(d.id) : UI.hlOpen.add(d.id); render(true); break; }
@@ -4468,6 +4562,7 @@ document.addEventListener('toggle', e => {
   if(e.target.id === 'users-fold' && e.target.open !== UI.usersOpen){ UI.usersOpen = e.target.open; if(UI.usersOpen && isAdmin()) loadUsers(); }
   if(e.target.classList && e.target.classList.contains('desc')) UI.descOpen = e.target.open;
   if(e.target.id === 'ocr-past') UI.ocrPast = e.target.open;
+  if(e.target.classList && e.target.classList.contains('usr-more')){ if(e.target.open) UI.openUser = e.target.dataset.user; else if(UI.openUser === e.target.dataset.user) UI.openUser = ''; }
 }, true);
 window.addEventListener('hashchange', () => {
   if(route().name === 'profile' && isAdmin()){ loadDisk(); loadGCount(); loadOcr(); }
@@ -4494,7 +4589,7 @@ async function accountAction(a, d){
         toast('Пароль изменён'); render(true); break;
       }
       case 'new-invite': {
-        const body = {code: inviteCode(), note: $('#i-note').value.trim(), max_uses: Number($('#i-max').value), uses: 0, expires: $('#i-exp').value};
+        const body = {code: inviteCode(), note: $('#i-note').value.trim(), max_uses: Number($('#i-max').value), uses: 0, expires: $('#i-exp').value, access_period: $('#i-period').value};
         const rec = await pb.collection('invites').create(body);
         S.invites.push(rec); render(true);
         copyText(`${location.origin}/?invite=${rec.code}`);
@@ -4506,7 +4601,19 @@ async function accountAction(a, d){
         await pb.collection('invites').delete(d.id);
         S.invites = S.invites.filter(i => i.id !== d.id); render(true); break;
       }
+      case 'acc': {
+        const note = ($('#un-' + d.id) || {}).value || '';
+        if(d.action === 'suspend' && !arm(a, 'Точно приостановить?')) return;
+        if(d.action === 'set' && !($('#ud-' + d.id) || {}).value){ toast('Выберите дату.'); return; }
+        a.disabled = true;
+        try {
+          await pb.send('/api/knigi/admin/access', {method: 'POST', body: {user: d.id, action: d.action, months: Number(d.months || 0), date: ($('#ud-' + d.id) || {}).value || '', note: note.trim()}});
+        } finally { a.disabled = false; }
+        UI.openUser = d.id;
+        await loadUsers(); render(true); toast(ACC_DONE[d.action] || 'Сохранено'); break;
+      }
       case 'logout': {
+        dropLS('accHide');
         await fetch('/api/knigi/logout', {method: 'POST'}).catch(() => {});
         Object.keys(localStorage).filter(k => k.startsWith('kn_draft_')).forEach(k => localStorage.removeItem(k));
         pb.authStore.clear(); location.hash = ''; location.reload(); break;
