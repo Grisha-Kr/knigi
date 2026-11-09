@@ -80,7 +80,7 @@ onRecordUpdate((e) => { e.record.set("search", require(`${__hooks}/lib.js`).book
 onRecordUpdateRequest((e) => {
   if (!e.hasSuperuserAuth()) {
     const o = e.record.original();
-    for (const f of ["formats", "text_file", "file_size", "pages", "has_text", "status", "status_note", "cover", "pending", "offered_by"]) {
+    for (const f of ["formats", "text_file", "file_size", "pages", "has_text", "status", "status_note", "cover", "pending", "offered_by", "hidden", "opened_at", "kept_for"]) {
       e.record.set(f, o.get(f));
     }
     const title = e.record.getString("title").replace(/\s+/g, " ").trim();
@@ -108,10 +108,10 @@ onRecordAfterUpdateSuccess((e) => {
     }
   }
 }, "books");
-// Кто предложил книгу, видит только администратор.
+// Кто предложил книгу и у кого скрытая книга осталась карточкой (kept_for), видит только администратор.
 onRecordEnrich((e) => {
   const auth = e.requestInfo.auth;
-  if (!(auth && (auth.isSuperuser() || auth.getString("role") === "admin"))) e.record.hide("offered_by", "pending");
+  if (!(auth && (auth.isSuperuser() || auth.getString("role") === "admin"))) e.record.hide("offered_by", "pending", "kept_for");
   e.next();
 }, "books");
 
@@ -134,6 +134,7 @@ onRecordCreateRequest((e) => {
     try { b = $app.findRecordById("books", e.record.getString("book")); } catch (_) {}
     if (!b) throw new BadRequestError("Книга не найдена.");
     if (b.getBool("pending")) throw new BadRequestError("Книга на проверке. На полку она встанет после одобрения.");
+    if (b.getBool("hidden") && !require(`${__hooks}/lib.js`).isAdmin(e.auth)) throw new BadRequestError("Книга временно недоступна.");
     if ($app.countRecords("shelf_books", $dbx.hashExp({ shelf: e.record.getString("shelf"), book: b.id })) > 0) {
       throw new BadRequestError("Эта книга уже стоит на этой полке.");
     }
@@ -205,7 +206,8 @@ routerAdd("GET", "/api/knigi/f/cover/{id}", (e) => {
   const u = F.cookieUser(e);
   let b = null;
   try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
-  if (b && b.getBool("pending") && u.getString("role") !== "admin") b = null; // книгу на проверке видит только администратор
+  // книгу на проверке видит только администратор, скрытую ещё те, у кого она осталась карточкой (правки 4.1)
+  if (!require(`${__hooks}/lib.js`).bookVisible(b, u)) b = null;
   const name = b ? b.getString("cover") : "";
   if (!name) throw new NotFoundError("Обложки нет.");
   const h = e.response.header();
@@ -219,10 +221,8 @@ routerAdd("GET", "/api/knigi/f/cover/{id}", (e) => {
 // переведённым в PDF, FB2, MOBI, AZW3 и TXT переведёнными в EPUB (правки 3.1): view говорит, какой читалкой открывать.
 routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
-  let b = null;
-  try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
-  if (b && b.getBool("pending") && !require(`${__hooks}/lib.js`).isAdmin(e.auth)) b = null;
-  if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  // скрытая книга (правки 4.1): ссылку получает только администратор, читателю «Книга временно недоступна»
+  const b = require(`${__hooks}/lib.js`).openBook(e.request.pathValue("id"), e.auth);
   const fmt = String((e.requestInfo().query || {}).f || "pdf");
   const view = F.VIEW[fmt];
   if (!view) throw new BadRequestError("Такой формат читалка не открывает.");
@@ -245,10 +245,10 @@ routerAdd("GET", "/api/knigi/f/book/{id}", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   const id = e.request.pathValue("id");
   const user = F.linkUser(e, "book", id);
-  let f = null, b = null;
-  try { f = $app.findRecordById("book_files", id); b = $app.findRecordById("books", f.getString("book")); } catch (_) {}
-  if (b && b.getBool("pending") && user.getString("role") !== "admin") b = null;
-  if (!f || !b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  let f = null;
+  try { f = $app.findRecordById("book_files", id); } catch (_) {}
+  if (!f) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  const b = require(`${__hooks}/lib.js`).openBook(f.getString("book"), user); // на проверке или скрыта: не отдаётся
   const name = f.getString("file");
   const size = f.getInt("file_size");
   const whole = F.VIEW[f.getString("format")] === "epub" && !e.request.header.get("Range");
@@ -325,10 +325,7 @@ routerAdd("GET", "/api/knigi/f/file/{id}", (e) => {
 // Прогресс чтения и какие страницы открыты (для журнала). Пишет только сервер.
 routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
-  let b = null;
-  try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
-  if (b && b.getBool("pending") && e.auth.getString("role") !== "admin") b = null;
-  if (!b) throw new NotFoundError("Книга не найдена.");
+  const b = require(`${__hooks}/lib.js`).openBook(e.request.pathValue("id"), e.auth);
   const body = e.requestInfo().body || {};
   // формат файла; читалка PDF (страница: PDF, DjVu) или EPUB (процент и место: EPUB, FB2, MOBI, AZW3, TXT).
   // Старое приложение формат не присылает, это PDF.
@@ -438,6 +435,19 @@ routerAdd("POST", "/api/knigi/books/{id}/reprocess", (e) => {
   }
   F.syncBook(b.id);
   return e.json(200, { ok: true });
+}, $apis.requireAuth("users"));
+
+// Скрыть книгу от читателей или открыть всем (правки 4.1): {hidden: true|false}.
+// При скрытии сервер запоминает читателей, у которых с книгой уже что-то связано: у них остаётся карточка.
+routerAdd("POST", "/api/knigi/books/{id}/visibility", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  let b = null;
+  try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
+  if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  if (b.getBool("pending")) throw new BadRequestError("Книга на проверке. Она откроется всем, когда вы её одобрите.");
+  const hidden = !!(e.requestInfo().body || {}).hidden;
+  const r = require(`${__hooks}/files_lib.js`).setHidden(b, hidden);
+  return e.json(200, { hidden: r.getBool("hidden"), opened_at: r.getString("opened_at") });
 }, $apis.requireAuth("users"));
 
 // Заменить обложку своей картинкой.

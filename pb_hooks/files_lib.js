@@ -463,6 +463,7 @@ function finishUpload(e, up) {
   b.set("formats", [fmt]);
   b.set("file_size", meta.size);
   b.set("status", "processing");
+  b.set("hidden", true); // правки 4.1: новая книга видна только администратору, пока он её не откроет
   if (guess.authors) b.set("authors", lib.splitAuthors(guess.authors).map((n) => lib.authorId($app, n)));
   try {
     $app.runInTransaction((tx) => { tx.save(b); tx.save(fileRec(id)); });
@@ -486,6 +487,8 @@ function finishOffer(e, meta, id, fmt, file) {
       if (!tb) continue;
       rmFile(booksDir(), file);
       if (tb.getBool("pending")) return { kind: "offer", pending: true, message: "Эта книга уже на проверке." };
+      // скрытая книга (правки 4.1): ответ тот же, но без ссылки, открыть её читатель не сможет
+      if (tb.getBool("hidden")) return { kind: "offer", duplicate: { title: tb.getString("title") }, message: "Эта книга уже есть в библиотеке." };
       return { kind: "offer", duplicate: { id: tb.id, title: tb.getString("title") }, message: "Эта книга уже есть в библиотеке." };
     }
   }
@@ -551,6 +554,8 @@ function approveOffer(e, id, shelves) {
   $app.runInTransaction((tx) => {
     const r = tx.findRecordById("books", b.id);
     r.set("pending", false);
+    r.set("hidden", false); // книгу ждёт тот, кто её предложил: она сразу видна всем (правки 4.1)
+    r.set("opened_at", new Date().toISOString().replace("T", " "));
     tx.save(r);
     // файлы книги сохраняем заново: так приложения читателей сразу получают их живым обновлением
     for (const f of filesOf(b.id, tx)) tx.save(f);
@@ -1168,6 +1173,63 @@ function mergeBooks(book, other) {
   if (otherCover && !keepCover) rmFile(coversDir(), otherCover);
   lib.dropLonelyAuthors($app, otherAuthors);
   syncBook(book.id);
+  // видимость остаётся у первой книги; если она скрыта, к ней перешли записи читателей второй
+  if (book.getBool("hidden")) syncKept(book.id);
+  else if (other.getBool("hidden")) notifyVisibility(book.id, false);
+}
+
+/* ---------- Скрытые книги (правки 4.1) ---------- */
+// Читатели, у которых с книгой что-то связано: цитаты, заметки, «Читаю» и «Прочитано», прогресс,
+// личная полка, группа (текущая или прочитанная книга группы). Им видна карточка книги, файлы нет.
+function keepFor(bookId, app) {
+  app = app || $app;
+  const rows = arrayOf(new DynamicModel({ u: "" }));
+  app.db().newQuery(`SELECT DISTINCT x.u AS u FROM (
+      SELECT "user" AS u FROM reading WHERE book = {:b}
+      UNION SELECT "user" FROM marks WHERE book = {:b}
+      UNION SELECT owner FROM notes WHERE book = {:b}
+      UNION SELECT s.owner FROM shelf_books sb JOIN shelves s ON s.id = sb.shelf WHERE sb.book = {:b} AND s.common = FALSE
+      UNION SELECT gm."user" FROM group_books gb JOIN group_members gm ON gm."group" = gb."group" WHERE gb.book = {:b}
+      UNION SELECT gm."user" FROM "groups" g JOIN group_members gm ON gm."group" = g.id WHERE g.book = {:b}
+    ) x JOIN users u ON u.id = x.u WHERE u.role != 'admin' AND x.u != ''`).bind({ b: bookId }).all(rows);
+  return rows.map((r) => r.u).sort();
+}
+// Приложения, которым книга перестала быть видна, сами этого не узнают (PocketBase не шлёт им событие),
+// поэтому всем открытым приложениям уходит короткое сообщение: читатели перечитывают книги, полки и файлы.
+function notifyVisibility(bookId, hidden) {
+  try {
+    const msg = new SubscriptionMessage({ name: "knigi_books", data: JSON.stringify({ id: bookId, hidden: !!hidden }) });
+    const clients = $app.subscriptionsBroker().clients();
+    for (const id in clients) {
+      if (clients[id].hasSubscription("knigi_books")) clients[id].send(msg);
+    }
+  } catch (err) { $app.logger().warn("Сообщение о видимости книги не отправлено", "error", String(err)); }
+}
+// Обновить kept_for скрытой книги (после объединения, вступления в группу)
+function syncKept(bookId) {
+  let b = null;
+  try { b = $app.findRecordById("books", bookId); } catch (_) { return; }
+  if (!b.getBool("hidden")) return;
+  const list = keepFor(b.id);
+  if (list.join(",") === b.getStringSlice("kept_for").slice().sort().join(",")) return;
+  b.set("kept_for", list);
+  $app.save(b);
+  notifyVisibility(b.id, true);
+}
+// Скрыть книгу или открыть всем
+function setHidden(book, hidden) {
+  const r = $app.findRecordById("books", book.id);
+  if (hidden) {
+    r.set("kept_for", keepFor(r.id));
+  } else {
+    if (r.getBool("hidden") || !r.getString("opened_at")) r.set("opened_at", new Date().toISOString().replace("T", " "));
+    r.set("kept_for", []);
+  }
+  const changed = r.getBool("hidden") !== hidden;
+  r.set("hidden", hidden);
+  $app.save(r);
+  if (changed) notifyVisibility(r.id, hidden);
+  return r;
 }
 
 module.exports = {
@@ -1175,7 +1237,7 @@ module.exports = {
   fileKey, LINK_TTL, setCookie, clearCookie, cookieUser, makeLink, linkUser, watermarkFor, watermarkCfg,
   MAX_SPAN, EPUB_MAX, parseRange, noStore, takeBytes, logBytes, logPages, cleanLog,
   CHUNK, KINDS, startUpload, saveChunk, finishUpload, dropUpload, uploadDir, uploadKind, cleanUploads, fromFileName,
-  OFFER_MAX, approveOffer, rejectOffer,
+  OFFER_MAX, approveOffer, rejectOffer, keepFor, syncKept, setHidden, notifyVisibility,
   processQueue, replaceCover, deleteBook, filesOf, syncBook, FMT_NAME, VIEW, formatInfo, removeFormat, mergeInfo, mergeBooks, htmlText,
   pdfInfo, optimizePdf, pdfText, fileSize, newId,
 };

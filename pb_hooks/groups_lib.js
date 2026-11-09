@@ -74,11 +74,13 @@ function addMember(app, g, userId) {
   m.set("book_seen", g.getString("book"));
   app.save(m);
 }
-// Книга для группы: есть в библиотеке и не на проверке
+// Книга для группы: есть в библиотеке, не на проверке и не скрыта
 function groupBook(app, bookId) {
   let b = null;
   try { b = app.findRecordById("books", String(bookId || "")); } catch (_) {}
   if (!b || b.getBool("pending")) throw new BadRequestError("Выберите книгу из библиотеки.");
+  // скрытую книгу (правки 4.1) группе не выбрать: читатели её не откроют
+  if (b.getBool("hidden")) throw new BadRequestError("Эта книга скрыта от читателей. Выберите другую или сначала откройте её всем.");
   return b;
 }
 function startBook(app, g, b) {

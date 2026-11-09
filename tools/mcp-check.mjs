@@ -127,7 +127,12 @@ async function upload(token, name, buf, kind) {
   if (kind === "offer") return r.data;
   for (let i = 0; i < 60; i++) {
     const b = await req("GET", `/api/collections/books/records/${r.data.id}`, { token });
-    if (b.data && b.data.status !== "processing") return b.data;
+    if (b.data && b.data.status !== "processing") {
+      // правки 4.1: новая книга скрыта, для этой проверки открываем её всем
+      const v = await req("POST", `/api/knigi/books/${b.data.id}/visibility`, { token, json: { hidden: false } });
+      if (v.status !== 200) throw new Error("visibility: " + v.text);
+      return { ...b.data, hidden: false };
+    }
     await new Promise((res) => setTimeout(res, 500));
   }
   throw new Error("Книга не обработалась за 30 секунд");
@@ -326,6 +331,15 @@ async function flow(svc, D) {
   ok(!c.res.isError && /Chapter 1 · с\. 1/.test(c.text) && /заметок [1-9]/.test(c.text) && /цитат 1/.test(c.text) && /напечатанный/i.test(c.text), "get_book PDF: оглавление, счётчики, номера страниц", c.text);
   c = await call(access, "get_book", { book_id: D.epub.id });
   ok(!c.res.isError && /Разделы/.test(c.text) && /Глава первая/.test(c.text), "get_book EPUB: разделы", c.text);
+  // правки 4.1: помощник работает с правами владельца и видит скрытые книги с пометкой
+  await req("POST", `/api/knigi/books/${D.epub.id}/visibility`, { token: D.admin, json: { hidden: true } });
+  c = await call(access, "search_books", { query: "ёлка" });
+  ok(!c.res.isError && c.text.includes(D.epub.id) && c.text.includes("скрыта от читателей"), "search_books: скрытая книга с пометкой «скрыта от читателей»", c.text);
+  c = await call(access, "get_book", { book_id: D.epub.id });
+  ok(!c.res.isError && /Видимость: скрыта от читателей/.test(c.text), "get_book: «скрыта от читателей»", c.text);
+  await req("POST", `/api/knigi/books/${D.epub.id}/visibility`, { token: D.admin, json: { hidden: false } });
+  c = await call(access, "get_book", { book_id: D.epub.id });
+  ok(!c.res.isError && /Видимость: видна всем читателям/.test(c.text), "get_book: после открытия «видна всем читателям»", c.text);
   c = await call(access, "read_book", { book_id: D.pdf.id, from: 3, to: 4 });
   ok(!c.res.isError && c.text.includes("=== Страница 3 (в книге: 1) ===") && c.text.includes("golden morning light"), "read_book PDF с. 3-4, напечатанный номер в скобках", c.text);
   c = await call(access, "read_book", { book_id: D.epub.id, from: 1 });

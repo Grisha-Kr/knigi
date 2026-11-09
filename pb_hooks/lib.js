@@ -12,6 +12,30 @@ function requireAdmin(e) {
   if (!isAdmin(e.auth)) throw new ForbiddenError("Это может сделать только администратор библиотеки.");
 }
 
+/* ---------- Видимость книги (правки 4.1) ---------- */
+// Книгу на проверке (pending) видит только администратор. Скрытую (hidden) видит администратор, а читатель
+// только если он в kept_for (у него с книгой уже что-то было): тогда ему видна карточка, но не файл.
+const keptFor = (b, userId) => b.getStringSlice("kept_for").indexOf(userId) >= 0;
+function bookVisible(b, user) {
+  if (!b) return false;
+  if (isAdmin(user)) return true;
+  if (b.getBool("pending")) return false;
+  return !b.getBool("hidden") || (!!user && keptFor(b, user.id));
+}
+// Можно ли открыть файл книги: книга не на проверке и не скрыта (администратору всегда)
+function bookOpen(b, user) {
+  return !!b && (isAdmin(user) || (!b.getBool("pending") && !b.getBool("hidden")));
+}
+const HIDDEN_MSG = "Книга временно недоступна.";
+// Книга для ссылки на файл и прогресса: не видна совсем → 404, видна только карточкой → 403 «временно недоступна»
+function openBook(id, user) {
+  let b = null;
+  try { b = $app.findRecordById("books", String(id || "")); } catch (_) {}
+  if (!bookVisible(b, user)) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  if (!bookOpen(b, user)) throw new ForbiddenError(HIDDEN_MSG);
+  return b;
+}
+
 // Строка для поиска: строчными, ё = е, без лишних пробелов
 function norm(s) {
   return String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[«»"„“”]/g, "").replace(/\s+/g, " ").trim();
@@ -207,7 +231,13 @@ function checkNote(e) {
   if (bookId) {
     let b = null;
     try { b = $app.findRecordById("books", bookId); } catch (_) {}
-    if (b && b.getBool("pending") && !admin) b = null; // книга на проверке: её видит только администратор
+    // книга на проверке видна только администратору; скрытая (правки 4.1) тем, у кого она осталась карточкой.
+    // Правка своей старой записи к скрытой книге разрешена всегда, если книгу в записи не меняют.
+    const same = o && o.getString("book") === bookId;
+    if (b && !same && !bookVisible(b, e.auth)) {
+      if (b.getBool("hidden") && !b.getBool("pending")) throw new BadRequestError(HIDDEN_MSG);
+      b = null;
+    }
     if (!b) throw new BadRequestError("Книга не найдена: возможно, её удалили.");
     r.set("book_title", b.getString("title"));
   }
@@ -226,7 +256,10 @@ function checkMark(e) {
     r.set("user", e.auth.id);
     let b = null;
     try { b = $app.findRecordById("books", r.getString("book")); } catch (_) {}
-    if (b && b.getBool("pending") && !admin) b = null;
+    if (b && !bookVisible(b, e.auth)) {
+      if (b.getBool("hidden") && !b.getBool("pending")) throw new BadRequestError(HIDDEN_MSG);
+      b = null;
+    }
     if (!b) throw new BadRequestError("Книга не найдена: возможно, её удалили.");
     if ($app.countRecords("marks", $dbx.hashExp({ user: e.auth.id, book: b.id })) > 0) {
       throw new BadRequestError("Отметка у этой книги уже есть. Обновите страницу.");
@@ -455,7 +488,7 @@ function mailOfferDecision(offer) {
 }
 
 module.exports = {
-  MB, isAdmin, requireAdmin, norm, sortName, splitAuthors, authorId, bookSearch, dropLonelyAuthors,
+  MB, isAdmin, requireAdmin, norm, bookVisible, bookOpen, openBook, HIDDEN_MSG, sortName, splitAuthors, authorId, bookSearch, dropLonelyAuthors,
   MAX_DEPTH, shelfDepth, checkShelfCreate, checkShelfUpdate, checkShelfDelete,
   cleanHtml, plainText, checkNote, checkRegistration, HL_COLORS,
   MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,

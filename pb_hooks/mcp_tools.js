@@ -225,7 +225,7 @@ function fileLine(f, b) {
 function bookBrief(b, userId, n) {
   const list = files(b);
   const authors = authorNames(b);
-  const lines = [`${n ? n + ". " : ""}«${b.getString("title")}» (id: ${b.id})`];
+  const lines = [`${n ? n + ". " : ""}«${b.getString("title")}» (id: ${b.id})${b.getBool("hidden") ? " · скрыта от читателей" : ""}`];
   const info = [];
   if (authors.length) info.push("автор: " + authors.join(", "));
   if (b.getInt("year")) info.push("год: " + b.getInt("year"));
@@ -557,6 +557,8 @@ H.get_book = (a, ctx) => {
   if (authors.length) out.push("Авторы: " + authors.join(", "));
   if (b.getInt("year")) out.push("Год: " + b.getInt("year"));
   out.push("Добавлена в библиотеку: " + day(b.getString("created")));
+  // правки 4.1: скрытую книгу видит только владелец библиотеки
+  out.push("Видимость: " + (b.getBool("hidden") ? "скрыта от читателей (видна только владельцу библиотеки)" : "видна всем читателям"));
   out.push("Ссылка в приложении: " + appLink(ctx, "/b/" + b.id));
   if (b.getString("description")) out.push("Описание: " + L().plainText(b.getString("description")).slice(0, 4000));
   out.push("\nФорматы:\n" + (list.map((f) => "- " + fileLine(f, b)).join("\n") || "- нет"));

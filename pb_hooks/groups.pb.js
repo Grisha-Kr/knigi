@@ -143,6 +143,9 @@ routerAdd("POST", "/api/knigi/join/{code}", (e) => {
     G.checkRoom($app, g.id);
     G.checkLimit($app, e.auth.id);
     G.addMember($app, g, e.auth.id);
+    // скрытые книги группы (правки 4.1): новому участнику видна их карточка, как остальным
+    const F = require(`${__hooks}/files_lib.js`);
+    for (const gb of $app.findRecordsByFilter("group_books", "group = {:g} && book != ''", "", 0, 0, { g: g.id })) F.syncKept(gb.getString("book"));
   }
   return e.json(200, { id: g.id });
 }, GROUP_AUTH);
