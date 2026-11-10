@@ -222,10 +222,16 @@ function fileLine(f, b) {
   if (b && f.id === b.getString("text_file")) parts.push("основной текст");
   return parts.join(", ");
 }
+// Скрытая книга (правки 4.1): «скрыта от читателей» или, если её открыли отдельным читателям (правки 4.3),
+// «скрыта, открыта: Анна, Пётр»
+function hiddenText(b) {
+  const names = L().bookReaders(b.id).map((r) => r.name);
+  return names.length ? "скрыта, открыта: " + names.join(", ") : "скрыта от читателей";
+}
 function bookBrief(b, userId, n) {
   const list = files(b);
   const authors = authorNames(b);
-  const lines = [`${n ? n + ". " : ""}«${b.getString("title")}» (id: ${b.id})${b.getBool("hidden") ? " · скрыта от читателей" : ""}`];
+  const lines = [`${n ? n + ". " : ""}«${b.getString("title")}» (id: ${b.id})${b.getBool("hidden") ? " · " + hiddenText(b) : ""}`];
   const info = [];
   if (authors.length) info.push("автор: " + authors.join(", "));
   if (b.getInt("year")) info.push("год: " + b.getInt("year"));
@@ -558,7 +564,8 @@ H.get_book = (a, ctx) => {
   if (b.getInt("year")) out.push("Год: " + b.getInt("year"));
   out.push("Добавлена в библиотеку: " + day(b.getString("created")));
   // правки 4.1: скрытую книгу видит только владелец библиотеки
-  out.push("Видимость: " + (b.getBool("hidden") ? "скрыта от читателей (видна только владельцу библиотеки)" : "видна всем читателям"));
+  out.push("Видимость: " + (!b.getBool("hidden") ? "видна всем читателям"
+    : L().bookReaders(b.id).length ? hiddenText(b) + " (остальным читателям не видна)" : "скрыта от читателей (видна только владельцу библиотеки)"));
   out.push("Ссылка в приложении: " + appLink(ctx, "/b/" + b.id));
   if (b.getString("description")) out.push("Описание: " + L().plainText(b.getString("description")).slice(0, 4000));
   out.push("\nФорматы:\n" + (list.map((f) => "- " + fileLine(f, b)).join("\n") || "- нет"));

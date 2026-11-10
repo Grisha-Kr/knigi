@@ -923,3 +923,36 @@ dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 32px)}
 .usr-log .d{font-weight:700}
 .usr-mark{align-self:flex-start}
 .tag.nomark{background:var(--chip);color:var(--muted)}
+
+/* ---------- Книга для отдельных читателей (правки 4.3) ---------- */
+.readers-box{border:0;margin:0;padding:0;min-width:0;display:flex;flex-direction:column;gap:8px}
+.readers-box legend{padding:0;margin-bottom:6px}
+.readers-list{display:flex;flex-direction:column;border:1.5px solid var(--field-line);border-radius:12px;overflow:hidden}
+.reader-row{display:flex;align-items:center;gap:10px;min-height:48px;padding:6px 12px;cursor:pointer;border-top:1px solid var(--line)}
+.reader-row:first-child{border-top:0}
+.reader-row > .rr-t{display:flex;flex-direction:column;flex:1;min-width:0;font-size:14.5px}
+.reader-row small{color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pick-row.off{cursor:default;opacity:.55}
+.pick-row.off small{color:var(--ochre-ink);font-weight:600}
+/* «Открыта читателям»: поиск и участники группы (дополнение к правкам 4.3, часть А) */
+.reader-row .rr-x{min-height:36px;padding:0 10px;gap:4px;flex:none;color:var(--muted)}
+.reader-row .rr-x svg{width:16px;height:16px}
+.rr-empty{padding:10px 12px}
+.rd-search{margin-top:4px}
+.readers-hits{display:flex;flex-direction:column;gap:2px}
+.readers-hits:empty{display:none}
+.rr-hit{appearance:none;width:100%;text-align:left;border:1.5px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);font:inherit}
+.rr-hit:disabled{opacity:.6;cursor:default}
+.rr-add{flex:none;color:var(--accent-text);font-size:12.5px;display:grid;place-items:center}
+.rr-add svg{width:20px;height:20px}
+.readers-box > .btn.sm{align-self:flex-start}
+#rd-groups:empty{display:none}
+.usr-books{display:flex;flex-direction:column;gap:6px}
+.usr-books .hint{margin:0}
+.ub-chip{display:inline-flex;align-items:center;gap:6px;padding-right:4px}
+.ub-chip a{color:inherit;text-decoration:none;font-weight:600}
+.ub-chip small{color:var(--muted)}
+.ub-x{appearance:none;border:0;background:none;color:var(--muted);width:32px;height:32px;display:grid;place-items:center;cursor:pointer;border-radius:50%;padding:0}
+.ub-x svg{width:15px;height:15px}
+.dlg-body > *{flex-shrink:0}
+#rd-groups .pick-row > svg:first-child{width:22px;height:22px;flex:none;margin:0;stroke:var(--accent-text)}

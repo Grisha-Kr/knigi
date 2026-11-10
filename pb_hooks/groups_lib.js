@@ -74,14 +74,37 @@ function addMember(app, g, userId) {
   m.set("book_seen", g.getString("book"));
   app.save(m);
 }
-// Книга для группы: есть в библиотеке, не на проверке и не скрыта
-function groupBook(app, bookId) {
+// Книга для группы: есть в библиотеке, не на проверке и её видят все участники группы (members: id участников).
+// Скрытую ото всех книгу группе не выбрать (правки 4.1); скрытую, но открытую отдельным читателям (правки 4.3),
+// можно, только если она открыта каждому участнику-читателю.
+function groupBook(app, bookId, members) {
+  const L = require(`${__hooks}/lib.js`);
   let b = null;
   try { b = app.findRecordById("books", String(bookId || "")); } catch (_) {}
   if (!b || b.getBool("pending")) throw new BadRequestError("Выберите книгу из библиотеки.");
-  // скрытую книгу (правки 4.1) группе не выбрать: читатели её не откроют
-  if (b.getBool("hidden")) throw new BadRequestError("Эта книга скрыта от читателей. Выберите другую или сначала откройте её всем.");
+  if (b.getBool("hidden")) {
+    const readers = app.findRecordsByFilter("book_access", "book = {:b}", "", 0, 0, { b: b.id }).map((r) => r.getString("user"));
+    if (!readers.length) throw new BadRequestError("Эта книга скрыта от читателей. Выберите другую или сначала откройте её всем.");
+    for (const uid of members || []) {
+      let u = null;
+      try { u = app.findRecordById("users", uid); } catch (_) {}
+      if (u && !L.isAdmin(u) && readers.indexOf(uid) < 0) throw new BadRequestError("Книга открыта не всем участникам группы. Выберите другую или откройте её всем.");
+    }
+  }
   return b;
+}
+// Скрытые книги, которые эта группа выбрать не может (для окна выбора книги, правки 4.3)
+function blockedBooks(app, groupId) {
+  const L = require(`${__hooks}/lib.js`);
+  const members = app.findRecordsByFilter("group_members", "group = {:g}", "", 0, 0, { g: groupId })
+    .map((m) => m.getString("user"))
+    .filter((uid) => { try { return !L.isAdmin(app.findRecordById("users", uid)); } catch (_) { return false; } });
+  const out = [];
+  for (const b of app.findRecordsByFilter("books", "hidden = true && pending = false", "", 0, 0)) {
+    const readers = app.findRecordsByFilter("book_access", "book = {:b}", "", 0, 0, { b: b.id }).map((r) => r.getString("user"));
+    if (!readers.length || members.some((uid) => readers.indexOf(uid) < 0)) out.push(b.id);
+  }
+  return out;
 }
 function startBook(app, g, b) {
   const gb = new Record(app.findCollectionByNameOrId("group_books"));
@@ -281,6 +304,6 @@ function groupState(app, g, day, from) {
 
 module.exports = {
   CFG, config, clientDay, newCode, isMember, memberGroup, ownGroup, groupByCode, checkLimit, checkRoom, addMember,
-  groupBook, startBook, currentGroupBook, removeMember, handOverGroups, shareGroup,
+  groupBook, blockedBooks, startBook, currentGroupBook, removeMember, handOverGroups, shareGroup,
   checkNoteGroup, checkCommentCreate, checkCommentUpdate, checkPlan, recordRead, groupState, nowStr,
 };

@@ -106,7 +106,7 @@ routerAdd("POST", "/api/knigi/groups", (e) => {
   if (name.length > 100) throw new BadRequestError("Название группы слишком длинное: не больше 100 знаков.");
   if (desc.length > 1000) throw new BadRequestError("Описание слишком длинное: не больше 1000 знаков.");
   if (!body.book) throw new BadRequestError("Выберите первую книгу группы.");
-  const b = G.groupBook($app, body.book);
+  const b = G.groupBook($app, body.book, [e.auth.id]); // пока в группе только создатель
   G.checkLimit($app, e.auth.id);
   let id = "";
   $app.runInTransaction((tx) => {
@@ -202,12 +202,21 @@ routerAdd("POST", "/api/knigi/groups/{id}/leave", (e) => {
   return e.json(200, { deleted: false });
 }, GROUP_AUTH);
 
+// Какие книги этой группе выбрать нельзя: скрытые, которые открыты не всем участникам (правки 4.3).
+// Только создателю: он выбирает следующую книгу.
+routerAdd("GET", "/api/knigi/groups/{id}/blocked-books", (e) => {
+  const G = require(`${__hooks}/groups_lib.js`);
+  const g = G.ownGroup($app, e.request.pathValue("id"), e.auth.id);
+  return e.json(200, { blocked: G.blockedBooks($app, g.id) });
+}, GROUP_AUTH);
+
 // «Книга прочитана, выбрать следующую» {book}: текущая уходит в прочитанные с датой, план по ней закрывается.
 routerAdd("POST", "/api/knigi/groups/{id}/book", (e) => {
   require(`${__hooks}/access_lib.js`).guard(e); // без доступа (правки 4.1) нельзя
   const G = require(`${__hooks}/groups_lib.js`);
   const g = G.ownGroup($app, e.request.pathValue("id"), e.auth.id);
-  const b = G.groupBook($app, (e.requestInfo().body || {}).book);
+  const members = $app.findRecordsByFilter("group_members", "group = {:g}", "", 0, 0, { g: g.id }).map((m) => m.getString("user"));
+  const b = G.groupBook($app, (e.requestInfo().body || {}).book, members);
   if (b.id === g.getString("book")) throw new BadRequestError("Группа уже читает эту книгу.");
   $app.runInTransaction((tx) => {
     for (const gb of tx.findRecordsByFilter("group_books", "group = {:g} && finished_at = ''", "", 0, 0, { g: g.id })) {

@@ -138,7 +138,8 @@ onRecordCreateRequest((e) => {
     try { b = $app.findRecordById("books", e.record.getString("book")); } catch (_) {}
     if (!b) throw new BadRequestError("Книга не найдена.");
     if (b.getBool("pending")) throw new BadRequestError("Книга на проверке. На полку она встанет после одобрения.");
-    if (b.getBool("hidden") && !require(`${__hooks}/lib.js`).isAdmin(e.auth)) throw new BadRequestError("Книга временно недоступна.");
+    // скрытая книга (правки 4.1) встаёт на полку, только если человеку она открыта (правки 4.3)
+    if (!require(`${__hooks}/lib.js`).bookOpen(b, e.auth)) throw new BadRequestError("Книга временно недоступна.");
     if ($app.countRecords("shelf_books", $dbx.hashExp({ shelf: e.record.getString("shelf"), book: b.id })) > 0) {
       throw new BadRequestError("Эта книга уже стоит на этой полке.");
     }
@@ -212,7 +213,8 @@ routerAdd("GET", "/api/knigi/f/cover/{id}", (e) => {
   const u = F.cookieUser(e);
   let b = null;
   try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
-  // книгу на проверке видит только администратор, скрытую ещё те, у кого она осталась карточкой (правки 4.1)
+  // книгу на проверке видит только администратор, скрытую ещё те, кому она открыта (правки 4.3)
+  // и у кого она осталась карточкой (правки 4.1)
   if (!require(`${__hooks}/lib.js`).bookVisible(b, u)) b = null;
   const name = b ? b.getString("cover") : "";
   if (!name) throw new NotFoundError("Обложки нет.");
@@ -462,6 +464,80 @@ routerAdd("POST", "/api/knigi/books/{id}/visibility", (e) => {
   const hidden = !!(e.requestInfo().body || {}).hidden;
   const r = require(`${__hooks}/files_lib.js`).setHidden(b, hidden);
   return e.json(200, { hidden: r.getBool("hidden"), opened_at: r.getString("opened_at") });
+}, $apis.requireAuth("users"));
+
+// Кому открыта скрытая книга (правки 4.3): {users: [id читателей]}. Список хранится и когда книга видна всем,
+// а действует, только пока она скрыта. Убранному читателю книга видна как скрытая в правках 4.1:
+// если у него с ней что-то было, карточка «Книга временно недоступна», всё его сохраняется.
+routerAdd("GET", "/api/knigi/books/{id}/readers", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  lib.requireAdmin(e);
+  let b = null;
+  try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
+  if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  return e.json(200, { hidden: b.getBool("hidden"), readers: lib.bookReaders(b.id) });
+}, $apis.requireAuth("users"));
+routerAdd("POST", "/api/knigi/books/{id}/readers", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  lib.requireAdmin(e);
+  let b = null;
+  try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
+  if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  if (b.getBool("pending")) throw new BadRequestError("Книга на проверке. Сначала одобрите её.");
+  // {users: [...]} заменяет список целиком; {add: [...]} и {remove: [...]} добавляют и убирают отдельных людей
+  const body = e.requestInfo().body || {};
+  const ids = (x) => (Array.isArray(x) ? x : []).map(String);
+  const cur = $app.findRecordsByFilter("book_access", "book = {:b}", "", 0, 0, { b: b.id }).map((r) => r.getString("user"));
+  let list = Array.isArray(body.users) ? ids(body.users) : cur.concat(ids(body.add));
+  const drop = ids(body.remove);
+  list = list.filter((id) => drop.indexOf(id) < 0);
+  const want = [];
+  for (const id of list.slice(0, 2000)) {
+    if (want.indexOf(id) >= 0) continue;
+    let u = null;
+    try { u = $app.findRecordById("users", id); } catch (_) {}
+    if (!u) throw new BadRequestError("Читатель не найден: возможно, его удалили. Обновите страницу.");
+    if (lib.isAdmin(u)) continue; // администратору книга видна и так
+    want.push(u.id);
+  }
+  $app.runInTransaction((tx) => {
+    const col = tx.findCollectionByNameOrId("book_access");
+    const have = tx.findRecordsByFilter("book_access", "book = {:b}", "", 0, 0, { b: b.id });
+    for (const r of have) if (want.indexOf(r.getString("user")) < 0) tx.delete(r);
+    const had = have.map((r) => r.getString("user"));
+    for (const uid of want) {
+      if (had.indexOf(uid) >= 0) continue;
+      const r = new Record(col);
+      r.set("book", b.id);
+      r.set("user", uid);
+      r.set("added_by", e.auth.id);
+      tx.save(r);
+    }
+  });
+  const F = require(`${__hooks}/files_lib.js`);
+  // у убранных читателей с записями книга остаётся карточкой «временно недоступна»
+  F.syncKept(b.id);
+  F.notifyVisibility(b.id, b.getBool("hidden"));
+  return e.json(200, { hidden: b.getBool("hidden"), readers: lib.bookReaders(b.id) });
+}, $apis.requireAuth("users"));
+
+// Найти читателя для списка «Открыта читателям» (правки 4.3): от 2 букв, до 10 совпадений по имени или почте,
+// без учёта регистра (в том числе кириллицы). Весь список пользователей приложению не отдаётся.
+routerAdd("GET", "/api/knigi/admin/user-search", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  lib.requireAdmin(e);
+  const q = lib.norm((e.requestInfo().query || {}).q || "");
+  if (q.length < 2) return e.json(200, { users: [] });
+  const rows = arrayOf(new DynamicModel({ id: "", name: "", email: "", avatar: "" }));
+  $app.db().newQuery("SELECT id, name, email, avatar FROM users WHERE role != 'admin' ORDER BY name, email").all(rows);
+  const words = q.split(" ");
+  const out = [];
+  for (const r of rows) {
+    const hay = lib.norm(r.name + " " + r.email);
+    if (words.every((w) => hay.indexOf(w) >= 0)) out.push({ id: r.id, name: r.name || r.email, email: r.email, avatar: r.avatar });
+    if (out.length >= 10) break;
+  }
+  return e.json(200, { users: out });
 }, $apis.requireAuth("users"));
 
 // Заменить обложку своей картинкой.

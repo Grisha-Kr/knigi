@@ -91,9 +91,10 @@ const ICON = {
 const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], notes:[], nfiles:[], marks:[], offers:[], pbooks:[], invites:[], users:[], owner:null, loaded:false, disk:null, mail:null,
   groups:[], gmembers:[], gbooks:[], gplan:[], comments:[], people:[], gcfg:{maxPerUser: 5, maxMembers: 25, plan: true}, gcount:null,
   ocr:null, // ocr: очередь распознавания (правки 3.1, только администратору, GET /api/knigi/ocr)
-  access:null}; // access: срок доступа (правки 4.1, GET /api/knigi/access)
+  access:null, // access: срок доступа (правки 4.1, GET /api/knigi/access)
+  bacc:[]}; // bacc: кому открыты скрытые книги (правки 4.3, book_access): у читателя свои строки, у администратора все
 const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files', marks:'marks', offers:'book_offers', pbooks:'books',
-  groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users'};
+  groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users', bacc:'book_access'};
 const KEYS = Object.keys(PBN);
 const loadKeys = () => KEYS.filter(k => k !== 'pbooks' || isAdmin());
 const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS + (isAdmin() ? ',offered_by' : ''), filter: 'pending = false'}), pbooks: () => ({fields: BOOK_FIELDS + ',offered_by,pending', filter: 'pending = true'}),
@@ -203,22 +204,30 @@ const shelfDepth = s => shelfPath(s).length;
 function shelfCount(s){
   const ids = new Set();
   const walk = x => { S.sbooks.forEach(sb => { if(sb.shelf === x.id) ids.add(sb.book); }); S.shelves.filter(c => c.parent === x.id).forEach(walk); };
-  walk(s); if(!isAdmin()) for(const id of [...ids]){ const b = byId('books', id); if(b && b.hidden && s.common) ids.delete(id); } return ids.size;
+  walk(s); if(!isAdmin()) for(const id of [...ids]){ const b = byId('books', id); if(b && bookNA(b) && s.common) ids.delete(id); } return ids.size;
 }
 const booksOfAuthor = id => libBooks().filter(b => (b.authors || []).includes(id));
 const notesOfBook = id => S.notes.filter(n => n.book === id);
 const myHls = id => S.notes.filter(n => n.book === id && n.kind === 'highlight' && n.owner === me().id);
 const titleSort = (a, b) => collator.compare(a.title || '', b.title || '');
-/* ---------- Скрытые книги (правки 4.1) ---------- */
-// Скрытую книгу видит администратор (пометка «Видна только вам»). Читатель видит её, только если у него
-// с ней что-то связано: карточка «Книга временно недоступна», без чтения. В списках библиотеки её нет.
-const bookNA = b => !!b && !!b.hidden && !isAdmin();
-const libBooks = () => isAdmin() ? S.books : S.books.filter(b => !b.hidden);
+/* ---------- Скрытые книги (правки 4.1 и 4.3) ---------- */
+// Скрытую книгу видит администратор. Если он открыл её отдельным читателям (book_access), у них она как обычная.
+// Остальной читатель видит её, только если у него с ней что-то связано: карточка «Книга временно недоступна», без чтения.
+const myAccess = id => S.bacc.find(x => x.book === id && x.user === me().id);
+const bookReaders = id => S.bacc.filter(x => x.book === id).map(x => S.users.find(u => u.id === x.user)).filter(Boolean)
+  .sort((a, b) => collator.compare(a.name || a.email || '', b.name || b.email || ''));
+const bookNA = b => !!b && !!b.hidden && !isAdmin() && !myAccess(b.id);
+const libBooks = () => isAdmin() ? S.books : S.books.filter(b => !bookNA(b));
 // Запись к книге, которой у читателя нет (скрыта или на проверке): ссылка в читалку ведёт сюда, нажатие пишет сообщение
 const NA_HREF = '#/na';
 const NA_TEXT = 'Книга временно недоступна.';
-// Когда книга открыта всем: «Недавно добавленные» у читателей считаются по этой дате
-const addedAt = b => String((!isAdmin() && b.opened_at) || b.created || '');
+// Когда книга открыта всем или этому читателю (правки 4.3): «Недавно добавленные» у читателей считаются по этой дате
+function addedAt(b){
+  if(isAdmin()) return String(b.created || '');
+  const a = myAccess(b.id), opened = !b.hidden && b.opened_at ? String(b.opened_at) : '';
+  const mine = a ? String(a.created || '') : '';
+  return (opened && mine ? (opened < mine ? opened : mine) : opened || mine) || String(b.opened_at || b.created || '');
+}
 // Название книги в записи: книги нет совсем (удалена) или она временно недоступна
 function noteBookText(n, b){
   if(b) return esc(b.title) + (bookNA(b) ? ' <span class="muted">(временно недоступна)</span>' : '');
@@ -244,7 +253,7 @@ async function subscribeAll(){
   let visT = 0;
   await pb.realtime.subscribe('knigi_books', () => {
     if(isAdmin()) return;
-    clearTimeout(visT); visT = setTimeout(() => loadAll(['books', 'bfiles', 'sbooks']).catch(() => {}), 300);
+    clearTimeout(visT); visT = setTimeout(() => loadAll(['books', 'bfiles', 'sbooks', 'bacc']).catch(() => {}), 300);
   });
   for(const k of KEYS){
     if(k === 'pbooks') continue; // книги на проверке приходят вместе с books
@@ -535,7 +544,10 @@ function coverHTML(b, cls){
 }
 // Пометка формата на обложке: у книги только с PDF её нет, иначе все форматы через точку
 // Скрытая книга: у администратора «Видна только вам», у читателя «Временно недоступна»
-const hiddenBadge = b => !b.hidden ? '' : isAdmin() ? '<span class="badge hid">Видна только вам</span>' : '<span class="badge hid">Временно недоступна</span>';
+// Открыта отдельным читателям (правки 4.3): у администратора «Видна: 2 читателям»
+const READERS_DAT = ['читателю', 'читателям', 'читателям'];
+const hiddenText = b => { const n = bookReaders(b.id).length; return n ? `Видна: ${n} ${plural(n, READERS_DAT)}` : 'Видна только вам'; };
+const hiddenBadge = b => !b.hidden ? '' : isAdmin() ? `<span class="badge hid">${hiddenText(b)}</span>` : bookNA(b) ? '<span class="badge hid">Временно недоступна</span>' : '';
 const fmtBadge = b => { const f = bookFormats(b); return f.length > 1 || (f[0] && f[0] !== 'pdf') ? `<span class="badge">${f.map(x => FORMATS[x] || x).join(' · ')}</span>` : ''; };
 function bookTile(b){
   const r = readingOf(b.id);
@@ -545,7 +557,7 @@ function bookTile(b){
 }
 function bookRow(b, extra){
   return `<a class="brow" href="#/b/${b.id}">${coverHTML(b, 'sm')}<span class="brow-t"><b>${esc(b.title)}</b><span>${esc(authorsText(b))}</span>
-    <small>${bookNA(b) ? 'Книга временно недоступна' : [b.year || '', b.pages ? b.pages + ' с.' : '', bookFormats(b).map(f => FORMATS[f]).join(', '), isScan(b) ? 'скан без текста' : '', b.status === 'processing' ? 'обрабатывается' : ''].filter(Boolean).join(' · ')}</small>${b.hidden && isAdmin() ? '<small class="hid-note">Видна только вам</small>' : ''}${extra || ''}</span>${ICON.chev}</a>`;
+    <small>${bookNA(b) ? 'Книга временно недоступна' : [b.year || '', b.pages ? b.pages + ' с.' : '', bookFormats(b).map(f => FORMATS[f]).join(', '), isScan(b) ? 'скан без текста' : '', b.status === 'processing' ? 'обрабатывается' : ''].filter(Boolean).join(' · ')}</small>${b.hidden && isAdmin() ? `<small class="hid-note">${hiddenText(b)}</small>` : ''}${extra || ''}</span>${ICON.chev}</a>`;
 }
 const booksGrid = list => list.length ? `<div class="grid">${list.map(bookTile).join('')}</div>` : '<p class="empty">Книг пока нет.</p>';
 
@@ -777,7 +789,7 @@ VIEWS.b = r => {
     : {books: 'Все книги', notes: 'Заметки', note: 'Заметка', shelves: 'Полки', authors: 'Авторы', profile: 'Профиль', log: 'Журнал чтения', review: 'На проверке', groups: 'Группы', ai: 'Подключение к ИИ'}[from.name] || 'Библиотека';
   return `${backLink(pend ? '#/review/' + b.id : '#/', pend ? 'На проверке' : fromText)}
     ${pend ? `<p class="pend-note">Книга на проверке: её видите только вы. <a href="#/review/${b.id}">Открыть проверку</a></p>` : ''}
-    ${b.hidden && isAdmin() && !pend ? `<p class="pend-note hid-bar">${ICON.lock}<span>Видна только вам. Открыть всем: «⋯» → «Настройки» → «Видна всем читателям».</span></p>` : ''}
+    ${b.hidden && isAdmin() && !pend ? `<p class="pend-note hid-bar">${ICON.lock}<span>${bookReaders(b.id).length ? `Видна вам и читателям: ${esc(bookReaders(b.id).map(u => u.name || u.email).join(', '))}. Изменить` : 'Видна только вам. Открыть всем или отдельным читателям'}: «⋯» → «Настройки».</span></p>` : ''}
     <article class="book">
       <div class="book-cover">${coverHTML(b, 'lg')}</div>
       <div class="book-info">
@@ -1577,11 +1589,16 @@ async function joinGroup(code, btn){
 
 /* ---------- Окна групп ---------- */
 // Выбор книги из библиотеки с поиском (для новой группы и следующей книги)
-function bookPickHTML(q, sel, skip){
+// Выбор книги для группы. Скрытую ото всех (правки 4.1)
+// и скрытую, но открытую не всем участникам (правки 4.3, blocked) выбрать нельзя: строка неактивна с подсказкой.
+function bookPickHTML(q, sel, skip, blocked){
   const h = searchHits(q);
-  // скрытую книгу группе не выбрать (правки 4.1)
-  const list = (h ? h.books : [...libBooks()].sort(titleSort)).filter(b => b.id !== skip && !b.hidden).slice(0, 60);
-  return list.map(b => `<button type="button" class="pick-row${b.id === sel ? ' on' : ''}" data-dlg="book" data-id="${b.id}" aria-pressed="${b.id === sel}">${coverHTML(b, 'xs')}<span><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small></span>${b.id === sel ? ICON.check : ''}</button>`).join('') || '<p class="empty">Ничего не нашлось.</p>';
+  const why = b => blocked ? (blocked.has(b.id) ? 'Книга открыта не всем участникам группы' : '')
+    : b.hidden && isAdmin() && !bookReaders(b.id).length ? 'Книга скрыта ото всех читателей' : '';
+  const list = (h ? h.books : [...libBooks()].sort(titleSort)).filter(b => b.id !== skip).slice(0, 60);
+  return list.map(b => { const w = why(b); return w
+    ? `<button type="button" class="pick-row off" disabled aria-disabled="true">${coverHTML(b, 'xs')}<span><b>${esc(b.title)}</b><small>${esc(w)}</small></span></button>`
+    : `<button type="button" class="pick-row${b.id === sel ? ' on' : ''}" data-dlg="book" data-id="${b.id}" aria-pressed="${b.id === sel}">${coverHTML(b, 'xs')}<span><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small></span>${b.id === sel ? ICON.check : ''}</button>`; }).join('') || '<p class="empty">Ничего не нашлось.</p>';
 }
 function openNewGroup(){
   const max = S.gcfg.maxPerUser || 5;
@@ -1600,21 +1617,28 @@ function openNewGroup(){
     }});
 }
 function openNextBook(g){
-  let q = '', sel = '';
+  let q = '', sel = '', blocked = new Set();
   const cur = g.book ? byId('books', g.book) : null;
   openForm({title: cur ? 'Следующая книга' : 'Книга группы', text: cur ? `«${cur.title}» уйдёт в прочитанные книги группы с сегодняшней датой, план по ней закроется. Её заметки и цитаты останутся доступны группе.` : 'Выберите книгу, которую группа будет читать.',
-    html: `<label class="search"><span class="sr">Поиск книги</span>${ICON.search}<input type="search" id="gb-q" placeholder="Название или автор" autocomplete="off"></label><div class="pick-list" id="gb-list">${bookPickHTML('', '', g.book)}</div>`,
+    html: `<label class="search"><span class="sr">Поиск книги</span>${ICON.search}<input type="search" id="gb-q" placeholder="Название или автор" autocomplete="off"></label><div class="pick-list" id="gb-list">${bookPickHTML('', '', g.book, blocked)}</div>`,
     submit: 'Начать эту книгу',
-    onInput(el){ if(el.id === 'gb-q'){ q = el.value; $('#gb-list').innerHTML = bookPickHTML(q, sel, g.book); } },
-    onClick(el){ if(el.dataset.dlg === 'book'){ sel = el.dataset.id; $('#gb-list').innerHTML = bookPickHTML(q, sel, g.book); formErr(''); } },
+    onInput(el){ if(el.id === 'gb-q'){ q = el.value; $('#gb-list').innerHTML = bookPickHTML(q, sel, g.book, blocked); } },
+    onClick(el){ if(el.dataset.dlg === 'book'){ sel = el.dataset.id; $('#gb-list').innerHTML = bookPickHTML(q, sel, g.book, blocked); formErr(''); } },
     async onSave(){
       if(!sel) throw {message: 'Выберите книгу.'};
+      if(blocked.has(sel)) throw {message: 'Книга открыта не всем участникам группы.'};
       await pb.send(`/api/knigi/groups/${g.id}/book`, {method: 'POST', body: {book: sel}});
       await loadAll(['groups', 'gbooks', 'gmembers', 'gplan']);
       delete UI.gState[g.id]; loadGState(g.id, true);
       toast('Группа начала новую книгу');
     }});
+  // скрытые книги, которые открыты не всем участникам (правки 4.3): узнаём у сервера, он видит списки
+  pb.send(`/api/knigi/groups/${g.id}/blocked-books`, {}).then(r => {
+    blocked = new Set(r.blocked || []);
+    const el = $('#gb-list'); if(el) el.innerHTML = bookPickHTML(q, sel, g.book, blocked);
+  }).catch(() => {});
 }
+
 function openInvite(g){
   const link = groupLink(g);
   openForm({title: 'Пригласить в группу',
@@ -1857,7 +1881,8 @@ function usersSection(){
         <div class="usr-head">${faceHTML(x, 'md')}
           <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}${adm ? 'администратор' : 'читатель'} · с ${esc(fmtDate(x.created))}</span><span>${userState(x, t)}${x.no_mark ? ' <span class="tag nomark">без подписи</span>' : ''}</span></div></div>
         ${adm ? '' : `<div class="usr-acts">${[1, 3, 6].map(m => `<button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="${m}" data-id="${id}">+${m} ${plural(m, MONTHS_W)}</button>`).join('')}${x.suspended ? `<button type="button" class="btn sm" data-act="acc" data-action="resume" data-id="${id}">Возобновить</button>` : `<button type="button" class="btn sm ghost danger" data-act="acc" data-action="suspend" data-id="${id}">Приостановить</button>`}</div>
-          <label class="check-chip sm usr-mark"><input type="checkbox" data-nomark="${id}"${x.no_mark ? ' checked' : ''}><span>Без подписи на страницах</span></label>`}
+          <label class="check-chip sm usr-mark"><input type="checkbox" data-nomark="${id}"${x.no_mark ? ' checked' : ''}><span>Без подписи на страницах</span></label>
+          ${userBooksHTML(x.id)}`}
         <details class="usr-more"${UI.openUser === x.id ? ' open' : ''} data-user="${id}"><summary>${adm ? 'Заметки' : 'Дата, заметка и история'}</summary>
           ${adm ? '' : `<div class="usr-row"><div class="field"><label for="ud-${id}">Доступ до (своя дата)</label><input type="date" id="ud-${id}" value="${esc(x.access_until || '')}"></div><div class="usr-btns"><button type="button" class="btn sm" data-act="acc" data-action="set" data-id="${id}">Поставить дату</button><button type="button" class="btn sm ghost" data-act="acc" data-action="unlimited" data-id="${id}">Бессрочно</button></div></div>`}
           <div class="usr-row"><div class="field"><label for="un-${id}">Заметка (видите только вы; добавится и к продлению)</label><input type="text" id="un-${id}" maxlength="1000" placeholder="Например: оплатил 500 ₽ 1 ноября"></div><div class="usr-btns"><button type="button" class="btn sm ghost" data-act="acc" data-action="note" data-id="${id}">Сохранить заметку</button></div></div>
@@ -1867,6 +1892,11 @@ function usersSection(){
     }).join('') || '<p class="hint">Пока никого.</p>'}</div>
     <p class="hint">Удалить пользователя совсем можно в панели администратора: <a href="/_/" target="_blank" rel="noopener">${esc(location.host)}/_/</a>, коллекция users.</p>
   </div></details>`;
+}
+// «Книги, открытые лично» (правки 4.3): скрытые книги, открытые этому читателю, с крестиком «Убрать»
+function userBooksHTML(uid){
+  const list = S.bacc.filter(x => x.user === uid).map(x => byId('books', x.book)).filter(Boolean).sort(titleSort);
+  return `<div class="usr-books"><span class="flabel">Книги, открытые лично</span>${list.length ? `<div class="chips">${list.map(b => `<span class="chip ub-chip"><a href="#/b/${b.id}">${esc(b.title)}</a>${b.hidden ? '' : '<small>видна всем</small>'}<button type="button" class="ub-x" data-act="acc-book-rm" data-user="${esc(uid)}" data-book="${b.id}" aria-label="Убрать «${esc(b.title)}»" title="Убрать">${ICON.close}</button></span>`).join('')}</div>` : '<span class="hint">нет</span>'}</div>`;
 }
 async function loadInvites(){ try { S.invites = await pb.collection('invites').getFullList(); schedule(); } catch(e){} }
 async function loadUsers(){ try { S.users = await pb.send('/api/knigi/admin/users', {}); schedule(); } catch(e){} }
@@ -2521,14 +2551,79 @@ function bookMenu(btn, b){
   items.push({label: 'Удалить книгу', danger: true, run: () => confirmDeleteBook(b)});
   openMenu(btn, items);
 }
-// «Видна всем читателям» (правки 4.1): новая книга скрыта, пока администратор её не откроет
-function bookSettings(b){
+// «Видна всем читателям» (правки 4.1): новая книга скрыта, пока администратор её не откроет.
+// «Открыта отдельным читателям» (правки 4.3): скрытая книга видна только отмеченным. Список хранится,
+// когда книга видна всем, и снова работает, если её скрыть.
+const namesText = list => list.map(u => u.name || u.email).join(', ');
+// Пользователей может быть сотни: в окне только те, кому книга уже открыта, поиск идёт на сервере
+// (/api/knigi/admin/user-search, от 2 букв, до 10 совпадений), участников своей группы чтения можно добавить разом.
+// Связи с группой не остаётся: новые участники группы книгу сами не получают.
+async function bookSettings(b){
+  let sel = [];
+  try { sel = (await pb.send(`/api/knigi/books/${b.id}/readers`, {})).readers || []; } catch(e){ toast(errText(e)); return; }
+  let hits = [], q = '', qT = 0, seq = 0, groupsOpen = false;
+  const has = id => sel.some(u => u.id === id);
+  const who = u => `${faceHTML(u, 'xs')}<span class="rr-t">${esc(u.name || u.email)}${u.email && u.name ? `<small>${esc(u.email)}</small>` : ''}</span>`;
+  const selHTML = () => sel.length ? sel.map(u => `<div class="reader-row">${who(u)}<button type="button" class="btn sm ghost rr-x" data-dlg="rd-rm" data-id="${esc(u.id)}" aria-label="Убрать ${esc(u.name || u.email)}">${ICON.close}<span>Убрать</span></button></div>`).join('')
+    : '<p class="hint rr-empty">Пока никому: книгу видите только вы.</p>';
+  const hitsHTML = () => q.length < 2 ? '' : !hits.length ? '<p class="hint">Никого не нашлось.</p>'
+    : hits.map(u => `<button type="button" class="reader-row rr-hit" data-dlg="rd-add" data-id="${esc(u.id)}"${has(u.id) ? ' disabled' : ''}>${who(u)}<span class="rr-add">${has(u.id) ? 'уже в списке' : ICON.plus}</span></button>`).join('');
+  const groups = () => myGroups().filter(g => membersOf(g.id).some(m => m.user !== me().id));
+  const groupsHTML = () => !groupsOpen ? '' : groups().length
+    ? groups().map(g => { const n = membersOf(g.id).filter(m => m.user !== me().id).length; return `<button type="button" class="pick-row" data-dlg="rd-group" data-id="${g.id}">${ICON.people}<span><b>${esc(g.name)}</b><small>${n} ${plural(n, ['участник', 'участника', 'участников'])}, кроме вас</small></span></button>`; }).join('')
+    : '<p class="hint">Вы не состоите ни в одной группе чтения с другими участниками.</p>';
+  const paint = () => {
+    const a = form.querySelector('#rd-sel'), h = form.querySelector('#rd-hits'), g = form.querySelector('#rd-groups'), n = form.querySelector('#rd-n');
+    if(a) a.innerHTML = selHTML(); if(h) h.innerHTML = hitsHTML(); if(g) g.innerHTML = groupsHTML(); if(n) n.textContent = sel.length ? ' · ' + sel.length : '';
+  };
+  const allHint = '<p class="hint" id="rd-allhint">Сейчас книга видна всем. Список заработает, если книгу снова скрыть.</p>';
+  const block = `<fieldset class="field readers-box"><legend class="flabel">Открыта читателям<span id="rd-n">${sel.length ? ' · ' + sel.length : ''}</span></legend>
+      ${b.hidden ? '' : allHint}
+      <div class="readers-list" id="rd-sel">${selHTML()}</div>
+      <label class="search rd-search"><span class="sr">Найти читателя</span>${ICON.search}<input type="search" id="rd-q" placeholder="Найти читателя: имя или почта" autocomplete="off"></label>
+      <div class="readers-hits" id="rd-hits"></div>
+      <button type="button" class="btn sm" data-dlg="rd-groups">${ICON.people}<span>Открыть участникам группы</span></button>
+      <div class="pick-list" id="rd-groups"></div>
+      <p class="hint">Тем, кому книга открыта, скрытая книга видна как обычная: в библиотеке, в поиске, на полках, читалка, заметки и цитаты. Уберёте человека: у него всё сохранится, книга станет «временно недоступна». Изменения вступят в силу после «Сохранить».</p></fieldset>`;
   openForm({title: 'Настройки', fields: [{key: 'open', type: 'check', label: 'Видна всем читателям',
-      hint: 'Пока переключатель выключен, книгу видите только вы. У читателей, которые уже начали её читать или писали к ней заметки, она останется в их списках с пометкой «Книга временно недоступна», всё их сохранится.'}],
-    values: {open: !b.hidden}, async onSave(v){
+      hint: 'Пока переключатель выключен, книгу видите только вы и читатели из списка ниже. У остальных, кто уже начал её читать или писал к ней заметки, она останется в списках с пометкой «Книга временно недоступна», всё их сохранится.'}],
+    values: {open: !b.hidden}, html: block,
+    onChange(el){
+      if(el.id === 'fld-open'){
+        const box = form.querySelector('.readers-box'), h = form.querySelector('#rd-allhint');
+        if(el.checked && !h && box) box.querySelector('legend').insertAdjacentHTML('afterend', allHint);
+        if(!el.checked && h) h.remove();
+      }
+    },
+    onInput(el){
+      if(el.id !== 'rd-q') return;
+      q = el.value.trim(); clearTimeout(qT);
+      if(q.length < 2){ hits = []; paint(); return; }
+      const my = ++seq;
+      qT = setTimeout(async () => {
+        try { const r = await pb.send('/api/knigi/admin/user-search', {query: {q}}); if(my === seq){ hits = r.users || []; paint(); } }
+        catch(e){ formErr(errText(e)); }
+      }, 250);
+    },
+    onClick(el){
+      const d = el.dataset;
+      if(d.dlg === 'rd-rm'){ sel = sel.filter(u => u.id !== d.id); paint(); }
+      else if(d.dlg === 'rd-add'){ const u = hits.find(x => x.id === d.id); if(u && !has(u.id)) sel.push(u); paint(); }
+      else if(d.dlg === 'rd-groups'){ groupsOpen = !groupsOpen; paint(); }
+      else if(d.dlg === 'rd-group'){
+        let n = 0;
+        for(const m of membersOf(d.id)){ if(m.user === me().id || has(m.user)) continue; const p = person(m.user); sel.push({id: m.user, name: p.name || '', email: '', avatar: p.avatar || ''}); n++; }
+        groupsOpen = false; paint();
+        toast(n ? `Добавлено: ${n}` : 'Все участники уже в списке');
+      }
+    },
+    async onSave(v){
+      const rr = await pb.send(`/api/knigi/books/${b.id}/readers`, {method: 'POST', body: {users: sel.map(u => u.id)}});
       const res = await pb.send(`/api/knigi/books/${b.id}/visibility`, {method: 'POST', body: {hidden: !v.open}});
       upsert('books', {id: b.id, hidden: res.hidden, opened_at: res.opened_at});
-      toast(res.hidden ? 'Книга скрыта от читателей' : 'Книга открыта всем читателям'); render(true);
+      await loadAll(['bacc']).catch(() => {});
+      toast(!res.hidden ? 'Книга открыта всем читателям' : rr.readers.length ? 'Книга открыта: ' + namesText(rr.readers) : 'Книга скрыта ото всех читателей');
+      render(true);
     }});
 }
 // Ещё один формат к этой книге: обычная загрузка, обработка в фоне
@@ -2902,7 +2997,7 @@ async function rdShow(r){
     // срок доступа закончился (правки 4.1): книги не открываются
     if(readOnly()){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(`${accHead(S.access)}: книги сейчас не открываются. Чтобы продлить, напишите: ${S.access.contact || 'администратору'}.`); return; }
     // скрытая книга (правки 4.1): читатель её не открывает
-    if(!isAdmin() && (b ? b.hidden : S.notes.some(n => n.book === r.id))){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(NA_TEXT); return; }
+    if(!isAdmin() && (b ? bookNA(b) : S.notes.some(n => n.book === r.id))){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(NA_TEXT); return; }
     fmt = r.q.get('f') || (b ? defaultFormat(b) : 'pdf');
     if(b && !VIEW[fmt]){ READER.mode = ''; RD.back = '#/b/' + b.id; rdFail('Такой формат читалка не открывает.'); return; }
     // FB2, MOBI, AZW3, TXT сервер перевёл в EPUB, DjVu в PDF: открываются этими читалками
@@ -4489,6 +4584,12 @@ document.addEventListener('click', async e => {
     case 'rev-ok': reviewApprove(d.id, a); break;
     case 'rev-no': reviewReject(d.id); break;
     case 'add-books': pickFile(BOOK_ACCEPT, true, files => { loadDisk(); addUploads(files, 'book'); }); break;
+    case 'acc-book-rm': {
+      a.disabled = true;
+      try { await pb.send(`/api/knigi/books/${d.book}/readers`, {method: 'POST', body: {remove: [d.user]}}); await loadAll(['bacc']); UI.usersOpen = true; toast('Книга убрана у читателя'); }
+      finally { a.disabled = false; }
+      break;
+    }
     case 'up-close': UP.hidden = true; if(!UP.items.some(u => ['wait','up','proc'].includes(u.state))) UP.items = UP.items.filter(u => !upShown(u)); renderUploadsPanel(); break;
     case 'up-cancel': { const it = UP.items.find(u => u.id === d.id); if(!it) return; if(it.state === 'wait'){ it.state = 'err'; it.msg = 'отменено'; } else it.cancel = true; renderUploadsPanel(); break; }
     case 'up-force': { const it = UP.items.find(u => u.id === d.id); if(it){ it.state = 'wait'; it.msg = ''; runUploads(); renderUploadsPanel(); } break; }

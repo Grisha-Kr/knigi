@@ -489,7 +489,8 @@ function finishOffer(e, meta, id, fmt, file) {
       rmFile(booksDir(), file);
       if (tb.getBool("pending")) return { kind: "offer", pending: true, message: "Эта книга уже на проверке." };
       // скрытая книга (правки 4.1): ответ тот же, но без ссылки, открыть её читатель не сможет
-      if (tb.getBool("hidden")) return { kind: "offer", duplicate: { title: tb.getString("title") }, message: "Эта книга уже есть в библиотеке." };
+      // (если книгу открыли этому читателю, правки 4.3, ссылка есть)
+      if (!lib.bookOpen(tb, e.auth)) return { kind: "offer", duplicate: { title: tb.getString("title") }, message: "Эта книга уже есть в библиотеке." };
       return { kind: "offer", duplicate: { id: tb.id, title: tb.getString("title") }, message: "Эта книга уже есть в библиотеке." };
     }
   }
@@ -1175,8 +1176,9 @@ function mergeBooks(book, other) {
   lib.dropLonelyAuthors($app, otherAuthors);
   syncBook(book.id);
   // видимость остаётся у первой книги; если она скрыта, к ней перешли записи читателей второй
+  // список отдельных читателей (правки 4.3) тоже остаётся у первой книги, список второй удаляется вместе с ней
   if (book.getBool("hidden")) syncKept(book.id);
-  else if (other.getBool("hidden")) notifyVisibility(book.id, false);
+  if (book.getBool("hidden") || other.getBool("hidden")) notifyVisibility(book.id, book.getBool("hidden"));
 }
 
 /* ---------- Скрытые книги (правки 4.1) ---------- */

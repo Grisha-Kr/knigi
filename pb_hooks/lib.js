@@ -12,19 +12,36 @@ function requireAdmin(e) {
   if (!isAdmin(e.auth)) throw new ForbiddenError("Это может сделать только администратор библиотеки.");
 }
 
-/* ---------- Видимость книги (правки 4.1) ---------- */
-// Книгу на проверке (pending) видит только администратор. Скрытую (hidden) видит администратор, а читатель
-// только если он в kept_for (у него с книгой уже что-то было): тогда ему видна карточка, но не файл.
+/* ---------- Видимость книги (правки 4.1 и 4.3) ---------- */
+// Одно правило «может ли человек открыть книгу» (bookOpen): администратор всегда; остальные, если книга
+// не на проверке и видна всем или открыта этому читателю (правки 4.3, список book_access).
+// Им её видно везде, как обычную книгу: списки, поиск, полки, файл, прогресс, заметки, группы, аудио.
+// Читатель из kept_for (у него с книгой уже что-то было, правки 4.1) видит только карточку
+// «Книга временно недоступна» (bookVisible), файлов нет. Остальным книги нет совсем.
 const keptFor = (b, userId) => b.getStringSlice("kept_for").indexOf(userId) >= 0;
-function bookVisible(b, user) {
+function hasAccess(bookId, userId) {
+  if (!bookId || !userId) return false;
+  return $app.countRecords("book_access", $dbx.hashExp({ book: String(bookId), user: String(userId) })) > 0;
+}
+function bookOpen(b, user) {
   if (!b) return false;
   if (isAdmin(user)) return true;
   if (b.getBool("pending")) return false;
-  return !b.getBool("hidden") || (!!user && keptFor(b, user.id));
+  return !b.getBool("hidden") || (!!user && hasAccess(b.id, user.id));
 }
-// Можно ли открыть файл книги: книга не на проверке и не скрыта (администратору всегда)
-function bookOpen(b, user) {
-  return !!b && (isAdmin(user) || (!b.getBool("pending") && !b.getBool("hidden")));
+function bookVisible(b, user) {
+  if (bookOpen(b, user)) return true;
+  return !!b && !!user && !b.getBool("pending") && b.getBool("hidden") && keptFor(b, user.id);
+}
+// Кому открыта скрытая книга: [{id, name, email, avatar}] в порядке добавления
+function bookReaders(bookId) {
+  const out = [];
+  for (const r of $app.findRecordsByFilter("book_access", "book = {:b}", "created", 0, 0, { b: bookId })) {
+    let u = null;
+    try { u = $app.findRecordById("users", r.getString("user")); } catch (_) {}
+    if (u) out.push({ id: u.id, name: u.getString("name") || u.getString("email"), email: u.getString("email"), avatar: u.getString("avatar") });
+  }
+  return out;
 }
 const HIDDEN_MSG = "Книга временно недоступна.";
 // Книга для ссылки на файл и прогресса: не видна совсем → 404, видна только карточкой → 403 «временно недоступна»
@@ -488,7 +505,7 @@ function mailOfferDecision(offer) {
 }
 
 module.exports = {
-  MB, isAdmin, requireAdmin, norm, bookVisible, bookOpen, openBook, HIDDEN_MSG, sortName, splitAuthors, authorId, bookSearch, dropLonelyAuthors,
+  MB, isAdmin, requireAdmin, norm, bookVisible, bookOpen, openBook, hasAccess, bookReaders, HIDDEN_MSG, sortName, splitAuthors, authorId, bookSearch, dropLonelyAuthors,
   MAX_DEPTH, shelfDepth, checkShelfCreate, checkShelfUpdate, checkShelfDelete,
   cleanHtml, plainText, checkNote, checkRegistration, HL_COLORS,
   MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,
