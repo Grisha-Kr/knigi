@@ -3189,7 +3189,7 @@ VIEWS.listen = r => {
       <div class="ap-head"><small>${esc(b.title)}${authorsText(b) ? ' · ' + esc(authorsText(b)) : ''}</small><h1>${esc(t.title)}</h1>${!t.published ? '<span class="tag wait">Черновик</span>' : ''}</div>
       ${ctl}
     </section>
-    <section class="card audio-card"><h2>Главы <span class="n">${list.length}</span></h2><div class="au-list">${list.map(x => trackRow(x, b)).join('')}</div>
+    <section class="card audio-card" aria-label="Главы"><div class="au-list">${list.map(x => trackRow(x, b)).join('')}</div>
       ${isAdmin() ? `<button type="button" class="btn" data-act="au-add" data-id="${b.id}">${ICON.plus}<span>Добавить главу</span></button>` : ''}</section>`;
 };
 
