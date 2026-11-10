@@ -25,6 +25,7 @@ const fmtLong = fmt => fmt && VIEW[fmt] && VIEW[fmt] !== fmt ? `${FORMATS[fmt]},
 const BOOK_ACCEPT = '.pdf,.epub,.djvu,.djv,.fb2,.fbz,.zip,.mobi,.azw3,.txt,application/pdf,application/epub+zip,text/plain';
 const BOOK_RE = /\.(pdf|epub|djvu|djv|fb2|fbz|fb2\.zip|mobi|azw3|txt)$/i;
 const BOOK_TYPES = 'PDF, EPUB, DjVu, FB2, MOBI, AZW3 и TXT';
+const AU_EXT = /\.(mp3|m4a)$/i, AU_MAX = 200 * MB; // главы аудио (правки 4.3)
 const BOOK_FIELDS = 'id,title,authors,year,description,formats,file_size,pages,has_text,text_file,status,status_note,cover,search,hidden,opened_at,created,updated';
 const BFILE_FIELDS = 'id,book,format,file_size,orig_size,ocr,pages,has_text,status,status_note,created';
 const NOTE_FIELDS = 'id,owner,book,book_title,kind,title,page,shared,group,quote,color,format,place,ai,created,updated,body_text:excerpt(400,true)';
@@ -80,6 +81,9 @@ const ICON = {
   copy: sv('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>'),
   inbox: sv('<path d="M4 13l2.5-8h11L20 13v6H4z"/><path d="M4 13h4.5l1 2h5l1-2H20"/>'),
   lock: sv('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+  head: sv('<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4.5" height="6.5" rx="1.5"/><rect x="16.5" y="14" width="4.5" height="6.5" rx="1.5"/>'),
+  play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8 5.2v13.6L19 12z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect class="fill" x="6.5" y="5" width="4" height="14" rx="1"/><rect class="fill" x="13.5" y="5" width="4" height="14" rx="1"/></svg>',
   aa: '<svg viewBox="0 0 24 24" aria-hidden="true"><text x="2" y="18" font-size="15" font-weight="700" fill="currentColor" stroke="none" font-family="Georgia,serif">А</text><text x="13" y="18" font-size="10" font-weight="700" fill="currentColor" stroke="none" font-family="Georgia,serif">а</text></svg>',
 };
 
@@ -92,17 +96,18 @@ const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], n
   groups:[], gmembers:[], gbooks:[], gplan:[], comments:[], people:[], gcfg:{maxPerUser: 5, maxMembers: 25, plan: true}, gcount:null,
   ocr:null, // ocr: очередь распознавания (правки 3.1, только администратору, GET /api/knigi/ocr)
   access:null, // access: срок доступа (правки 4.1, GET /api/knigi/access)
+  atracks:[], aprog:[], // главы аудио и свой прогресс слушания (правки 4.3, часть Б)
   bacc:[]}; // bacc: кому открыты скрытые книги (правки 4.3, book_access): у читателя свои строки, у администратора все
 const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files', marks:'marks', offers:'book_offers', pbooks:'books',
-  groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users', bacc:'book_access'};
+  groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users', bacc:'book_access', atracks:'audio_tracks', aprog:'audio_progress'};
 const KEYS = Object.keys(PBN);
 const loadKeys = () => KEYS.filter(k => k !== 'pbooks' || isAdmin());
 const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS + (isAdmin() ? ',offered_by' : ''), filter: 'pending = false'}), pbooks: () => ({fields: BOOK_FIELDS + ',offered_by,pending', filter: 'pending = true'}),
-  bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS}), people: () => ({fields: 'id,name,avatar'})};
+  bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS}), people: () => ({fields: 'id,name,avatar'}), atracks: () => ({sort: 'sort,created'})};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('kn_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('kn_'+k, JSON.stringify(v)); } catch(e){} };
 const dropLS = k => { try { localStorage.removeItem('kn_'+k); } catch(e){} };
-const UI = {hops:0, reorder:'', revShelves:{}, finAll:false, booksView: loadLS('booksView', 'grid'), booksSort: loadLS('booksSort', 'title'), booksFmt:'', booksScan:false, booksHidden:false,
+const UI = {hops:0, reorder:'', revShelves:{}, finAll:false, booksView: loadLS('booksView', 'grid'), booksSort: loadLS('booksSort', 'title'), booksFmt:'', booksScan:false, booksHidden:false, booksAudio:false,
   tab:'notes', notesQ:'', notesKind:'', notesHits:null, cardFrom:{}, logQ:{days:7, user:'', book:''}, log:null, descOpen:false,
   cardFmt:{}, hlColor:'', hlThought:false, hlOpen:new Set(), noteCtx:null,
   fullFor:'', fullNow:false, normalOnce:false,
@@ -253,7 +258,8 @@ async function subscribeAll(){
   let visT = 0;
   await pb.realtime.subscribe('knigi_books', () => {
     if(isAdmin()) return;
-    clearTimeout(visT); visT = setTimeout(() => loadAll(['books', 'bfiles', 'sbooks', 'bacc']).catch(() => {}), 300);
+    // у книги изменилось аудио (опубликовали или сняли главу) или видимость: перечитываем и главы
+    clearTimeout(visT); visT = setTimeout(() => loadAll(['books', 'bfiles', 'sbooks', 'bacc', 'atracks']).catch(() => {}), 300);
   });
   for(const k of KEYS){
     if(k === 'pbooks') continue; // книги на проверке приходят вместе с books
@@ -303,6 +309,7 @@ async function startApp(){
     await pb.send('/api/knigi/session', {});
     await Promise.all([loadAll(), loadGroupCfg()]);
     S.loaded = true; $('#notice').hidden = true; render(true);
+    if(S.access) renderAccessBar(); // в полоске учитываются свои одобренные книги (они приходят с остальными данными)
     if(isAdmin()){ loadInvites(); loadUsers(); loadOcr(); } else loadOwner();
     loadAccess();
     subscribeAll().catch(() => {});
@@ -321,7 +328,7 @@ async function startApp(){
 }
 let lastSession = Date.now();
 document.addEventListener('visibilitychange', () => {
-  if(document.visibilityState !== 'visible'){ RD.doc && rdSave(true); return; }
+  if(document.visibilityState !== 'visible'){ RD.doc && rdSave(true); apSave(true); return; }
   checkUpdate();
   if(S.loaded && pb.authStore.isValid){
     if(Date.now() - lastSession > 3600e3){ lastSession = Date.now(); pb.send('/api/knigi/session', {}).catch(() => {}); }
@@ -329,7 +336,7 @@ document.addEventListener('visibilitychange', () => {
     loadAccess();
   }
 });
-window.addEventListener('pagehide', () => { RD.doc && rdSave(true); });
+window.addEventListener('pagehide', () => { RD.doc && rdSave(true); apSave(true); });
 
 /* ---------- Срок доступа (правки 4.1, по образцу «Молитвенного дневника») ---------- */
 // Состояние приходит с сервера: «сегодня» он считает по времени Хабаровска. Без доступа вверху красная полоска
@@ -355,7 +362,7 @@ function renderAccessBar(){
   let html = '', off = false;
   if(a && !a.active){
     off = true;
-    html = `<b>${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}.</b> Книги сейчас не открываются, свои цитаты и заметки можно смотреть. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+    html = `<b>${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}.</b> Книги сейчас не открываются${S.offers.some(o => o.user === me().id && o.status === 'approved') ? ' (кроме тех, что вы прислали и администратор одобрил: их можно читать)' : ''}, свои цитаты и заметки можно смотреть. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
   } else if(a && a.until && !a.admin && daysLeft(a) <= 7){
     html = `Доступ действует до ${fmtDay(a.until)} (${leftText(daysLeft(a))}). Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
   }
@@ -373,6 +380,10 @@ function accessLine(){
   return a.until ? `Доступ действует до ${fmtDay(a.until)} включительно.` : 'Доступ бессрочный.';
 }
 // Короткая строка вместо кнопки, которая без доступа не работает
+// Своя книга читателя (правки 4.3): он её предложил, администратор одобрил. Без доступа она открывается для чтения
+// и слушания (сервер проверяет то же самое, openForRead), записи по ней без доступа не создаются.
+const myOwnBook = b => !!b && !isAdmin() && S.offers.some(o => o.book === b.id && o.user === me().id && o.status === 'approved');
+const roBook = b => readOnly() && !(myOwnBook(b) && !bookNA(b));
 const roNote = () => `<p class="na-note">${ICON.lock}<span>${accessLine()}</span></p>`;
 
 /* ---------- Проверка новой версии ---------- */
@@ -505,7 +516,7 @@ function render(force){
   const r = route();
   const reading = r.name === 'read' || r.name === 'pdf';
   // читалка открывается заново только при переходе (force): живые обновления данных её не трогают
-  if(reading){ if(S.loaded && (force || !RD.open)) rdShow(r); return; }
+  if(reading){ if(S.loaded && (force || !RD.open)) rdShow(r); renderMini(); return; }
   if(RD.open) rdClose();
   noteFullSync(r);
   sideMe();
@@ -518,6 +529,8 @@ function render(force){
   const rv = $('#side-rev'); if(rv) rv.textContent = reviewCount() || '';
   const m = $('#main');
   if(!S.loaded){ m.innerHTML = '<div class="loading">Загружаю…</div>'; return; }
+  // плеер: пока ползунок перемотки тянут пальцем, экран не перерисовывается
+  if(r.name === 'listen' && !force && AP.seeking) return;
   // экран заметки не перерисовывается от живых обновлений, пока в нём редактор: иначе сбился бы ввод
   if(r.name === 'note' && !force && ED.quill && ED.id) { renderUploadsPanel(); cmPaint(); return; }
   // поле поиска не теряет фокус при перерисовке
@@ -528,6 +541,7 @@ function render(force){
   if(r.name === 'note') edMount(r);
   if(focus){ const el = document.getElementById(focus); if(el){ el.focus(); try { el.setSelectionRange(sel, sel); } catch(e){} } }
   renderUploadsPanel();
+  renderMini(); apTick();
 }
 const notFound = () => `<div class="card"><p>Не найдено: возможно, это уже удалили.</p><a class="btn" href="#/">На главную</a></div>`;
 const backLink = (href, text) => `<a class="back" href="${href}" data-back="${esc(href)}">${ICON.back}<span>${esc(text)}</span></a>`;
@@ -537,11 +551,13 @@ const backLink = (href, text) => `<a class="back" href="${href}" data-back="${es
 const coverUrl = b => b.cover ? `/api/knigi/f/cover/${b.id}?v=${encodeURIComponent(b.cover)}` : '';
 const SPINES = ['#2C4A66', '#5B3A3A', '#3F5A44', '#6B5534', '#4A4560', '#2F5560', '#6A3F52', '#4F4A3E'];
 function spineColor(id){ let h = 0; for(const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return SPINES[h % SPINES.length]; }
-function coverHTML(b, cls){
+function coverHTML(b, cls, extra){
   const ph = `<span class="cover-ph" style="--spine:${spineColor(b.id)}"><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small></span>`;
   const img = b.cover ? `<img src="${esc(coverUrl(b))}" alt="" loading="lazy" draggable="false" onerror="this.remove()">` : '';
-  return `<span class="cover ${cls || ''}${bookNA(b) ? ' na' : ''}">${ph}${img}</span>`;
+  return `<span class="cover ${cls || ''}${bookNA(b) ? ' na' : ''}">${ph}${img}${extra || ''}</span>`;
 }
+// Значок «Аудио» на обложке (правки 4.3): у администратора и при одних черновиках, у читателя при опубликованных главах
+const audioMark = b => hasAudio(b) && !bookNA(b) ? `<span class="au-mark" title="Есть аудио">${ICON.head}<span>Аудио</span></span>` : '';
 // Пометка формата на обложке: у книги только с PDF её нет, иначе все форматы через точку
 // Скрытая книга: у администратора «Видна только вам», у читателя «Временно недоступна»
 // Открыта отдельным читателям (правки 4.3): у администратора «Видна: 2 читателям»
@@ -552,12 +568,12 @@ const fmtBadge = b => { const f = bookFormats(b); return f.length > 1 || (f[0] &
 function bookTile(b){
   const r = readingOf(b.id);
   const prog = r && progPct(r) ? `<span class="prog"><i style="width:${progPct(r)}%"></i></span>` : '';
-  return `<a class="tile" href="#/b/${b.id}">${coverHTML(b)}${hiddenBadge(b) || fmtBadge(b)}${b.status === 'processing' ? '<span class="badge wait">Обрабатывается</span>' : ''}${prog}
+  return `<a class="tile" href="#/b/${b.id}">${coverHTML(b, '', audioMark(b))}${hiddenBadge(b) || fmtBadge(b)}${b.status === 'processing' ? '<span class="badge wait">Обрабатывается</span>' : ''}${prog}
     <span class="t-title">${esc(b.title)}</span><span class="t-author">${esc(authorsText(b))}</span></a>`;
 }
 function bookRow(b, extra){
   return `<a class="brow" href="#/b/${b.id}">${coverHTML(b, 'sm')}<span class="brow-t"><b>${esc(b.title)}</b><span>${esc(authorsText(b))}</span>
-    <small>${bookNA(b) ? 'Книга временно недоступна' : [b.year || '', b.pages ? b.pages + ' с.' : '', bookFormats(b).map(f => FORMATS[f]).join(', '), isScan(b) ? 'скан без текста' : '', b.status === 'processing' ? 'обрабатывается' : ''].filter(Boolean).join(' · ')}</small>${b.hidden && isAdmin() ? `<small class="hid-note">${hiddenText(b)}</small>` : ''}${extra || ''}</span>${ICON.chev}</a>`;
+    <small>${bookNA(b) ? 'Книга временно недоступна' : [b.year || '', b.pages ? b.pages + ' с.' : '', bookFormats(b).map(f => FORMATS[f]).join(', '), hasAudio(b) ? 'аудио' : '', isScan(b) ? 'скан без текста' : '', b.status === 'processing' ? 'обрабатывается' : ''].filter(Boolean).join(' · ')}</small>${b.hidden && isAdmin() ? `<small class="hid-note">${hiddenText(b)}</small>` : ''}${extra || ''}</span>${ICON.chev}</a>`;
 }
 const booksGrid = list => list.length ? `<div class="grid">${list.map(bookTile).join('')}</div>` : '<p class="empty">Книг пока нет.</p>';
 
@@ -594,6 +610,7 @@ VIEWS.home = r => {
       return `<a class="cont-item" href="#/b/${b.id}">${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small>
         ${r ? `<span class="prog wide"><i style="width:${progPct(r)}%"></i></span><small>${multi ? FORMATS[readFmt(r)] + ' · ' : ''}${progText(r)}</small>` : '<small>ещё не открывали</small>'}</span></a>`; }).join('')}</div>`
       : '<p class="empty">Отметьте книгу «Читаю» в её карточке, и она появится здесь.</p>'}</section>
+    ${contListenHTML()}
     <section class="block"><div class="block-h"><h2>Полки</h2><a class="more-link" href="#/shelves">Все полки</a></div>
       ${common.length ? `<div class="shelf-cards">${common.map(shelfCard).join('')}</div>` : `<p class="empty">${isAdmin() ? 'Общих полок пока нет. Создайте первую на вкладке «Полки».' : 'Общих полок пока нет.'}</p>`}</section>
     <section class="block"><div class="block-h"><h2>Мои полки</h2>${mine.length ? '' : '<a class="more-link" href="#/shelves">Создать</a>'}</div>
@@ -657,7 +674,7 @@ function sortedBooks(list){
   return list.sort(titleSort);
 }
 VIEWS.books = () => {
-  let list = libBooks().filter(b => (!UI.booksFmt || bookFormats(b).includes(UI.booksFmt)) && (!UI.booksScan || isScan(b)) && (!UI.booksHidden || b.hidden));
+  let list = libBooks().filter(b => (!UI.booksFmt || bookFormats(b).includes(UI.booksFmt)) && (!UI.booksScan || isScan(b)) && (!UI.booksHidden || b.hidden) && (!UI.booksAudio || hasAudio(b)));
   list = sortedBooks(list);
   const fmts = FMT_ORDER.filter(f => S.bfiles.some(x => x.format === f));
   return `${backLink('#/shelves', 'Полки')}<header class="head"><h1>Все книги</h1><span class="n-head">${list.length}</span></header>
@@ -665,6 +682,7 @@ VIEWS.books = () => {
       <label class="sel"><span class="sr">Сортировка</span><select id="books-sort">${Object.entries(SORTS).map(([k, l]) => `<option value="${k}"${UI.booksSort === k ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="sel"><span class="sr">Формат</span><select id="books-fmt"><option value="">все форматы</option>${fmts.map(f => `<option value="${f}"${UI.booksFmt === f ? ' selected' : ''}>${FORMATS[f]}</option>`).join('')}</select></label>
       <label class="check-chip"><input type="checkbox" id="books-scan"${UI.booksScan ? ' checked' : ''}><span>скан без текста</span></label>
+      ${S.atracks.length || UI.booksAudio ? `<label class="check-chip"><input type="checkbox" id="books-audio"${UI.booksAudio ? ' checked' : ''}><span>С аудио · ${libBooks().filter(hasAudio).length}</span></label>` : ''}
       ${isAdmin() ? `<label class="check-chip"><input type="checkbox" id="books-hidden"${UI.booksHidden ? ' checked' : ''}><span>Скрытые · ${S.books.filter(b => b.hidden).length}</span></label>` : ''}
       <span class="seg2" role="group" aria-label="Вид"><button type="button" data-act="books-view" data-v="grid" aria-pressed="${UI.booksView === 'grid'}" aria-label="Сеткой">${ICON.grid}</button><button type="button" data-act="books-view" data-v="list" aria-pressed="${UI.booksView === 'list'}" aria-label="Списком">${ICON.list}</button></span>
     </div>
@@ -762,15 +780,15 @@ VIEWS.b = r => {
   const shared = isAdmin() ? [] : notesOfBook(b.id).filter(n => n.owner !== me().id && n.shared).sort((x, y) => (x.kind === 'highlight') - (y.kind === 'highlight') || hlOrder(x, y));
   const ep = isEpView(fmt);
   const na = bookNA(b), ro = readOnly();
-  const readBtn = ro && !na ? roNote() : na ? `<p class="na-note">${ICON.lock}<span>Книга временно недоступна. Ваши цитаты, заметки и место, где вы остановились, сохранены.</span></p>`
-    : !f ? '<p class="soon">Файла книги нет.</p>'
+  const readBtn = roBook(b) && !na ? roNote() : na ? `<p class="na-note">${ICON.lock}<span>Книга временно недоступна. Ваши цитаты, заметки и место, где вы остановились, сохранены.</span></p>`
+    : !f ? (fmts.length ? '<p class="soon">Файла книги нет.</p>' : '')
     : f.status === 'processing' ? `<p class="soon">${VIEW[fmt] !== fmt ? `${FORMATS[fmt]} переводится для читалки ${FORMATS[VIEW[fmt]]}: это идёт в фоне, большая книга может занять несколько минут.` : 'Книга обрабатывается: через минуту её можно будет открыть.'}</p>`
     : f.status === 'error' ? '<p class="soon">Этот файл не открывается: при обработке была ошибка.</p>'
     : `<a class="btn primary big" href="${readHref(b.id, fmt)}">${ICON.book}<span>${rd && (ep ? rd.pct >= 1 : rd.page > 1) ? (ep ? `Продолжить, ${Math.round(rd.pct)}%` : 'Продолжить со с. ' + rd.page) : 'Читать'}</span></a>`;
   const pend = !!b.pending;
   const offerer = isAdmin() && b.offered_by ? (S.users.find(u => u.id === b.offered_by) || {}) : null;
   const seg = fmts.length > 1 ? `<div class="fmt-seg" role="radiogroup" aria-label="Формат">${fmts.map(x => `<button type="button" role="radio" data-act="card-fmt" data-id="${b.id}" data-f="${x}" aria-checked="${x === fmt}">${FORMATS[x]}</button>`).join('')}</div>` : '';
-  const facts = [b.year ? b.year + ' г.' : '', f && f.pages ? `${f.pages} ${plural(f.pages, PAGES_W)}` : '', fmts.length > 1 && VIEW[fmt] === fmt ? '' : fmtLong(fmt),
+  const facts = [b.year ? b.year + ' г.' : '', f && f.pages ? `${f.pages} ${plural(f.pages, PAGES_W)}` : '', !fmts.length ? 'аудиокнига' : fmts.length > 1 && VIEW[fmt] === fmt ? '' : fmtLong(fmt),
     isAdmin() && b.file_size ? fsize(b.file_size) : '', scanFile(f) ? 'скан без текста' : ''].filter(Boolean);
   const ocrLine = f && f.ocr && f.has_text ? '<p class="hint ocr-note">Текст распознан автоматически, возможны ошибки.</p>' : '';
   const adminNotes = isAdmin() ? files.filter(x => x.status !== 'error' && x.status_note).map(x => `<p class="hint">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note)}</p>`).join('') : '';
@@ -799,7 +817,8 @@ VIEWS.b = r => {
         <p class="facts">${facts.map(esc).join(' · ')}</p>
         ${b.status === 'processing' && !(f && f.status === 'processing') ? '<p class="tag wait">Обрабатывается</p>' : ''}
         ${ocrLine}${errors}${adminNotes}
-        <div class="book-acts">${readBtn}
+        ${ro && !na && myOwnBook(b) ? '<p class="own-note">Ваша книга: доступна для чтения</p>' : ''}
+        <div class="book-acts">${readBtn}${pend || roBook(b) ? '' : listenBtn(b, !fmts.length)}
           ${pend || na || ro ? '' : `<button type="button" class="btn" data-act="to-shelf" data-id="${b.id}">${ICON.shelves}<span>На полку</span></button>`}
           ${isAdmin() ? `<button type="button" class="icon-btn" data-act="book-menu" data-id="${b.id}" aria-label="Действия с книгой" aria-haspopup="menu" title="Действия с книгой">${ICON.more}</button>` : ''}</div>
         ${pend || ro ? '' : markRow(b)}
@@ -810,6 +829,7 @@ VIEWS.b = r => {
         ${b.description ? `<details class="desc"${UI.descOpen ? ' open' : ''}><summary>Описание</summary><p>${esc(b.description).replace(/\n/g, '<br>')}</p></details>` : ''}
       </div>
     </article>
+    ${pend ? '' : audioBlock(b)}
     <section class="card notes-card">
       <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<a role="tab" data-swap="1" href="#/b/${b.id}${k === 'notes' ? '' : '?tab=' + k}" aria-selected="${tab === k}">${l}${tabN[k] ? ` <span class="n">${tabN[k]}</span>` : ''}</a>`).join('')}</div>
       ${kind === 'highlight' ? hlFilters(hlAll) : ''}
@@ -1589,11 +1609,12 @@ async function joinGroup(code, btn){
 
 /* ---------- Окна групп ---------- */
 // Выбор книги из библиотеки с поиском (для новой группы и следующей книги)
-// Выбор книги для группы. Скрытую ото всех (правки 4.1)
+// Выбор книги для группы. Книгу без текста (только аудио, правки 4.3), скрытую ото всех (правки 4.1)
 // и скрытую, но открытую не всем участникам (правки 4.3, blocked) выбрать нельзя: строка неактивна с подсказкой.
 function bookPickHTML(q, sel, skip, blocked){
   const h = searchHits(q);
-  const why = b => blocked ? (blocked.has(b.id) ? 'Книга открыта не всем участникам группы' : '')
+  const why = b => !bookFormats(b).length ? 'Только аудио: читать в группе нечем'
+    : blocked ? (blocked.has(b.id) ? 'Книга открыта не всем участникам группы' : '')
     : b.hidden && isAdmin() && !bookReaders(b.id).length ? 'Книга скрыта ото всех читателей' : '';
   const list = (h ? h.books : [...libBooks()].sort(titleSort)).filter(b => b.id !== skip).slice(0, 60);
   return list.map(b => { const w = why(b); return w
@@ -1845,7 +1866,7 @@ VIEWS.profile = () => {
       <div class="field"><label for="p-new">Новый пароль (не короче 8 символов)</label><input type="password" id="p-new" autocomplete="new-password"></div>
       <div class="field"><label for="p-new2">Повторите новый</label><input type="password" id="p-new2" autocomplete="new-password"></div>
       <button type="button" class="btn" data-act="save-pass">Сменить пароль</button></div></details>
-    ${isAdmin() && S.disk ? `<p class="hint">Книг: ${S.disk.count}, ${fsize(S.disk.books || 1)}. Свободно на диске сервера ${fsize(S.disk.free)}.</p>` : ''}
+    ${isAdmin() && S.disk ? `<p class="hint">Книг: ${S.disk.count}, ${fsize(S.disk.books || 1)}.${S.disk.audio_count ? ` Глав аудио: ${S.disk.audio_count}, ${fsize(S.disk.audio || 1)}.` : ''} Свободно на диске сервера ${fsize(S.disk.free)}.</p>` : ''}
     <button type="button" class="btn wide" data-act="logout">Выйти</button>
     <p class="hint"><a href="/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a></p>`;
 };
@@ -2075,7 +2096,8 @@ VIEWS.log = () => {
       ${g.rows.map(r => { const u = people[r.user] || {}; const bad = r.over_limit || r.pages_seen > 150; const h = r.t.getHours();
         return `<div class="log-row${bad ? ' bad' : ''}"><span class="lr-time">${pad(h)}:00–${pad((h + 1) % 24)}:00</span>
           <span class="lr-main"><b>${esc(u.name || u.email || 'Пользователь удалён')}</b> <span class="muted">${esc(u.email || '')}</span><br>${r.book ? `<a href="#/b/${r.book}">${esc(r.book_title)}</a>` : esc(r.book_title) + ' (удалена)'}</span>
-          <span class="lr-num">${r.pages_seen} ${plural(r.pages_seen, ['стр.', 'стр.', 'стр.'])}<br>${fsize(r.bytes_sent || 0)}${r.over_limit ? '<br><b>лимит</b>' : ''}</span></div>`; }).join('')}</section>`).join('') : '<p class="empty">За это время записей нет.</p>'}`;
+          <span class="lr-num">${r.pages_seen || !r.listen_sec ? `${r.pages_seen} ${plural(r.pages_seen, ['стр.', 'стр.', 'стр.'])}<br>${fsize(r.bytes_sent || 0)}` : ''}${r.listen_sec ? `${r.pages_seen ? '<br>' : ''}слушал ${minText(r.listen_sec)}` : ''}${r.over_limit ? '<br><b>лимит</b>' : ''}</span>
+          ${r.listen_sec && (r.listen || []).length ? `<span class="lr-listen">${ICON.head}${(r.listen || []).map(x => `${esc(x.t)} (${minText(x.s)})`).join(', ')}</span>` : ''}</div>`; }).join('')}</section>`).join('') : '<p class="empty">За это время записей нет.</p>'}`;
 };
 let logBusy = false;
 async function loadLog(){
@@ -2544,6 +2566,7 @@ function bookMenu(btn, b){
   const items = [{label: 'Изменить данные', run: () => openBookForm(b)}, {label: 'Заменить обложку', run: () => pickCover(b)}];
   if(!b.pending) items.push({label: 'Настройки', run: () => bookSettings(b)});
   if(fmts.length < FMT_ORDER.length && !b.pending) items.push({label: 'Добавить формат', run: () => addFormat(b)});
+  if(!b.pending) items.push({label: tracksOf(b.id).length ? 'Аудио: добавить главу' : 'Добавить аудио', run: () => audioAdd(b)});
   if(!b.pending) items.push({label: 'Объединить с другой книгой', run: () => mergeBook(b)});
   if(fmts.length > 1) items.push({label: 'Убрать формат', run: () => removeFormat(b)});
   if(b.status !== 'processing') items.push({label: 'Обработать заново', run: async () => {
@@ -2651,6 +2674,7 @@ function mergeBook(b){
       }
       const parts = [`файлы: ${m.formats.map(f => FORMATS[f]).join(', ') || 'нет'}`];
       if(m.shelves) parts.push(`места на полках: ${m.shelves}`);
+      if(m.audio) parts.push(`главы аудио: ${m.audio} (с прогрессом слушания)`);
       const notes = [m.notes ? `${m.notes} ${plural(m.notes, NOTES_W)}` : '', m.lessons ? `${m.lessons} ${plural(m.lessons, ['урок','урока','уроков'])}` : '', m.highlights ? `${m.highlights} ${plural(m.highlights, ['цитата','цитаты','цитат'])}` : ''].filter(Boolean);
       if(notes.length) parts.push(notes.join(', ') + ' (у всех пользователей)');
       if(m.readers) parts.push(`прогресс чтения: ${m.readers} ${plural(m.readers, ['человек','человека','человек'])}`);
@@ -2730,12 +2754,15 @@ function pickCover(b){
 function confirmDeleteBook(b){
   const mine = notesOfBook(b.id).filter(n => n.owner === me().id);
   const fields = mine.length ? [{key: 'notes', type: 'select', label: `Ваши заметки и уроки к этой книге (${mine.length})`, options: [['keep', 'оставить без книги'], ['delete', 'удалить вместе с книгой']], hint: 'Оставленные будут в разделе «Заметки» с пометкой «книга удалена».'}] : [];
-  openForm({title: 'Удалить книгу?', text: `«${b.title}»: удалятся все файлы книги (${bookFormats(b).map(f => FORMATS[f]).join(', ')}), текст, обложка, место на полках и прогресс чтения у всех. Вернуть можно только новой загрузкой. Заметки читателей останутся у них без книги.`,
+  const au = tracksOf(b.id).length;
+  openForm({title: 'Удалить книгу?', text: `«${b.title}»: удалятся все файлы книги (${[...bookFormats(b).map(f => FORMATS[f]), au ? `аудио: ${au} ${plural(au, TRACKS_W)}` : ''].filter(Boolean).join(', ') || 'нет'}), текст, обложка, место на полках, прогресс чтения и слушания у всех. Вернуть можно только новой загрузкой. Заметки читателей останутся у них без книги.`,
     fields, values: {notes: 'keep'}, submit: 'Удалить', danger: true,
     async onSave(v){
       await pb.send(`/api/knigi/books/${b.id}?notes=${v.notes === 'delete' ? 'delete' : 'keep'}`, {method: 'DELETE'});
       removeLocal('books', b.id);
       S.sbooks = S.sbooks.filter(x => x.book !== b.id); S.reading = S.reading.filter(x => x.book !== b.id); S.bfiles = S.bfiles.filter(x => x.book !== b.id);
+      if(AP.book === b.id) apStop();
+      S.atracks = S.atracks.filter(x => x.book !== b.id); S.aprog = S.aprog.filter(x => x.book !== b.id);
       loadAll(['notes', 'authors']).catch(() => {});
       toast('Книга удалена'); go('#/', true);
     }});
@@ -2744,13 +2771,14 @@ function confirmDeleteBook(b){
 /* ---------- Загрузка книг и файлов уроков (только администратор) ---------- */
 // Файл идёт кусками по 8 МБ, по одному файлу за раз. Оборвавшийся кусок отправляется заново.
 const UP = {items: [], running: false, hidden: false};
-const UP_EXT = {book: BOOK_RE, offer: BOOK_RE, file: /\.(pdf|docx?|pptx?|jpe?g|png|webp|gif|heic)$/i};
-const UP_MAX = {book: 500 * MB, offer: 500 * MB, file: 50 * MB};
-const upShown = u => u.kind === 'book' || u.kind === 'offer'; // в панели загрузок: книги и предложенные книги
-function addUploads(files, kind, note, book){
+const UP_EXT = {book: BOOK_RE, offer: BOOK_RE, file: /\.(pdf|docx?|pptx?|jpe?g|png|webp|gif|heic)$/i, audio: AU_EXT};
+const UP_MAX = {book: 500 * MB, offer: 500 * MB, file: 50 * MB, audio: AU_MAX};
+const upShown = u => u.kind === 'book' || u.kind === 'offer' || u.kind === 'audio'; // в панели загрузок: книги, предложенные книги, главы аудио
+// extra: для главы аудио {title, pos, duration} или {track} (заменить файл главы)
+function addUploads(files, kind, note, book, extra){
   for(const f of files){
-    const it = {id: newId(), file: f, kind, note: note || '', book: book || '', state: 'wait', pct: 0, msg: '', bookId: ''};
-    if(!UP_EXT[kind].test(f.name)){ it.state = 'err'; it.msg = kind !== 'file' ? `Подходят только ${BOOK_TYPES}.` : 'Этот вид файла не подходит.'; }
+    const it = {id: newId(), file: f, kind, note: note || '', book: book || '', extra: extra || null, state: 'wait', pct: 0, msg: '', bookId: ''};
+    if(!UP_EXT[kind].test(f.name)){ it.state = 'err'; it.msg = kind === 'audio' ? 'Подходят только MP3 и M4A.' : kind !== 'file' ? `Подходят только ${BOOK_TYPES}.` : 'Этот вид файла не подходит.'; }
     else if(f.size > UP_MAX[kind]){ it.state = 'err'; it.msg = `Больше ${UP_MAX[kind] / MB} МБ.`; }
     else if(kind === 'book' && S.bfiles.some(x => x.orig_name === f.name && x.file_size === f.size)){ it.state = 'skip'; it.msg = 'Такой файл уже есть в библиотеке.'; }
     UP.items.push(it);
@@ -2760,7 +2788,7 @@ function addUploads(files, kind, note, book){
   render(true);
 }
 function upText(u){
-  return {wait: 'ждёт очереди', up: `загружается, ${u.pct}%`, proc: 'обрабатывается', done: u.kind === 'offer' ? 'отправлена на проверку' : 'готово', err: 'ошибка: ' + u.msg, skip: u.msg, dup: u.msg}[u.state] || '';
+  return {wait: 'ждёт очереди', up: `загружается, ${u.pct}%`, proc: 'обрабатывается', done: u.kind === 'offer' ? 'отправлена на проверку' : u.kind === 'audio' ? (u.extra && u.extra.track ? 'файл главы заменён' : 'глава загружена: черновик') : 'готово', err: 'ошибка: ' + u.msg, skip: u.msg, dup: u.msg}[u.state] || '';
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function xhrChunk(url, blob, onProg){
@@ -2780,7 +2808,7 @@ function xhrChunk(url, blob, onProg){
 }
 async function uploadOne(it){
   const f = it.file;
-  const st = await pb.send('/api/knigi/upload/start', {method: 'POST', body: {name: f.name, size: f.size, kind: it.kind, note: it.note, book: it.book}});
+  const st = await pb.send('/api/knigi/upload/start', {method: 'POST', body: {name: f.name, size: f.size, kind: it.kind, note: it.note, book: it.book, ...(it.extra || {})}});
   it.upload = st.upload;
   for(let i = 0; i < st.chunks; i++){
     if(it.cancel) throw {msg: 'отменено'};
@@ -2823,6 +2851,7 @@ async function runUploads(){
           loadAll(['offers']).catch(() => {});
           upPaint(); continue;
         }
+        if(res.kind === 'audio'){ it.state = 'done'; it.bookId = res.id; loadAll(['atracks']).catch(() => {}); upPaint(); continue; }
         if(res.kind === 'book'){ it.state = 'proc'; it.bookId = res.id; kickProcess(); }
         else { it.state = 'done'; }
         loadAll(it.kind === 'book' ? ['books', 'bfiles', 'authors'] : ['nfiles']).catch(() => {});
@@ -2847,15 +2876,412 @@ function renderUploadsPanel(){
   if(!books.length || UP.hidden || RD.open){ if(el) el.remove(); return; }
   if(!el){ el = document.createElement('section'); el.id = 'uploads'; el.className = 'uploads'; el.setAttribute('aria-label', 'Загрузка книг'); $('#app').appendChild(el); }
   const active = books.filter(u => u.state === 'wait' || u.state === 'up' || u.state === 'proc').length;
-  const onlyOffers = books.every(u => u.kind === 'offer');
-  el.innerHTML = `<div class="up-head"><b>${onlyOffers ? 'Отправка книги' : 'Загрузка книг'}${active ? ` · осталось ${active}` : ''}</b>
+  const onlyOffers = books.every(u => u.kind === 'offer'), onlyAudio = books.every(u => u.kind === 'audio');
+  el.innerHTML = `<div class="up-head"><b>${onlyOffers ? 'Отправка книги' : onlyAudio ? 'Загрузка аудио' : 'Загрузка книг'}${active ? ` · осталось ${active}` : ''}</b>
       <button type="button" class="icon-btn" data-act="up-close" aria-label="${active ? 'Свернуть' : 'Закрыть'}">${active ? ICON.down : ICON.close}</button></div>
     ${active ? '<p class="hint">Не закрывайте вкладку, пока файлы загружаются.</p>' : ''}
-    <div class="up-list">${books.map(u => `<div class="up-row ${u.state}"><span class="up-t"><b>${(u.state === 'done' || u.state === 'dup') && u.bookId ? `<a href="#/b/${u.bookId}">${esc(u.file.name)}</a>` : esc(u.file.name)}</b>
+    <div class="up-list">${books.map(u => `<div class="up-row ${u.state}"><span class="up-t"><b>${(u.state === 'done' || u.state === 'dup') && u.bookId ? `<a href="#/b/${u.bookId}">${esc(u.kind === 'audio' && u.extra && u.extra.title ? u.extra.title : u.file.name)}</a>` : esc(u.kind === 'audio' && u.extra && u.extra.title ? u.extra.title : u.file.name)}</b>
       <small>${fsize(u.file.size)} · ${esc(upText(u))}</small><span class="prog wide"><i style="width:${u.state === 'done' || u.state === 'proc' || u.state === 'dup' ? 100 : u.pct}%"></i></span></span>
       ${u.state === 'skip' ? `<button type="button" class="btn sm ghost" data-act="up-force" data-id="${u.id}">Всё равно</button>` : ''}
       ${u.state === 'wait' || u.state === 'up' ? `<button type="button" class="icon-btn" data-act="up-cancel" data-id="${u.id}" aria-label="Отменить">${ICON.close}</button>` : ''}</div>`).join('')}</div>
     ${S.disk && isAdmin() ? `<p class="hint">Свободно на диске сервера: ${fsize(S.disk.free)}.</p>` : ''}`;
+}
+
+/* ---------- Аудио к книгам (правки 4.3, часть Б) ---------- */
+// Главы лежат на сервере отдельно от базы и отдаются по ссылке на 2 часа, только в браузере, где выполнен вход
+// (та же защищённая кука, что у книг). В памяти телефона звук не остаётся: sw.js адреса /api/ не трогает.
+// Читатель получает от сервера только опубликованные главы книг, которые ему открыты; администратор все, черновики тоже.
+// Один элемент <audio> живёт вне экранов приложения: звук не прерывается при переходах, мини-плеер внизу.
+const AU_RATES = [0.75, 1, 1.25, 1.5, 1.75, 2];
+const AU_SKIP = 15;
+const TRACKS_W = ['глава', 'главы', 'глав'];
+const tracksOf = id => S.atracks.filter(t => t.book === id).sort((a, b) => (a.sort || 0) - (b.sort || 0) || String(a.created).localeCompare(String(b.created)));
+const hasAudio = b => !!b && S.atracks.some(t => t.book === b.id);
+const progOf = tid => S.aprog.find(p => p.track === tid);
+const trackById = id => S.atracks.find(t => t.id === id);
+const durShort = sec => { sec = Math.max(0, Math.round(sec || 0)); const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60; return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`; };
+const minText = sec => { const m = Math.max(1, Math.round(sec / 60)); return m >= 60 ? `${Math.floor(m / 60)} ч ${m % 60} мин` : `${m} мин`; };
+const trackLeft = t => { const p = progOf(t.id); return !p || p.done || !t.duration ? 0 : Math.max(0, t.duration - (p.pos || 0)); };
+// «Новая»: глава опубликована после того, как человек начал слушать эту книгу, и он её ещё не открывал
+function trackNew(t){
+  if(isAdmin() || !t.published || progOf(t.id)) return false;
+  const first = S.aprog.filter(p => p.book === t.book).map(p => String(p.created || p.updated)).sort()[0];
+  return !!first && String(t.published_at || '') > first;
+}
+const audioNew = id => tracksOf(id).some(trackNew);
+// С какой главы продолжать: последняя начатая, если не дослушана, иначе следующая за ней, иначе первая
+function contTrack(bookId){
+  const list = tracksOf(bookId);
+  if(!list.length) return null;
+  const last = S.aprog.filter(p => p.book === bookId && list.some(t => t.id === p.track)).sort((a, b) => String(b.updated).localeCompare(String(a.updated)))[0];
+  if(last){
+    const i = list.findIndex(t => t.id === last.track);
+    if(!last.done) return list[i];
+    const rest = list.slice(i + 1).find(t => !(progOf(t.id) || {}).done) || list.slice(i + 1)[0];
+    if(rest) return rest;
+  }
+  return list.find(t => !(progOf(t.id) || {}).done) || list[0];
+}
+const nextTrack = t => { const list = tracksOf(t.book); const i = list.findIndex(x => x.id === t.id); return i >= 0 ? list[i + 1] || null : null; };
+
+// Тишина в несколько кадров MP3: её «играем» прямо в нажатии, пока сервер готовит ссылку.
+// Так iPhone разрешает этому элементу звук, и настоящая глава потом включается без второго нажатия.
+const AU_SILENT = (() => {
+  const f = [0xff, 0xfb, 0x10, 0xc0].concat(Array(100).fill(0));
+  return 'data:audio/mpeg;base64,' + btoa(String.fromCharCode(...Array(8).fill(f).flat()));
+})();
+const AP = {el: null, real: false, book: '', track: '', want: null, played: 0, prevT: null, saveAt: 0, tries: 0, next: null, msg: '', seeking: false, rate: +loadLS('apRate', 1) || 1};
+function apEl(){
+  if(AP.el) return AP.el;
+  const el = document.createElement('audio');
+  el.preload = 'metadata'; el.hidden = true; el.setAttribute('playsinline', '');
+  document.body.appendChild(el);
+  el.addEventListener('loadedmetadata', apLoaded);
+  el.addEventListener('timeupdate', apTime);
+  for(const ev of ['play', 'playing', 'pause', 'waiting']) el.addEventListener(ev, () => { if(AP.real){ apPaint(); schedule(); } });
+  el.addEventListener('pause', () => { if(AP.real) apSave(true); });
+  el.addEventListener('ended', apEnded);
+  el.addEventListener('error', apError);
+  AP.el = el;
+  return el;
+}
+const apOn = () => !!(AP.el && AP.real && !AP.el.paused && !AP.el.ended);
+async function apLink(tid){ return pb.send(`/api/knigi/audio/${tid}/link`, {}); }
+// Включить главу. opts.restart: с начала. Вызывать прямо из нажатия: тогда iPhone разрешает звук.
+async function apPlay(tid, opts = {}){
+  const t = trackById(tid);
+  if(!t) return;
+  if(roBook(byId('books', t.book))){ toast(`${accHead(S.access)}: слушать сейчас нельзя.`); return; }
+  const el = apEl();
+  if(AP.track === tid && AP.real && el.getAttribute('src') && !opts.restart){ el.play().catch(apPlayErr); return; }
+  if(AP.track && AP.track !== tid) apSave(true);
+  const p = progOf(tid);
+  let want = opts.restart || !p || p.done ? 0 : (p.pos || 0);
+  if(want && t.duration && t.duration - want < 5) want = 0;
+  Object.assign(AP, {book: t.book, track: tid, want, played: 0, prevT: null, tries: 0, msg: '', real: false});
+  const pre = AP.next && AP.next.track === tid && Date.now() - AP.next.at < 90 * 60e3 ? AP.next : null;
+  AP.next = null;
+  apSession(t); renderMini(); schedule();
+  if(pre){ AP.real = true; el.src = pre.url; el.load(); el.play().catch(apPlayErr); }
+  else {
+    try { el.src = AU_SILENT; el.play().catch(() => {}); } catch(e){}
+    try {
+      const l = await apLink(tid);
+      if(AP.track !== tid) return;
+      AP.real = true; el.src = l.url; el.load(); el.play().catch(apPlayErr);
+    } catch(e){ if(AP.track === tid){ AP.msg = errText(e); AP.real = false; try { el.pause(); el.removeAttribute('src'); } catch(_){} apPaint(); schedule(); } return; }
+  }
+  apSave(true); // глава открыта: «Новая» снимается, на других устройствах видно, где человек
+}
+function apPlayErr(e){ if(e && e.name === 'NotAllowedError'){ AP.msg = 'Нажмите «Играть», чтобы включить звук.'; apPaint(); } }
+function apLoaded(){
+  if(!AP.real) return;
+  const el = AP.el;
+  el.defaultPlaybackRate = AP.rate; el.playbackRate = AP.rate;
+  if(AP.want != null){ const w = AP.want; AP.want = null; if(w > 1 && el.duration && w < el.duration - 2){ try { el.currentTime = w; } catch(e){} } }
+  AP.prevT = el.currentTime;
+  apPos(); apPaint();
+}
+// Время идёт: считаем, сколько человек действительно слушал (для журнала), сохраняем место раз в 10 секунд
+function apTime(){
+  if(!AP.real) return;
+  const el = AP.el, t = el.currentTime || 0;
+  if(AP.prevT != null){ const dt = t - AP.prevT; if(dt > 0 && dt < 3) AP.played += dt / (el.playbackRate || 1); }
+  AP.prevT = t;
+  if(!el.paused && Date.now() - AP.saveAt > 10000) apSave(false);
+  // заранее берём ссылку на следующую главу: после конца она включится сразу, даже при выключенном экране
+  const tr = trackById(AP.track), nx = tr && nextTrack(tr);
+  if(nx && el.duration && el.duration - t < 120 && !(AP.next && AP.next.track === nx.id) && !AP.nextBusy && !roBook(byId('books', nx.book))){
+    AP.nextBusy = true;
+    apLink(nx.id).then(l => { AP.next = {track: nx.id, url: l.url, at: Date.now()}; }).catch(() => {}).finally(() => { AP.nextBusy = false; });
+  }
+  apTick();
+}
+// Сохранить место. Дослушано почти до конца (меньше 15 секунд или 98%): глава «прослушана».
+function apSave(force, ended){
+  const el = AP.el, tid = AP.track;
+  if(!el || !tid || !AP.real || roBook(byId('books', (trackById(tid) || {}).book))) return;
+  // пока глава загружается и ещё не перемотана на место остановки, сохраняем само это место, а не ноль
+  const pos = ended ? (el.duration || 0) : AP.want != null ? AP.want : (el.currentTime || 0), dur = el.duration || (trackById(tid) || {}).duration || 0;
+  if(!force && Date.now() - AP.saveAt < 10000) return;
+  AP.saveAt = Date.now();
+  const done = !!ended || (dur > 0 && (dur - pos <= 15 || pos / dur >= 0.98));
+  const body = {pos: Math.round(pos * 10) / 10, played: Math.round(AP.played)};
+  if(done) body.done = true;
+  AP.played = 0;
+  if(document.visibilityState === 'hidden'){
+    fetch(`/api/knigi/audio/${tid}/progress`, {method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json', Authorization: pb.authStore.token}, body: JSON.stringify(body)}).catch(() => {});
+    return;
+  }
+  pb.send(`/api/knigi/audio/${tid}/progress`, {method: 'POST', body}).then(r => {
+    const had = S.aprog.find(p => p.id === r.id);
+    upsert('aprog', had ? r : {...r});
+  }).catch(() => {});
+}
+function apEnded(){
+  if(!AP.real) return;
+  apSave(true, true);
+  const t = trackById(AP.track), nx = t && nextTrack(t);
+  if(nx) apPlay(nx.id, {restart: !!(progOf(nx.id) || {}).done});
+  else { apPaint(); schedule(); }
+}
+// Ссылка устарела (прошло больше двух часов) или оборвалась связь: новая ссылка и то же место
+function apError(){
+  const el = AP.el;
+  if(!AP.real || !el.getAttribute('src')) return;
+  if(AP.tries >= 2){ AP.msg = 'Файл не открылся. Проверьте интернет и включите главу заново.'; apPaint(); return; }
+  AP.tries++;
+  AP.want = el.currentTime || (progOf(AP.track) || {}).pos || 0;
+  const resume = !el.paused || el.ended === false, tid = AP.track;
+  apLink(tid).then(l => { if(AP.track !== tid) return; el.src = l.url; el.load(); if(resume) el.play().catch(apPlayErr); })
+    .catch(e => { AP.msg = errText(e); apPaint(); });
+}
+function apToggle(tid){
+  const el = apEl();
+  if(tid && tid !== AP.track){ apPlay(tid); return; }
+  if(!AP.real){ if(AP.track) apPlay(AP.track); return; }
+  if(el.paused) el.play().catch(apPlayErr); else el.pause();
+}
+function apSkip(k){
+  const el = AP.el;
+  if(!el || !AP.real || !el.duration) return;
+  el.currentTime = Math.max(0, Math.min(el.duration - 0.5, (el.currentTime || 0) + k));
+  AP.prevT = el.currentTime; apTick(); apPos(); apSave(true);
+}
+function apRate(r){
+  AP.rate = r; saveLS('apRate', r);
+  if(AP.el){ AP.el.defaultPlaybackRate = r; AP.el.playbackRate = r; }
+  apPos(); apPaint();
+}
+function apStop(){
+  if(AP.el){ apSave(true); try { AP.el.pause(); AP.el.removeAttribute('src'); AP.el.load(); } catch(e){} }
+  Object.assign(AP, {real: false, book: '', track: '', want: null, played: 0, prevT: null, next: null, msg: ''});
+  if('mediaSession' in navigator){ try { navigator.mediaSession.metadata = null; } catch(e){} }
+  renderMini();
+}
+// Экран блокировки и пульт: название главы и книги, обложка, кнопки
+function apSession(t){
+  if(!('mediaSession' in navigator)) return;
+  const b = byId('books', t.book) || {};
+  try {
+    const art = b.cover ? [{src: location.origin + coverUrl(b), sizes: '400x600', type: 'image/jpeg'}] : [{src: location.origin + '/icons/icon-512.png?v=2', sizes: '512x512', type: 'image/png'}];
+    navigator.mediaSession.metadata = new MediaMetadata({title: t.title, artist: authorsText(b) || 'Библиотека', album: b.title || '', artwork: art});
+    const set = (k, fn) => { try { navigator.mediaSession.setActionHandler(k, fn); } catch(e){} };
+    set('play', () => apToggle());
+    set('pause', () => { if(AP.el) AP.el.pause(); });
+    set('seekbackward', d => apSkip(-((d && d.seekOffset) || AU_SKIP)));
+    set('seekforward', d => apSkip((d && d.seekOffset) || AU_SKIP));
+    set('seekto', d => { if(AP.el && d && d.seekTime != null){ AP.el.currentTime = d.seekTime; AP.prevT = d.seekTime; apTick(); apPos(); } });
+    set('previoustrack', () => { const el = AP.el; const cur = trackById(AP.track); if(!cur) return; if(el && el.currentTime > 5){ el.currentTime = 0; return; } const list = tracksOf(cur.book); const i = list.findIndex(x => x.id === cur.id); if(i > 0) apPlay(list[i - 1].id, {restart: true}); });
+    set('nexttrack', () => { const cur = trackById(AP.track), nx = cur && nextTrack(cur); if(nx) apPlay(nx.id, {restart: !!(progOf(nx.id) || {}).done}); });
+  } catch(e){}
+}
+function apPos(){
+  const el = AP.el;
+  if(!el || !('mediaSession' in navigator) || !navigator.mediaSession.setPositionState || !isFinite(el.duration) || !el.duration) return;
+  try { navigator.mediaSession.setPositionState({duration: el.duration, playbackRate: el.playbackRate || 1, position: Math.min(el.currentTime || 0, el.duration)}); } catch(e){}
+}
+// Обновить время и ползунок без перерисовки экрана
+function apTick(){
+  const el = AP.el;
+  if(!el) return;
+  const t = el.currentTime || 0, d = isFinite(el.duration) && el.duration ? el.duration : ((trackById(AP.track) || {}).duration || 0);
+  const box = document.querySelector(`.ap-ctl[data-track="${AP.track}"]`);
+  if(box){
+    const sk = box.querySelector('.ap-seek');
+    if(sk && !AP.seeking){ sk.max = Math.max(1, Math.floor(d)); sk.value = Math.floor(t); }
+    const n = box.querySelector('.ap-now'), r = box.querySelector('.ap-left');
+    if(n && !AP.seeking) n.textContent = durShort(t);
+    if(r) r.textContent = d ? '−' + durShort(Math.max(0, d - t)) : '';
+  }
+  const bar = $('#mini .prog i'); if(bar && d) bar.style.width = Math.min(100, t / d * 100) + '%';
+}
+function apPaint(){
+  const on = apOn();
+  $$('.ap-play').forEach(b => { if(b.dataset.track && b.dataset.track !== AP.track) return; b.innerHTML = on ? ICON.pause : ICON.play; b.setAttribute('aria-label', on ? 'Пауза' : 'Играть'); });
+  $$('.ap-msg').forEach(p => { p.textContent = AP.msg; p.hidden = !AP.msg; });
+  $$('.ap-rates button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.r === AP.rate)));
+  if('mediaSession' in navigator){ try { navigator.mediaSession.playbackState = on ? 'playing' : AP.track ? 'paused' : 'none'; } catch(e){} }
+  apTick(); renderMini();
+}
+
+/* ---------- Мини-плеер ---------- */
+// Внизу экрана, пока глава выбрана: звук не прерывается на других экранах. Нажатие открывает плеер целиком.
+function renderMini(){
+  let el = $('#mini');
+  const r = route(), t = trackById(AP.track), b = t && byId('books', t.book);
+  const show = !!(t && b && S.loaded && r.name !== 'listen' && !RD.open);
+  document.documentElement.classList.toggle('has-mini', show);
+  if(!show){ if(el) el.remove(); return; }
+  if(!el){ el = document.createElement('div'); el.id = 'mini'; el.className = 'mini'; el.setAttribute('role', 'region'); el.setAttribute('aria-label', 'Плеер'); $('#app').appendChild(el); }
+  const on = apOn();
+  const key = [t.id, on, AP.msg, b.cover, t.title].join('|');
+  if(el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.innerHTML = `<a class="mini-open" href="#/listen/${b.id}" aria-label="Открыть плеер">${coverHTML(b, 'xs')}<span class="mini-t"><b>${esc(t.title)}</b><small>${esc(AP.msg || b.title)}</small></span></a>
+    <button type="button" class="mini-play ap-play" data-mini="toggle" aria-label="${on ? 'Пауза' : 'Играть'}">${on ? ICON.pause : ICON.play}</button>
+    <button type="button" class="icon-btn mini-x" data-mini="stop" aria-label="Закрыть плеер" title="Закрыть плеер">${ICON.close}</button>
+    <span class="prog"><i></i></span>`;
+  apTick();
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('#mini [data-mini]');
+  if(!b) return;
+  if(b.dataset.mini === 'toggle') apToggle(); else apStop();
+});
+
+/* ---------- Карточка книги: кнопка «Слушать» и главы ---------- */
+function listenBtn(b, primary){
+  const list = tracksOf(b.id);
+  if(!list.length || bookNA(b)) return '';
+  const nw = audioNew(b.id);
+  return `<a class="btn${primary ? ' primary big' : ''} listen-btn${nw ? ' dot' : ''}" href="#/listen/${b.id}" data-act="au-listen" data-id="${b.id}">${ICON.head}<span>Слушать · ${list.length} ${plural(list.length, TRACKS_W)}</span>${nw ? '<span class="tag new">Новая глава</span>' : ''}</a>`;
+}
+function trackRow(t, b){
+  const p = progOf(t.id), cur = AP.track === t.id, ro = roBook(b);
+  const tag = !t.published ? '<span class="tag wait">Черновик</span>' : trackNew(t) ? '<span class="tag new">Новая</span>' : p && p.done ? '<span class="tag ok">прослушано</span>' : '';
+  const left = trackLeft(t);
+  const sub = [t.duration ? durShort(t.duration) : '', p && !p.done && p.pos > 5 && left ? 'осталось ' + minText(left) : ''].filter(Boolean).join(' · ');
+  const icon = ro ? ICON.head : cur && apOn() ? ICON.pause : ICON.play;
+  return `<div class="au-row${cur ? ' on' : ''}"><button type="button" class="au-main" data-act="au-track" data-id="${t.id}"${ro ? ' disabled' : ''} aria-label="${cur && apOn() ? 'Пауза' : 'Слушать'}: ${esc(t.title)}">
+      <span class="au-ic${cur ? ' ap-play' : ''}"${cur ? ` data-track="${t.id}"` : ''}>${icon}</span><span class="au-t"><b>${esc(t.title)}</b>${sub ? `<small>${sub}</small>` : ''}</span>${tag}</button>
+    ${isAdmin() ? `<button type="button" class="icon-btn" data-act="au-menu" data-id="${t.id}" aria-label="Действия с главой" aria-haspopup="menu" title="Действия с главой">${ICON.more}</button>` : ''}</div>`;
+}
+function audioBlock(b){
+  const list = tracksOf(b.id);
+  if(!list.length || bookNA(b)) return '';
+  const total = list.reduce((n, t) => n + (t.duration || 0), 0);
+  const drafts = list.filter(t => !t.published).length;
+  return `<section class="card audio-card" id="audio"><div class="block-h"><h2>Аудио · ${list.length} ${plural(list.length, TRACKS_W)}</h2><span class="muted">${total ? minText(total) : ''}</span></div>
+    ${isAdmin() && drafts ? `<p class="hint">Черновики видите и слушаете только вы. Читателям глава откроется, когда вы нажмёте «⋯» → «Опубликовать».</p>` : ''}
+    <div class="au-list">${list.map(t => trackRow(t, b)).join('')}</div>
+    ${isAdmin() ? `<button type="button" class="btn" data-act="au-add" data-id="${b.id}">${ICON.plus}<span>Добавить главу</span></button>` : ''}</section>`;
+}
+
+/* ---------- Плеер целиком: #/listen/ID_КНИГИ ---------- */
+VIEWS.listen = r => {
+  const b = byId('books', r.id);
+  if(!b || bookNA(b)) return notFound();
+  const list = tracksOf(b.id);
+  const back = backLink('#/b/' + b.id, b.title);
+  if(!list.length) return `${back}<div class="card"><p>У этой книги пока нет аудио.</p></div>`;
+  const mine = AP.book === b.id && trackById(AP.track);
+  const t = mine || contTrack(b.id);
+  const el = AP.el, pl = mine && AP.real && el;
+  const dur = (pl && isFinite(el.duration) && el.duration) || t.duration || 0;
+  const pos = pl ? (el.currentTime || 0) : ((progOf(t.id) || {}).done ? 0 : ((progOf(t.id) || {}).pos || 0));
+  const on = apOn() && mine;
+  const ro = roBook(b);
+  const ctl = ro ? roNote() : `<div class="ap-ctl" data-track="${t.id}">
+      <input type="range" class="ap-seek" min="0" max="${Math.max(1, Math.floor(dur))}" value="${Math.floor(pos)}" step="1" aria-label="Перемотка"${mine ? '' : ' disabled'}>
+      <div class="ap-time"><span class="ap-now">${durShort(pos)}</span><span class="ap-left">${dur ? '−' + durShort(Math.max(0, dur - pos)) : ''}</span></div>
+      <div class="ap-main">
+        <button type="button" class="btn ap-skip" data-act="au-skip" data-k="-${AU_SKIP}" aria-label="Назад на 15 секунд">−15 с</button>
+        <button type="button" class="ap-play big" data-act="au-toggle" data-id="${t.id}" data-track="${t.id}" aria-label="${on ? 'Пауза' : 'Играть'}">${on ? ICON.pause : ICON.play}</button>
+        <button type="button" class="btn ap-skip" data-act="au-skip" data-k="${AU_SKIP}" aria-label="Вперёд на 15 секунд">+15 с</button>
+      </div>
+      <div class="ap-rates" role="group" aria-label="Скорость">${AU_RATES.map(x => `<button type="button" data-act="au-rate" data-r="${x}" aria-pressed="${x === AP.rate}">${String(x).replace('.', ',')}×</button>`).join('')}</div>
+      <p class="ap-msg form-err"${AP.msg && mine ? '' : ' hidden'}>${esc(mine ? AP.msg : '')}</p>
+    </div>`;
+  return `${back}
+    <section class="ap-full">
+      <div class="ap-cover">${coverHTML(b, 'lg')}</div>
+      <div class="ap-head"><small>${esc(b.title)}${authorsText(b) ? ' · ' + esc(authorsText(b)) : ''}</small><h1>${esc(t.title)}</h1>${!t.published ? '<span class="tag wait">Черновик</span>' : ''}</div>
+      ${ctl}
+    </section>
+    <section class="card audio-card"><h2>Главы · ${list.length}</h2><div class="au-list">${list.map(x => trackRow(x, b)).join('')}</div>
+      ${isAdmin() ? `<button type="button" class="btn" data-act="au-add" data-id="${b.id}">${ICON.plus}<span>Добавить главу</span></button>` : ''}</section>`;
+};
+
+/* ---------- «Продолжить слушание» на главной ---------- */
+function contListenHTML(){
+  const last = S.aprog.filter(p => { const t = trackById(p.track), b = t && byId('books', t.book); return b && !bookNA(b); })
+    .sort((a, b) => String(b.updated).localeCompare(String(a.updated)))[0];
+  if(!last) return '';
+  const b = byId('books', last.book) || byId('books', (trackById(last.track) || {}).book);
+  const t = b && contTrack(b.id);
+  if(!t) return '';
+  const p = progOf(t.id);
+  // всё дослушано и следующей главы нет: блок не нужен
+  if(p && p.done && t.id === last.track && !nextTrack(t)) return '';
+  const left = trackLeft(t), on = apOn() && AP.track === t.id;
+  return `<section class="block"><h2>Продолжить слушание</h2><div class="cont"><button type="button" class="cont-item au-cont" data-act="au-cont" data-id="${t.id}" aria-label="${on ? 'Пауза' : 'Слушать дальше'}: ${esc(b.title)}, ${esc(t.title)}">
+    ${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small>${esc(t.title)}${audioNew(b.id) ? ' · <span class="new-txt">есть новая глава</span>' : ''}</small>
+    <small>${left && p && p.pos > 5 ? 'осталось ' + minText(left) : t.duration ? durShort(t.duration) : ''}</small></span><span class="au-ic ap-play" data-track="${t.id}">${on ? ICON.pause : ICON.play}</span></button></div></section>`;
+}
+
+/* ---------- Главы: добавить, переименовать, заменить файл, опубликовать, переставить, удалить (администратор) ---------- */
+// Длительность узнаёт браузер (сервер проверит её по заголовкам файла сам, это запасной вариант)
+function fileDuration(file){
+  return new Promise(res => {
+    const a = document.createElement('audio'), url = URL.createObjectURL(file);
+    const done = v => { clearTimeout(tm); URL.revokeObjectURL(url); res(v > 0 && isFinite(v) ? v : 0); };
+    const tm = setTimeout(() => done(0), 8000);
+    a.preload = 'metadata';
+    a.onloadedmetadata = () => done(a.duration); a.onerror = () => done(0);
+    a.src = url;
+  });
+}
+const AU_ABOUT = 'MP3 или M4A (AAC) до 200 МБ. Для голоса хватит MP3 моно 64 кбит/с: час записи около 28 МБ.';
+function audioAdd(b, track){
+  const list = tracksOf(b.id);
+  const t = track ? trackById(track) : null;
+  const fields = t ? [] : [{key: 'title', label: 'Название главы', required: true, max: 200, placeholder: 'Например: Предисловие, Глава 1'},
+    ...(list.length ? [{key: 'pos', type: 'select', label: 'Место в списке', options: [['', 'в конце'], ...list.map((x, i) => [String(i + 1), `перед «${x.title}»`])]}] : [])];
+  openForm({title: t ? `Заменить файл: «${t.title}»` : 'Новая глава аудио', fields, values: {title: t ? t.title : `Глава ${list.length ? list.length : 1}`, pos: ''},
+    text: t ? 'Прогресс слушателей останется. Опубликованная глава сразу будет играть новый файл.' : 'Глава появится черновиком: её видите и можете прослушать только вы. Читателям она откроется после «Опубликовать».',
+    html: `<div class="field"><label for="au-file">Файл главы</label><input type="file" id="au-file" accept=".mp3,.m4a,audio/mpeg,audio/mp4,audio/x-m4a"><p class="hint">${AU_ABOUT}</p></div>`,
+    submit: 'Загрузить',
+    async onSave(v){
+      const f = ($('#au-file').files || [])[0];
+      if(!f) throw {message: 'Выберите файл главы.'};
+      if(!AU_EXT.test(f.name)) throw {message: 'Подходят только MP3 и M4A.'};
+      if(f.size > AU_MAX) throw {message: 'Файл больше 200 МБ. Сохраните главу с меньшим битрейтом, для голоса хватит 64 кбит/с.'};
+      const duration = await fileDuration(f);
+      loadDisk();
+      addUploads([f], 'audio', '', b.id, t ? {track: t.id} : {title: v.title, pos: v.pos ? +v.pos : 0, duration});
+    }});
+}
+function audioMenu(btn, t){
+  const b = byId('books', t.book);
+  const list = tracksOf(t.book), i = list.findIndex(x => x.id === t.id);
+  const items = [
+    {label: t.published ? 'Снять с публикации' : 'Опубликовать', run: async () => {
+      try { const r = await pb.send(`/api/knigi/audio/${t.id}`, {method: 'POST', body: {published: !t.published}}); upsert('atracks', r); toast(r.published ? 'Глава открыта читателям' : 'Глава снова черновик'); } catch(e){ toast(errText(e)); } }},
+    {label: 'Переименовать', run: () => openForm({title: 'Название главы', fields: [{key: 'title', label: 'Название', required: true, max: 200}], values: {title: t.title},
+      async onSave(v){ upsert('atracks', await pb.send(`/api/knigi/audio/${t.id}`, {method: 'POST', body: {title: v.title}})); toast('Сохранено'); }})},
+    {label: 'Заменить файл', run: () => b && audioAdd(b, t.id)},
+  ];
+  if(i > 0) items.push({label: 'Выше', run: () => audioMove(t, -1)});
+  if(i >= 0 && i < list.length - 1) items.push({label: 'Ниже', run: () => audioMove(t, 1)});
+  items.push({label: 'Удалить главу', danger: true, run: () => openForm({title: 'Удалить главу?', text: `«${t.title}»: файл удалится с сервера, прогресс слушания этой главы у всех тоже. Вернуть можно только новой загрузкой.`,
+    submit: 'Удалить', danger: true, async onSave(){
+      if(AP.track === t.id) apStop();
+      await pb.send(`/api/knigi/audio/${t.id}`, {method: 'DELETE'});
+      removeLocal('atracks', t.id); S.aprog = S.aprog.filter(p => p.track !== t.id); loadDisk();
+      toast('Глава удалена');
+    }})});
+  openMenu(btn, items);
+}
+async function audioMove(t, dir){
+  try { await pb.send(`/api/knigi/audio/${t.id}/move`, {method: 'POST', body: {dir}}); await loadAll(['atracks']); } catch(e){ toast(errText(e)); }
+}
+// «Добавить книги» → «Аудиокнига без текста»: название, автор, по желанию обложка. Книга создаётся скрытой.
+function audioBookForm(){
+  const dl = `<datalist id="authors-dl">${S.authors.map(a => `<option value="${esc(a.name)}">`).join('')}</datalist>`;
+  openForm({title: 'Аудиокнига без текста', text: 'Книга появится скрытой, как любая новая: её видите только вы. Потом добавьте главы, опубликуйте их и откройте книгу всем или отдельным читателям («⋯» → «Настройки»). Текстовый файл можно добавить позже: «⋯» → «Добавить формат».',
+    fields: [{key: 'title', label: 'Название', required: true, max: 500}, {key: 'authors', label: 'Автор (через запятую, если несколько)', max: 1000, list: 'authors-dl'}],
+    html: dl + `<div class="field"><label for="ab-cover">Картинка обложки (необязательно)</label><input type="file" id="ab-cover" accept="image/jpeg,image/png,image/webp,image/gif"><p class="hint">Без картинки будет простая обложка с названием.</p></div>`,
+    submit: 'Создать',
+    async onSave(v){
+      const cover = ($('#ab-cover').files || [])[0];
+      if(cover && cover.size > 10 * MB) throw {message: 'Картинка больше 10 МБ.'};
+      const res = await pb.send('/api/knigi/audio-books', {method: 'POST', body: {title: v.title, authors: v.authors}});
+      if(cover){ const fd = new FormData(); fd.append('cover', cover); try { await pb.send(`/api/knigi/books/${res.id}/cover`, {method: 'POST', body: fd}); } catch(e){ toast(errText(e)); } }
+      await loadAll(['books', 'authors']);
+      go('#/b/' + res.id);
+      thenOpen(() => { const b = byId('books', res.id); if(b) audioAdd(b); });
+    }});
 }
 
 /* ---------- Читалка PDF ---------- */
@@ -2949,7 +3375,7 @@ function rdShell(){
   box.innerHTML = `<div class="rd-top"><button type="button" class="icon-btn" data-rd="close" aria-label="Закрыть книгу" title="Закрыть книгу">${ICON.back}</button>
       <h1 class="rd-title"><button type="button" class="rd-title-btn" data-rd="close" id="rd-title" title="Карточка книги"></button></h1>
       <button type="button" class="icon-btn" data-rd="toc" id="rd-toc" aria-label="Оглавление" title="Оглавление" hidden>${ICON.toc}</button>
-      ${book ? markerBtn() + `<button type="button" class="btn sm" data-rd="note" title="Заметка к этой странице">${ICON.pen}<span>Заметка</span></button>` : ''}
+      ${book && !readOnly() ? markerBtn() + `<button type="button" class="btn sm" data-rd="note" title="Заметка к этой странице">${ICON.pen}<span>Заметка</span></button>` : ''}
       <button type="button" class="icon-btn" data-rd="menu" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button></div>
     <div class="rd-gline" id="rd-gline" aria-hidden="true"></div>
     <div class="rd-stage" id="rd-stage"><div class="rd-pagebox" id="rd-pagebox"></div></div>
@@ -2995,7 +3421,7 @@ async function rdShow(r){
   if(r.name === 'read'){
     const b = byId('books', r.id);
     // срок доступа закончился (правки 4.1): книги не открываются
-    if(readOnly()){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(`${accHead(S.access)}: книги сейчас не открываются. Чтобы продлить, напишите: ${S.access.contact || 'администратору'}.`); return; }
+    if(roBook(b)){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(`${accHead(S.access)}: книги сейчас не открываются. Чтобы продлить, напишите: ${S.access.contact || 'администратору'}.`); return; }
     // скрытая книга (правки 4.1): читатель её не открывает
     if(!isAdmin() && (b ? bookNA(b) : S.notes.some(n => n.book === r.id))){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(NA_TEXT); return; }
     fmt = r.q.get('f') || (b ? defaultFormat(b) : 'pdf');
@@ -3342,6 +3768,8 @@ function hlStrip(rec){ return {...rec, body_text: String(rec.body_text || '').sl
 // Панель выделения: цвета, «Заметка», у администратора «Копировать»; у готового выделения ещё мысль, удалить и «⋯»
 function hpShow(o){
   hpHide();
+  // своя книга без доступа (правки 4.3): читать можно, новые цитаты нельзя
+  if(readOnly() && o.mode === 'new'){ toast(`${accHead(S.access)}: новые цитаты и заметки сейчас не сохраняются.`); return; }
   Object.assign(HP, {mode: o.mode, h: o.h || null, pending: o.pending || null});
   const el = document.createElement('div');
   el.className = 'hl-pop'; el.id = 'hl-pop'; el.setAttribute('role', 'toolbar'); el.setAttribute('aria-label', o.mode === 'new' ? 'Сохранить цитату' : 'Цитата');
@@ -3849,7 +4277,7 @@ function epShell(){
   $('#reader').innerHTML = `<div class="rd-top"><button type="button" class="icon-btn" data-rd="close" aria-label="Закрыть книгу" title="Закрыть книгу">${ICON.back}</button>
       <h1 class="rd-title"><button type="button" class="rd-title-btn" data-rd="close" id="rd-title" title="Карточка книги"></button></h1>
       <button type="button" class="icon-btn" data-rd="toc" id="rd-toc" aria-label="Оглавление" title="Оглавление" hidden>${ICON.toc}</button>
-      ${markerBtn()}<button type="button" class="btn sm" data-rd="note" title="Заметка к этому месту">${ICON.pen}<span>Заметка</span></button>
+      ${readOnly() ? '' : markerBtn() + `<button type="button" class="btn sm" data-rd="note" title="Заметка к этому месту">${ICON.pen}<span>Заметка</span></button>`}
       <button type="button" class="icon-btn" data-rd="menu" aria-label="Ещё" aria-haspopup="menu" title="Ещё">${ICON.more}</button></div>
     <div class="rd-gline" id="rd-gline" aria-hidden="true"></div>
     <div class="ep-stage" id="ep-stage"><div class="ep-host" id="ep-host"></div><canvas class="ep-mark" id="ep-mark" aria-hidden="true"></canvas><div class="ep-tmp" id="ep-tmp"></div></div>
@@ -4583,7 +5011,17 @@ document.addEventListener('click', async e => {
     case 'rev-cover': { const b = byId('books', d.id); if(b) pickCover(b); break; }
     case 'rev-ok': reviewApprove(d.id, a); break;
     case 'rev-no': reviewReject(d.id); break;
-    case 'add-books': pickFile(BOOK_ACCEPT, true, files => { loadDisk(); addUploads(files, 'book'); }); break;
+    case 'add-books': openMenu(a, [{label: 'Файлы книг', run: () => pickFile(BOOK_ACCEPT, true, files => { loadDisk(); addUploads(files, 'book'); })},
+      {label: 'Аудиокнига без текста', run: audioBookForm}]); break;
+    // аудио (правки 4.3)
+    case 'au-listen': { if(roBook(byId('books', d.id)) || AP.book === d.id) break; const t = contTrack(d.id); if(t) apPlay(t.id); break; }
+    case 'au-track': { if(AP.track === d.id && AP.real){ apToggle(); break; } apPlay(d.id); const t = trackById(d.id); if(t && route().name !== 'listen') go('#/listen/' + t.book); break; }
+    case 'au-toggle': apToggle(d.id); break;
+    case 'au-cont': apToggle(d.id); break;
+    case 'au-skip': apSkip(+d.k); break;
+    case 'au-rate': apRate(+d.r); break;
+    case 'au-add': { const b = byId('books', d.id); if(b) audioAdd(b); break; }
+    case 'au-menu': { const t = trackById(d.id); if(t) audioMenu(a, t); break; }
     case 'acc-book-rm': {
       a.disabled = true;
       try { await pb.send(`/api/knigi/books/${d.book}/readers`, {method: 'POST', body: {remove: [d.user]}}); await loadAll(['bacc']); UI.usersOpen = true; toast('Книга убрана у читателя'); }
@@ -4673,6 +5111,8 @@ document.addEventListener('change', e => {
   if(t.id === 'books-fmt'){ UI.booksFmt = t.value; render(true); return; }
   if(t.id === 'books-scan'){ UI.booksScan = t.checked; render(true); return; }
   if(t.id === 'books-hidden'){ UI.booksHidden = t.checked; render(true); return; }
+  if(t.id === 'books-audio'){ UI.booksAudio = t.checked; render(true); return; }
+  if(t.classList && t.classList.contains('ap-seek')){ AP.seeking = false; const el = AP.el; if(el && AP.real && el.duration){ el.currentTime = Math.min(+t.value, el.duration - 0.3); AP.prevT = el.currentTime; apTick(); apPos(); apSave(true); } return; }
   // «Без подписи на страницах» у читателя (правки 4.2): решает сервер при выдаче ссылки на книгу
   if(t.dataset && t.dataset.nomark){
     const id = t.dataset.nomark, action = t.checked ? 'mark_off' : 'mark_on';
@@ -4692,6 +5132,8 @@ document.addEventListener('input', e => {
   if(e.target.id === 'cm-text'){ const box = e.target.closest('#cm-box'); if(box) UI.cmDraft[box.dataset.note] = e.target.value; }
   if(e.target.id === 'q') setSearch(e.target.value);
   if(e.target.id === 'nq'){ UI.notesQ = e.target.value; notesSearch(); schedule(); }
+  // перемотка в плеере: пока тянут, только время на экране
+  if(e.target.classList && e.target.classList.contains('ap-seek')){ AP.seeking = true; const box = e.target.closest('.ap-ctl'); const n = box && box.querySelector('.ap-now'); if(n) n.textContent = durShort(+e.target.value); }
 });
 document.addEventListener('toggle', e => {
   // событие приходит и при отрисовке уже раскрытого блока: реагируем только на настоящее изменение
@@ -4750,6 +5192,7 @@ async function accountAction(a, d){
         await loadUsers(); render(true); toast(ACC_DONE[d.action] || 'Сохранено'); break;
       }
       case 'logout': {
+        apStop();
         dropLS('accHide');
         await fetch('/api/knigi/logout', {method: 'POST'}).catch(() => {});
         Object.keys(localStorage).filter(k => k.startsWith('kn_draft_')).forEach(k => localStorage.removeItem(k));

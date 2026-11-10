@@ -74,7 +74,8 @@ function addMember(app, g, userId) {
   m.set("book_seen", g.getString("book"));
   app.save(m);
 }
-// Книга для группы: есть в библиотеке, не на проверке и её видят все участники группы (members: id участников).
+// Книга для группы: есть в библиотеке, не на проверке, в ней есть текст (книгу только из аудио читать
+// в группе нечем, правки 4.3) и её видят все участники группы (members: id участников).
 // Скрытую ото всех книгу группе не выбрать (правки 4.1); скрытую, но открытую отдельным читателям (правки 4.3),
 // можно, только если она открыта каждому участнику-читателю.
 function groupBook(app, bookId, members) {
@@ -82,6 +83,7 @@ function groupBook(app, bookId, members) {
   let b = null;
   try { b = app.findRecordById("books", String(bookId || "")); } catch (_) {}
   if (!b || b.getBool("pending")) throw new BadRequestError("Выберите книгу из библиотеки.");
+  if (!b.getStringSlice("formats").length) throw new BadRequestError("У этой книги только аудио, читать её в группе нечем. Выберите книгу с текстом.");
   if (b.getBool("hidden")) {
     const readers = app.findRecordsByFilter("book_access", "book = {:b}", "", 0, 0, { b: b.id }).map((r) => r.getString("user"));
     if (!readers.length) throw new BadRequestError("Эта книга скрыта от читателей. Выберите другую или сначала откройте её всем.");

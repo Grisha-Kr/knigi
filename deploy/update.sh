@@ -89,6 +89,11 @@ add_setting MCP_REDIRECT_HOSTS "claude.ai,chatgpt.com,perplexity.ai" "ИИ-по�
 add_setting MCP_IP_ALLOW "" "ИИ-помощники: с каких адресов принимать запросы к /mcp (диапазоны через запятую). Пусто = с любых, главная защита всё равно токен. Anthropic (Claude): 160.79.104.0/21. OpenAI (ChatGPT): список https://openai.com/chatgpt-connectors.json, меняется. Perplexity адреса не публикует. Если оставить только один диапазон, другие помощники перестанут работать."
 add_setting MCP_MAX_CHARS 40000 "ИИ-помощники: сколько знаков текста книги отдавать за один вызов read_book."
 add_setting APP_TZ_OFFSET 10 "Срок доступа читателей: «сегодня» считается по этому часовому поясу (часы от UTC, 10 = Хабаровск)."
+add_setting AUDIO_DIR "$APP/audio" "Папка с аудиоглавами книг (MP3, M4A). В ежедневную копию базы не входит: оригиналы записей храните у себя."
+# папка аудио: из knigi.env, если её там поменяли
+AUDIO="$APP/audio"
+if [ -f "$ENV" ] && grep -q '^AUDIO_DIR=' "$ENV"; then AUDIO="$(grep '^AUDIO_DIR=' "$ENV" | tail -1 | cut -d= -f2- | tr -d '"'\''')"; fi
+[ -n "$AUDIO" ] || AUDIO="$APP/audio"
 
 # ---------- 5. Копия базы и новая версия кода ----------
 echo "Делаю резервную копию базы перед обновлением…"
@@ -96,16 +101,17 @@ mkdir -p "$APP/pb_data/backups"
 # Если что-то пойдёт не так, приложение всё равно запустится снова.
 trap 'systemctl start $NAME || true; case "$0" in /tmp/knigi-update-*) rm -f "$0" ;; esac' EXIT
 systemctl stop $NAME
-# В копию идёт только база. Книги и файлы уроков лежат отдельно (books, files) и не копируются:
+# В копию идёт только база. Книги, файлы уроков и аудио лежат отдельно (books, files, audio) и не копируются:
 # их оригиналы хранит владелец, плюс хостинг раз в неделю копирует весь сервер.
 tar -czf "$APP/pb_data/backups/before-update-$(date +%Y%m%d-%H%M).tar.gz" -C "$APP/pb_data" data.db auxiliary.db 2>/dev/null || true
 
-# Папки книг и файлов: если их ещё нет, создаём
-mkdir -p "$APP/books" "$APP/files"
+# Папки книг, файлов уроков и аудио: если их ещё нет, создаём
+mkdir -p "$APP/books" "$APP/files" "$AUDIO"
 
 OLD="$($GIT rev-parse HEAD)"
 if [ -n "$TARGET" ]; then $GIT merge --ff-only --quiet "$TARGET"; else $GIT pull --ff-only; fi
-chown -R $NAME:$NAME "$APP/src" "$APP/pb_data" "$APP/books" "$APP/files"
+chown -R $NAME:$NAME "$APP/src" "$APP/pb_data" "$APP/books" "$APP/files" "$AUDIO"
+chmod 750 "$AUDIO"
 [ -f "$ENV" ] && chown $NAME:$NAME "$ENV"
 
 systemctl start $NAME

@@ -39,8 +39,10 @@ function filesDir() { return $os.getenv("FILES_DIR") || $filepath.join($app.data
 function coversDir() { return $filepath.join(booksDir(), "covers"); }
 function textDir() { return $filepath.join(booksDir(), "text"); }
 function uploadsDir() { return $filepath.join(booksDir(), ".uploads"); }
+// Главы аудио (правки 4.3): AUDIO_DIR (по умолчанию /opt/knigi/audio рядом с pb_data), в копию базы не входят
+function audioDir() { return $os.getenv("AUDIO_DIR") || $filepath.join($app.dataDir(), "..", "audio"); }
 function ensureDirs() {
-  for (const d of [booksDir(), coversDir(), textDir(), uploadsDir(), filesDir()]) $os.mkdirAll(d, 0o750);
+  for (const d of [booksDir(), coversDir(), textDir(), uploadsDir(), filesDir(), audioDir()]) $os.mkdirAll(d, 0o750);
 }
 // Удалить файл вместе со служебным .attrs (его создаёт $filesystem.local)
 function rmFile(dir, name) {
@@ -55,15 +57,15 @@ function newId() { return $security.randomStringWithAlphabet(15, ID_ABC); }
 function randTail() { return $security.randomStringWithAlphabet(6, "abcdefghijkmnpqrstuvwxyz23456789"); }
 
 // Свободное место на диске с книгами
-function freeBytes() {
-  const out = toString($os.cmd("df", "-Pk", booksDir()).output());
+function freeBytes(dir) {
+  const out = toString($os.cmd("df", "-Pk", dir || booksDir()).output());
   const lines = out.trim().split("\n");
   const cols = lines[lines.length - 1].trim().split(/\s+/);
   return (parseInt(cols[3], 10) || 0) * 1024;
 }
 const gbText = (x) => (x / GB).toFixed(1).replace(".", ",");
-function checkFree(need) {
-  const free = freeBytes(), min = S.minFree();
+function checkFree(need, dir) {
+  const free = freeBytes(dir), min = S.minFree();
   if (free - need < min) {
     throw new BadRequestError(`На диске сервера мало места: свободно ${gbText(free)} ГБ, а нужно оставить не меньше ${gbText(min)} ГБ (настройка MIN_FREE_GB). Удалите ненужные книги или попросите хостинг увеличить диск.`);
   }
@@ -217,8 +219,8 @@ const stamp = () => new Date().toISOString().replace("T", " ");
 const hourKey = () => new Date().toISOString().slice(0, 13); // «2026-11-04T13», час по UTC
 function logRow(userId, book) {
   const hour = hourKey(), t = stamp();
-  $app.db().newQuery(`INSERT INTO read_log (id, "user", book, book_title, hour, pages, pages_seen, bytes_sent, over_limit, created, updated)
-    VALUES ({:id}, {:u}, {:b}, {:title}, {:hour}, '[]', 0, 0, FALSE, {:t}, {:t})
+  $app.db().newQuery(`INSERT INTO read_log (id, "user", book, book_title, hour, pages, pages_seen, bytes_sent, over_limit, listen_sec, listen, created, updated)
+    VALUES ({:id}, {:u}, {:b}, {:title}, {:hour}, '[]', 0, 0, FALSE, 0, '[]', {:t}, {:t})
     ON CONFLICT ("user", book, hour) DO NOTHING`)
     .bind({ id: newId(), u: userId, b: book.id, title: book.getString("title"), hour, t }).execute();
   return hour;
@@ -251,6 +253,24 @@ function logPages(userId, book, pages) {
     $app.logger().warn("Не удалось записать страницы в журнал", "error", String(err));
   }
 }
+// Прослушивание (правки 4.3): секунды и названия глав за этот час
+function logListen(userId, book, seconds, trackTitle) {
+  if (!S.readLog() || !(seconds > 0)) return;
+  try {
+    const hour = logRow(userId, book);
+    const row = $app.findFirstRecordByFilter("read_log", "user = {:u} && book = {:b} && hour = {:h}", { u: userId, b: book.id, h: hour });
+    let list = [];
+    try { list = JSON.parse(toString(row.get("listen")) || "[]"); } catch (_) { list = []; }
+    if (!Array.isArray(list)) list = [];
+    const t = String(trackTitle || "").slice(0, 200);
+    const it = list.find((x) => x && x.t === t);
+    if (it) it.s = Math.round((it.s || 0) + seconds); else list.push({ t, s: Math.round(seconds) });
+    $app.db().newQuery("UPDATE read_log SET listen_sec = listen_sec + {:n}, listen = {:l}, updated = {:t} WHERE id = {:id}")
+      .bind({ n: Math.round(seconds), l: JSON.stringify(list.slice(0, 100)), t: stamp(), id: row.id }).execute();
+  } catch (err) {
+    $app.logger().warn("Не удалось записать прослушивание в журнал", "error", String(err));
+  }
+}
 function cleanLog() {
   const before = new Date(Date.now() - S.logDays() * 864e5).toISOString().slice(0, 13);
   $app.db().newQuery("DELETE FROM read_log WHERE hour < {:h}").bind({ h: before }).execute();
@@ -272,6 +292,8 @@ const KINDS = {
   offer: { exts: BOOK_EXTS, max: 500 * MB, about: BOOK_ABOUT },
   file: { exts: ["pdf", "doc", "docx", "ppt", "pptx", "jpg", "jpeg", "png", "webp", "gif", "heic"], max: 50 * MB,
     about: "PDF, DOC, DOCX, PPT, PPTX или изображение до 50 МБ" },
+  // глава аудио (правки 4.3): содержимое проверяется после загрузки (knigi_convert.py audio)
+  audio: { exts: ["mp3", "m4a"], max: 200 * MB, about: "MP3 или M4A до 200 МБ" },
 };
 const extOf = (name) => { const m = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || "")); return m ? m[1].toLowerCase() : ""; };
 
@@ -319,7 +341,9 @@ function startUpload(e, body) {
   if (size <= 0) throw new BadRequestError("Файл пустой.");
   if (size > rule.max) throw new BadRequestError(`Файл «${name}» больше, чем можно: ${rule.about}.`);
   if (bookKind && (bf.fmt === "fb2" || bf.fmt === "txt") && size > TEXT_MAX) throw new BadRequestError(`Файл «${name}» слишком большой для ${C.FMT_NAME[bf.fmt]}: можно до 200 МБ.`);
-  let note = "", book = "";
+  let note = "", book = "", audio = null;
+  // глава аудио (правки 4.3): новая к книге body.book или замена файла главы body.track
+  if (kind === "audio") { audio = require(`${__hooks}/audio_lib.js`).checkStart(body); book = audio.book; }
   if (kind === "offer") {
     // роль проверяет маршрут: предлагают читатели, администратор добавляет книги сам
     offerLimit(e.auth.id, "");
@@ -344,11 +368,13 @@ function startUpload(e, body) {
     note = n.id;
   }
   checkFree(size * 2); // куски и склеенный файл какое-то время лежат вместе
+  if (audio) checkFree(size * 2, audioDir());
   const up = $security.randomStringWithAlphabet(20, ID_ABC);
   const dir = $filepath.join(uploadsDir(), up);
   $os.mkdirAll(dir, 0o750);
   const meta = { user: e.auth.id, kind, name, size, ext: bf ? bf.ext : ext, fmt: bf ? bf.fmt : "", note, book, chunks: Math.ceil(size / CHUNK), at: Date.now() };
   if (kind === "offer") meta.note = note;
+  if (audio) { meta.track = audio.track; meta.title = audio.title; meta.duration = audio.duration; meta.pos = audio.pos; }
   $os.writeFile($filepath.join(dir, "meta.json"), JSON.stringify(meta), 0o640);
   return { upload: up, chunk: CHUNK, chunks: meta.chunks };
 }
@@ -408,6 +434,7 @@ function finishUpload(e, up) {
   const meta = uploadMeta(up, e.auth.id);
   const lib = require(`${__hooks}/lib.js`);
   ensureDirs();
+  if (meta.kind === "audio") return require(`${__hooks}/audio_lib.js`).finishAudio(e, up, meta);
   if (meta.kind === "file") {
     const id = newId();
     const file = `${id}.${meta.ext}`;
@@ -617,7 +644,8 @@ function syncBook(bookId, app) {
     list.find((f) => ok(f) && VIEW[f.getString("format")] === "epub") || list.find((f) => ok(f) && isPdf(f)) || null;
   const pdf = list.find((f) => isPdf(f) && f.getInt("pages") > 0);
   b.set("formats", list.map((f) => f.getString("format")));
-  b.set("status", !list.length ? "error" : st.indexOf("processing") >= 0 ? "processing" : st.every((x) => x === "error") ? "error" : "ready");
+  // книга только из аудио (правки 4.3): файлов нет, и это не ошибка
+  b.set("status", !list.length ? "ready" : st.indexOf("processing") >= 0 ? "processing" : st.every((x) => x === "error") ? "error" : "ready");
   b.set("pages", pdf ? pdf.getInt("pages") : 0);
   b.set("has_text", !!text);
   b.set("text_file", text ? text.id : "");
@@ -1063,6 +1091,8 @@ function deleteBook(e, book, notesMode) {
   const title = book.getString("title");
   const authorIds = book.getStringSlice("authors");
   const files = filesOf(book.id).map((f) => ({ id: f.id, file: f.getString("file"), orig: f.getString("orig_file") }));
+  // главы аудио (правки 4.3) удаляются каскадом, их файлы убираем с диска здесь
+  const audio = $app.findRecordsByFilter("audio_tracks", "book = {:b}", "", 0, 0, { b: book.id }).map((t) => t.getString("file"));
   for (const f of files) { try { require(`${__hooks}/convert_lib.js`).ocrCancelFile(f.id, "Книгу удалили."); } catch (_) {} }
   $app.runInTransaction((tx) => {
     for (const n of tx.findAllRecords("notes", $dbx.hashExp({ book: book.id }))) {
@@ -1079,6 +1109,7 @@ function deleteBook(e, book, notesMode) {
     tx.delete(book); // файлы книги, места на полках и прогресс удаляются каскадом
   });
   for (const f of files) { rmFile(booksDir(), f.file); rmFile(booksDir(), f.orig); rmFile(textDir(), f.id + ".txt"); }
+  for (const a of audio) rmFile(audioDir(), a);
   rmFile(coversDir(), book.getString("cover"));
   lib.dropLonelyAuthors($app, authorIds);
 }
@@ -1121,6 +1152,7 @@ function mergeInfo(book, other) {
   return {
     formats: b, conflict: b.filter((x) => a.indexOf(x) >= 0),
     shelves: $app.countRecords("shelf_books", $dbx.hashExp({ book: other.id })),
+    audio: $app.countRecords("audio_tracks", $dbx.hashExp({ book: other.id })),
     notes: kinds.note, lessons: kinds.lesson, highlights: kinds.highlight,
     readers: $app.findRecordsByFilter("reading", "book = {:b}", "", 0, 0, { b: other.id }).map((r) => r.getString("user")).filter((u, i, arr) => arr.indexOf(u) === i).length,
   };
@@ -1140,6 +1172,9 @@ function mergeBooks(book, other) {
     const q = { a: book.id, b: other.id, t: book.getString("title") };
     const db = tx.db();
     db.newQuery("UPDATE book_files SET book = {:a} WHERE book = {:b}").bind(q).execute();
+    // главы аудио (правки 4.3) встают после глав первой книги, прогресс слушания идёт вместе с ними
+    db.newQuery("UPDATE audio_tracks SET book = {:a}, sort = sort + COALESCE((SELECT MAX(sort) FROM audio_tracks WHERE book = {:a}), 0) WHERE book = {:b}").bind(q).execute();
+    db.newQuery("UPDATE audio_progress SET book = {:a} WHERE book = {:b}").bind(q).execute();
     // полки: если первая книга уже стоит на той же полке, место второй просто убирается
     db.newQuery("DELETE FROM shelf_books WHERE book = {:b} AND shelf IN (SELECT shelf FROM shelf_books WHERE book = {:a})").bind(q).execute();
     db.newQuery("UPDATE shelf_books SET book = {:a} WHERE book = {:b}").bind(q).execute();
@@ -1159,6 +1194,7 @@ function mergeBooks(book, other) {
     db.newQuery("UPDATE reading SET book = {:a} WHERE book = {:b}").bind(q).execute();
     // журнал: строки за один час складываются
     db.newQuery(`UPDATE read_log SET bytes_sent = bytes_sent + COALESCE((SELECT o.bytes_sent FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour), 0),
+        listen_sec = listen_sec + COALESCE((SELECT o.listen_sec FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour), 0),
         pages_seen = MAX(pages_seen, COALESCE((SELECT o.pages_seen FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour), 0)),
         over_limit = (over_limit OR COALESCE((SELECT o.over_limit FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour), FALSE))
       WHERE book = {:a} AND EXISTS (SELECT 1 FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour)`).bind(q).execute();
@@ -1236,7 +1272,7 @@ function setHidden(book, hidden) {
 }
 
 module.exports = {
-  MB, S, booksDir, filesDir, coversDir, textDir, ensureDirs, rmFile, exists, freeBytes, checkFree,
+  MB, S, booksDir, filesDir, coversDir, textDir, audioDir, ensureDirs, rmFile, exists, freeBytes, checkFree, logListen, joinChunks, randTail, uploadMeta,
   fileKey, LINK_TTL, setCookie, clearCookie, cookieUser, makeLink, linkUser, watermarkFor, watermarkCfg,
   MAX_SPAN, EPUB_MAX, parseRange, noStore, takeBytes, logBytes, logPages, cleanLog,
   CHUNK, KINDS, startUpload, saveChunk, finishUpload, dropUpload, uploadDir, uploadKind, cleanUploads, fromFileName,

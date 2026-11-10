@@ -228,6 +228,14 @@ function hiddenText(b) {
   const names = L().bookReaders(b.id).map((r) => r.name);
   return names.length ? "скрыта, открыта: " + names.join(", ") : "скрыта от читателей";
 }
+// Аудио (правки 4.3): «есть аудио: 3 главы (1 черновик)». Сам звук помощник не получает.
+const A = () => require(`${__hooks}/audio_lib.js`);
+function audioBrief(bookId) {
+  const all = A().tracksOf(bookId, true);
+  if (!all.length) return "";
+  const drafts = all.filter((t) => !t.getBool("published")).length;
+  return `есть аудио: ${pl(all.length, "глава", "главы", "глав")}${drafts ? ` (черновиков: ${drafts})` : ""}`;
+}
 function bookBrief(b, userId, n) {
   const list = files(b);
   const authors = authorNames(b);
@@ -242,6 +250,8 @@ function bookBrief(b, userId, n) {
   if (sh.length) info.push("полки: " + sh.join(", "));
   const mk = markOf(b.id, userId);
   if (mk) info.push(mk);
+  const au = audioBrief(b.id);
+  if (au) info.push(au);
   lines.push("   " + info.join("; "));
   return lines.join("\n");
 }
@@ -579,6 +589,11 @@ H.get_book = (a, ctx) => {
     const f = r.getString("format");
     return F().VIEW[f] === "epub" ? `${fmtName(f)} ${r.getFloat("pct")}% (${day(r.getString("updated"))})` : `${fmtName(f)} с. ${r.getInt("page")} из ${r.getInt("pages")} (${day(r.getString("updated"))})`;
   }).join("; ") : "книгу ещё не открывал"));
+  const tracks = A().tracksOf(b.id, true);
+  if (tracks.length) {
+    out.push("\nАудио (главы по порядку, звук помощнику не передаётся):\n" + tracks.map((t, i) =>
+      `- ${i + 1}. ${t.getString("title")} · ${A().durText(t.getFloat("duration"))}${t.getBool("published") ? "" : " · черновик"}`).join("\n"));
+  }
   const cnt = (k) => $app.countRecords("notes", $dbx.hashExp({ owner: u, book: b.id, kind: k }));
   out.push(`Мои записи по книге: заметок ${cnt("note")}, уроков ${cnt("lesson")}, цитат ${cnt("highlight")} (список: list_notes(book_id)).`);
   // оглавление

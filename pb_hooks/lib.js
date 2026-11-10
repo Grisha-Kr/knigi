@@ -44,6 +44,24 @@ function bookReaders(bookId) {
   return out;
 }
 const HIDDEN_MSG = "Книга временно недоступна.";
+// Своя книга читателя (правки 4.3): он прислал её через «Предложить книгу», и администратор её одобрил.
+// Строка book_offers при объединении переходит к оставшейся карточке, поэтому правило действует на всю карточку.
+function ownBook(b, user) {
+  return !!b && !!user && $app.countRecords("book_offers", $dbx.hashExp({ book: b.id, user: user.id, status: "approved" })) > 0;
+}
+// Читать и слушать (ссылка на файл, сам файл, прогресс чтения, ссылка на аудио, место в аудио).
+// Срок доступа проверяется первым. Без доступа открывается только своя одобренная книга (ownBook) и только если
+// она этому человеку открыта (bookOpen: скрытую и не открытую ему лично исключение не касается).
+// Цитаты, заметки, отметки и полки по своей книге без доступа закрыты, как по остальным (guard в хуках).
+function openForRead(id, user) {
+  const A = require(`${__hooks}/access_lib.js`);
+  if (!A.isActive(user)) {
+    let b = null;
+    try { b = $app.findRecordById("books", String(id || "")); } catch (_) {}
+    if (!(b && bookOpen(b, user) && ownBook(b, user))) A.requireBooks(user);
+  }
+  return openBook(id, user);
+}
 // Книга для ссылки на файл и прогресса: не видна совсем → 404, видна только карточкой → 403 «временно недоступна»
 function openBook(id, user) {
   let b = null;
@@ -505,7 +523,7 @@ function mailOfferDecision(offer) {
 }
 
 module.exports = {
-  MB, isAdmin, requireAdmin, norm, bookVisible, bookOpen, openBook, hasAccess, bookReaders, HIDDEN_MSG, sortName, splitAuthors, authorId, bookSearch, dropLonelyAuthors,
+  MB, isAdmin, requireAdmin, norm, bookVisible, bookOpen, openBook, openForRead, ownBook, hasAccess, bookReaders, HIDDEN_MSG, sortName, splitAuthors, authorId, bookSearch, dropLonelyAuthors,
   MAX_DEPTH, shelfDepth, checkShelfCreate, checkShelfUpdate, checkShelfDelete,
   cleanHtml, plainText, checkNote, checkRegistration, HL_COLORS,
   MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,

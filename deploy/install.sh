@@ -118,6 +118,7 @@ add_setting CONTACT_EMAIL "$CONTACT" "Почта для связи (видна �
 add_setting BEHIND_PROXY 1 "Приложение стоит за Caddy: настоящий адрес посетителя берётся из заголовка X-Forwarded-For. Не менять."
 add_setting BOOKS_DIR "$APP_DIR/books" "Папка с файлами книг (внутри обложки covers и тексты text). В ежедневную копию базы не входит."
 add_setting FILES_DIR "$APP_DIR/files" "Папка с файлами уроков. В ежедневную копию базы не входит."
+add_setting AUDIO_DIR "$APP_DIR/audio" "Папка с аудиоглавами книг (MP3, M4A). В ежедневную копию базы не входит: оригиналы записей храните у себя."
 add_setting MIN_FREE_GB 5 "Сколько гигабайт оставлять свободными на диске. Если свободно меньше, новая книга или файл не примутся."
 add_setting WATERMARK 1 "Подпись на страницах книг (имя и почта читателя): 1 включена, 0 выключена. На администратора не действует."
 add_setting READ_LOG 1 "Журнал чтения (кто, когда, какую книгу открывал): 1 включён, 0 выключен. Записи, которые уже есть, хранятся до срока."
@@ -143,9 +144,9 @@ if ! "$APP_DIR/venv/bin/python3" -c "import mobi, ocrmypdf" >/dev/null 2>&1; the
     echo "  Модуль для MOBI и AZW3 не установился (нет доступа к pypi.org?). Запустите позже: bash $APP_DIR/src/deploy/update.sh"
 fi
 
-# Папки книг и файлов уроков лежат рядом с pb_data, а не внутри: ежедневная копия базы
+# Папки книг, файлов уроков и аудио лежат рядом с pb_data, а не внутри: ежедневная копия базы
 # не разрастается на гигабайты.
-mkdir -p "$APP_DIR/books" "$APP_DIR/files"
+mkdir -p "$APP_DIR/books" "$APP_DIR/files" "$APP_DIR/audio"
 chmod 600 "$ENV"
 chown -R "$APP:$APP" "$APP_DIR"
 

@@ -10,6 +10,7 @@
   drm   ВХОД                                  защищён ли MOBI/AZW3 (Kindle DRM)
   ocr   ВХОД.pdf ВЫХОД.pdf --work ПАПКА --langs rus+eng
                                               распознавание (ocrmypdf), ход работы в ПАПКА/progress.json
+  audio ВХОД                                  глава аудио (правки 4.3): MP3 или M4A по содержимому, длительность
 Ответ всегда одна строка JSON на stdout; ошибка: {"error": "понятное сообщение"}. Код выхода 0,
 кроме внезапного сбоя самой программы.
 """
@@ -1602,6 +1603,209 @@ def cmd_ocr(src, dst, work, langs):
 
 
 # ======================================================================================
+# Аудио (правки 4.3): проверка содержимого и длительность без сторонних программ
+# ======================================================================================
+# MP3: заголовки кадров MPEG Audio Layer III; длительность из заголовка Xing/Info или VBRI (его пишут LAME,
+# Audacity, iTunes), иначе по битрейту (постоянный) или перебором кадров (переменный без заголовка).
+# M4A: контейнер MP4 (ftyp, moov), дорожка со звуком AAC (mp4a) или ALAC; длительность из mvhd.
+# Файл читается кусками, целиком в память не загружается.
+MP3_BITRATES = {
+    (1, 3): [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+    (2, 3): [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+}
+MP3_RATES = {1: [44100, 48000, 32000], 2: [22050, 24000, 16000], 25: [11025, 12000, 8000]}
+
+
+def mp3_frame(h):
+    """Разбор 4 байт заголовка кадра MP3. None, если это не кадр Layer III."""
+    if len(h) < 4 or h[0] != 0xFF or (h[1] & 0xE0) != 0xE0:
+        return None
+    ver_bits = (h[1] >> 3) & 3
+    layer_bits = (h[1] >> 1) & 3
+    if ver_bits == 1 or layer_bits != 1:  # зарезервировано; нужен только Layer III
+        return None
+    ver = {3: 1, 2: 2, 0: 25}[ver_bits]
+    br_i = (h[2] >> 4) & 15
+    sr_i = (h[2] >> 2) & 3
+    if br_i in (0, 15) or sr_i == 3:
+        return None
+    br = MP3_BITRATES[(1 if ver == 1 else 2, 3)][br_i] * 1000
+    sr = MP3_RATES[ver][sr_i]
+    pad = (h[2] >> 1) & 1
+    mode = (h[3] >> 6) & 3
+    spf = 1152 if ver == 1 else 576
+    length = (144 if ver == 1 else 72) * br // sr + pad
+    return {"ver": ver, "br": br, "sr": sr, "length": length, "spf": spf, "channels": 1 if mode == 3 else 2}
+
+
+def audio_mp3(f, size):
+    head = f.read(10)
+    start = 0
+    if head[:3] == b"ID3" and len(head) == 10:
+        start = 10 + ((head[6] & 0x7F) << 21 | (head[7] & 0x7F) << 14 | (head[8] & 0x7F) << 7 | (head[9] & 0x7F))
+        if head[5] & 0x10:
+            start += 10
+    f.seek(start)
+    buf = f.read(256 * 1024)
+    first, pos = None, 0
+    while pos < len(buf) - 4:
+        i = buf.find(b"\xff", pos)
+        if i < 0 or i > len(buf) - 4:
+            break
+        fr = mp3_frame(buf[i:i + 4])
+        if fr:
+            # настоящий кадр: следующий кадр стоит сразу за ним
+            j = i + fr["length"]
+            nxt = mp3_frame(buf[j:j + 4]) if j + 4 <= len(buf) else None
+            if nxt and nxt["sr"] == fr["sr"]:
+                first, pos = fr, i
+                break
+        pos = i + 1
+    if not first:
+        return None
+    audio_start = start + pos
+    end = size
+    f.seek(max(0, size - 128))
+    if f.read(3) == b"TAG":
+        end -= 128
+    # Xing / Info
+    side = (32 if first["channels"] == 2 else 17) if first["ver"] == 1 else (17 if first["channels"] == 2 else 9)
+    fb = buf[pos:pos + first["length"] + 200]
+    x = 4 + side
+    frames = 0
+    if fb[x:x + 4] in (b"Xing", b"Info"):
+        flags = int.from_bytes(fb[x + 4:x + 8], "big")
+        if flags & 1:
+            frames = int.from_bytes(fb[x + 8:x + 12], "big")
+    elif fb[36:40] == b"VBRI":
+        frames = int.from_bytes(fb[50:54], "big")
+    if frames:
+        dur = frames * first["spf"] / first["sr"]
+        return {"format": "mp3", "duration": round(dur, 2), "bitrate": int((end - audio_start) * 8 / dur) if dur else first["br"],
+                "sample_rate": first["sr"], "channels": first["channels"]}
+    # без заголовка: смотрим первые кадры; одинаковый битрейт значит постоянный
+    rates, p, n = set(), pos, 0
+    while n < 60 and p + 4 <= len(buf):
+        fr = mp3_frame(buf[p:p + 4])
+        if not fr:
+            break
+        rates.add(fr["br"])
+        p += fr["length"]
+        n += 1
+    if len(rates) <= 1:
+        dur = (end - audio_start) * 8 / first["br"]
+        return {"format": "mp3", "duration": round(dur, 2), "bitrate": first["br"], "sample_rate": first["sr"], "channels": first["channels"]}
+    # переменный битрейт без заголовка: считаем кадры по всему файлу
+    total, p, t0 = 0, audio_start, time.time()
+    while p + 4 <= end and time.time() - t0 < 60:
+        f.seek(p)
+        fr = mp3_frame(f.read(4))
+        if not fr:
+            break
+        total += 1
+        p += fr["length"]
+    dur = total * first["spf"] / first["sr"]
+    return {"format": "mp3", "duration": round(dur, 2), "bitrate": int((end - audio_start) * 8 / dur) if dur else 0,
+            "sample_rate": first["sr"], "channels": first["channels"]}
+
+
+def mp4_boxes(f, start, end):
+    """Коробки MP4 на одном уровне: (тип, начало данных, конец)."""
+    p = start
+    while p + 8 <= end:
+        f.seek(p)
+        h = f.read(8)
+        if len(h) < 8:
+            break
+        size = int.from_bytes(h[:4], "big")
+        typ = h[4:8]
+        data = p + 8
+        if size == 1:
+            size = int.from_bytes(f.read(8), "big")
+            data = p + 16
+        elif size == 0:
+            size = end - p
+        if size < 8 or p + size > end:
+            break
+        yield typ, data, p + size
+        p += size
+
+
+def mp4_find(f, start, end, path):
+    for typ, data, stop in mp4_boxes(f, start, end):
+        if typ == path[0]:
+            if len(path) == 1:
+                return data, stop
+            r = mp4_find(f, data, stop, path[1:])
+            if r:
+                return r
+    return None
+
+
+def audio_m4a(f, size):
+    f.seek(0)
+    h = f.read(12)
+    if len(h) < 12 or h[4:8] != b"ftyp":
+        return None
+    moov = mp4_find(f, 0, size, [b"moov"])
+    if not moov:
+        raise Fail("Файл M4A неполный: в нём нет описания звука (moov). Сохраните его заново.")
+    f.seek(moov[0])
+    mv = mp4_find(f, moov[0], moov[1], [b"mvhd"])
+    if not mv:
+        raise Fail("Файл M4A неполный: нет длительности. Сохраните его заново.")
+    f.seek(mv[0])
+    d = f.read(32)
+    if d[0] == 1:
+        scale = int.from_bytes(d[20:24], "big")
+        dur = int.from_bytes(d[24:32], "big")
+    else:
+        scale = int.from_bytes(d[12:16], "big")
+        dur = int.from_bytes(d[16:20], "big")
+    sound, video, codec = False, False, ""
+    for typ, data, stop in mp4_boxes(f, moov[0], moov[1]):
+        if typ != b"trak":
+            continue
+        hd = mp4_find(f, data, stop, [b"mdia", b"hdlr"])
+        if not hd:
+            continue
+        f.seek(hd[0] + 8)
+        kind = f.read(4)
+        if kind == b"vide":
+            video = True
+        if kind == b"soun":
+            sound = True
+            sd = mp4_find(f, data, stop, [b"mdia", b"minf", b"stbl", b"stsd"])
+            if sd:
+                f.seek(sd[0] + 12)
+                codec = f.read(4).decode("latin-1", "replace")
+    if video:
+        raise Fail("Это видео, а нужен звук. Сохраните главу как M4A (AAC) или MP3.")
+    if not sound:
+        raise Fail("В файле нет звука.")
+    if codec not in ("mp4a", "alac"):
+        raise Fail("Звук в этом файле в формате %s, его не все телефоны играют. Сохраните главу как M4A (AAC) или MP3." % (codec or "неизвестном"))
+    seconds = dur / scale if scale else 0
+    return {"format": "m4a", "duration": round(seconds, 2), "codec": codec, "bitrate": int(size * 8 / seconds) if seconds else 0}
+
+
+def cmd_audio(src):
+    size = os.path.getsize(src)
+    if size < 1024:
+        raise Fail("Файл слишком маленький, в нём нет звука.")
+    with open(src, "rb") as f:
+        res = audio_m4a(f, size)
+        if not res:
+            f.seek(0)
+            res = audio_mp3(f, size)
+    if not res:
+        raise Fail("Это не MP3 и не M4A: содержимое файла не похоже на звук. Сохраните главу как MP3 или M4A.")
+    if res["duration"] < 1:
+        raise Fail("Не получилось узнать длительность записи. Сохраните главу заново.")
+    return res
+
+
+# ======================================================================================
 # Запуск
 # ======================================================================================
 def main(argv):
@@ -1630,7 +1834,8 @@ def main(argv):
             res = cmd_drm(a.src)
         elif a.cmd == "ocr":
             res = cmd_ocr(a.src, a.dst, a.work, a.langs)
-            
+        elif a.cmd == "audio":
+            res = cmd_audio(a.src)
         elif a.cmd == "cover":
             with open(a.dst, "wb") as f:
                 f.write(make_cover(a.title, a.author))

@@ -229,9 +229,9 @@ routerAdd("GET", "/api/knigi/f/cover/{id}", (e) => {
 // переведённым в PDF, FB2, MOBI, AZW3 и TXT переведёнными в EPUB (правки 3.1): view говорит, какой читалкой открывать.
 routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
-  require(`${__hooks}/access_lib.js`).requireBooks(e.auth); // срок доступа (правки 4.1): без доступа книги не открываются
-  // скрытая книга (правки 4.1): ссылку получает только администратор, читателю «Книга временно недоступна»
-  const b = require(`${__hooks}/lib.js`).openBook(e.request.pathValue("id"), e.auth);
+  // срок доступа первым (правки 4.1; без доступа только своя одобренная книга, правки 4.3), потом видимость:
+  // скрытую книгу открывает администратор и те, кому её открыли, остальным «Книга временно недоступна»
+  const b = require(`${__hooks}/lib.js`).openForRead(e.request.pathValue("id"), e.auth);
   const fmt = String((e.requestInfo().query || {}).f || "pdf");
   const view = F.VIEW[fmt];
   if (!view) throw new BadRequestError("Такой формат читалка не открывает.");
@@ -254,11 +254,11 @@ routerAdd("GET", "/api/knigi/f/book/{id}", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   const id = e.request.pathValue("id");
   const user = F.linkUser(e, "book", id);
-  require(`${__hooks}/access_lib.js`).requireBooks(user); // выданная раньше ссылка тоже перестаёт работать
   let f = null;
   try { f = $app.findRecordById("book_files", id); } catch (_) {}
-  if (!f) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
-  const b = require(`${__hooks}/lib.js`).openBook(f.getString("book"), user); // на проверке или скрыта: не отдаётся
+  if (!f) { require(`${__hooks}/access_lib.js`).requireBooks(user); throw new NotFoundError("Книга не найдена: возможно, её удалили."); }
+  // срок доступа (выданная раньше ссылка тоже перестаёт работать, кроме своей одобренной книги) и видимость
+  const b = require(`${__hooks}/lib.js`).openForRead(f.getString("book"), user);
   const name = f.getString("file");
   const size = f.getInt("file_size");
   const whole = F.VIEW[f.getString("format")] === "epub" && !e.request.header.get("Range");
@@ -336,9 +336,9 @@ routerAdd("GET", "/api/knigi/f/file/{id}", (e) => {
 
 // Прогресс чтения и какие страницы открыты (для журнала). Пишет только сервер.
 routerAdd("POST", "/api/knigi/books/{id}/progress", (e) => {
-  require(`${__hooks}/access_lib.js`).guard(e);
   const F = require(`${__hooks}/files_lib.js`);
-  const b = require(`${__hooks}/lib.js`).openBook(e.request.pathValue("id"), e.auth);
+  // без доступа прогресс пишется только по своей одобренной книге (правки 4.3)
+  const b = require(`${__hooks}/lib.js`).openForRead(e.request.pathValue("id"), e.auth);
   const body = e.requestInfo().body || {};
   // формат файла; читалка PDF (страница: PDF, DjVu) или EPUB (процент и место: EPUB, FB2, MOBI, AZW3, TXT).
   // Старое приложение формат не присылает, это PDF.
@@ -601,7 +601,9 @@ routerAdd("GET", "/api/knigi/disk", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   const sum = new DynamicModel({ total: 0, count: 0 });
   $app.db().select("COALESCE(SUM(file_size), 0) as total", "COUNT(DISTINCT book) as count").from("book_files").one(sum);
-  return e.json(200, { free: F.freeBytes(), min: F.S.minFree(), books: sum.total, count: sum.count });
+  const au = new DynamicModel({ total: 0, count: 0 });
+  $app.db().select("COALESCE(SUM(size), 0) as total", "COUNT(*) as count").from("audio_tracks").one(au);
+  return e.json(200, { free: F.freeBytes(), min: F.S.minFree(), books: sum.total, count: sum.count, audio: au.total, audio_count: au.count });
 }, $apis.requireAuth("users"));
 
 /* ---------- Журнал чтения (только администратор) ---------- */
@@ -620,7 +622,8 @@ routerAdd("GET", "/api/knigi/admin/log", (e) => {
   for (const u of $app.findAllRecords("users")) people[u.id] = { id: u.id, name: u.getString("name"), email: u.getString("email"), admin: u.getString("role") === "admin" };
   return e.json(200, {
     rows: rows.map((r) => ({ id: r.id, hour: r.getString("hour"), user: r.getString("user"), book: r.getString("book"), book_title: r.getString("book_title"),
-      pages_seen: r.getInt("pages_seen"), bytes_sent: r.getInt("bytes_sent"), over_limit: r.getBool("over_limit") })),
+      pages_seen: r.getInt("pages_seen"), bytes_sent: r.getInt("bytes_sent"), over_limit: r.getBool("over_limit"),
+      listen_sec: r.getInt("listen_sec"), listen: (() => { try { const v = JSON.parse(toString(r.get("listen")) || "[]"); return Array.isArray(v) ? v : []; } catch (_) { return []; } })() })),
     users: Object.keys(people).map((k) => people[k]),
     settings: { log: F.S.readLog(), days: F.S.logDays(), limit: F.S.maxBytesHour(), watermark: F.S.watermark() },
   });

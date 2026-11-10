@@ -171,4 +171,7 @@ function myAccess(e) {
   return e.json(200, { active: st.active, reason: st.reason, until: st.until, suspended: st.suspended, admin: st.admin, today: st.today, contact: contact() });
 }
 
-module.exports = { today, addMonths, state, guard, guardProfile, requireBooks, message, booksMessage, untilFor, PERIODS, checkInvite, applyInvite, adminUsers, adminAccess, myAccess };
+// Действует ли доступ у человека (запись или id)
+function isActive(userOrId) { const u = userOf(userOrId); return !!u && state(u).active; }
+
+module.exports = { today, addMonths, state, isActive, guard, guardProfile, requireBooks, message, booksMessage, untilFor, PERIODS, checkInvite, applyInvite, adminUsers, adminAccess, myAccess };

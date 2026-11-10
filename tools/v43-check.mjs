@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Проверка правок 4.3 на локальном PocketBase: скрытая книга для отдельных читателей (часть А). Без внешних пакетов, Node 18+. Обычно запускается из tools/v43-check.sh,
+// Проверка правок 4.3 на локальном PocketBase: скрытая книга для отдельных читателей (часть А)
+// и аудио к книгам (часть Б). Без внешних пакетов, Node 18+. Обычно запускается из tools/v43-check.sh,
 // который сам поднимает чистый PocketBase. Настройки: KN_BASE, KN_DATA (папка pb_data, для просроченной ссылки),
 // KN_AUDIO (папка аудио, для проверки удаления файлов).
 //
@@ -186,6 +187,61 @@ async function coverStatus(token, id) {
   return r.status;
 }
 
+/* ---------- Тестовые аудиофайлы (делаются здесь же, без ffmpeg) ---------- */
+// MP3: кадры MPEG-1 Layer III с тишиной, постоянный битрейт. 128 кбит/с, 44,1 кГц, моно: кадр 417 байт, 1152 отсчёта.
+function makeMp3(seconds, kbps = 128) {
+  const idx = { 64: 5, 128: 9 }[kbps];
+  const len = Math.floor(144 * kbps * 1000 / 44100);
+  const n = Math.ceil(seconds * 44100 / 1152);
+  const frame = Buffer.alloc(len);
+  frame[0] = 0xff; frame[1] = 0xfb; frame[2] = idx << 4; frame[3] = 0xc0;
+  const id3 = Buffer.from([0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, 0]); // пустой заголовок ID3v2
+  return Buffer.concat([id3, ...Array(n).fill(frame)]);
+}
+// M4A: коробки ftyp, moov (mvhd, дорожка со звуком mp4a), mdat. Для проверки сервера, не для прослушивания.
+function box(type, ...parts) { const body = Buffer.concat(parts); const h = Buffer.alloc(8); h.writeUInt32BE(8 + body.length, 0); h.write(type, 4, "latin1"); return Buffer.concat([h, body]); }
+function makeM4a(seconds, opts = {}) {
+  const mvhd = Buffer.alloc(100); mvhd.writeUInt32BE(1000, 12); mvhd.writeUInt32BE(Math.round(seconds * 1000), 16);
+  const hdlr = Buffer.concat([Buffer.alloc(8), Buffer.from(opts.video ? "vide" : "soun"), Buffer.alloc(13)]);
+  const entry = box(opts.codec || "mp4a", Buffer.alloc(28));
+  const stsd = Buffer.concat([Buffer.alloc(4), Buffer.from([0, 0, 0, 1]), entry]);
+  const trak = box("trak", box("mdia", box("hdlr", hdlr), box("minf", box("stbl", box("stsd", stsd)))));
+  return Buffer.concat([box("ftyp", Buffer.from("M4A "), Buffer.alloc(4), Buffer.from("M4A isom")), box("moov", box("mvhd", mvhd), trak), box("mdat", Buffer.alloc(4096))]);
+}
+async function uploadAudio(token, buf, { name, book, track, title }) {
+  let r = await req("POST", "/api/knigi/upload/start", { token, json: { name, size: buf.length, kind: "audio", book, track, title } });
+  if (r.status !== 200) return { error: r };
+  const up = r.data.upload;
+  for (let i = 0; i < r.data.chunks; i++) {
+    const fd = new FormData();
+    fd.append("chunk", new Blob([buf.subarray(i * r.data.chunk, (i + 1) * r.data.chunk)]), "chunk");
+    const c = await fetch(`${BASE}/api/knigi/upload/${up}/${i}`, { method: "POST", headers: { Authorization: token }, body: fd });
+    if (c.status !== 200) return { error: { status: c.status, text: await c.text() } };
+  }
+  r = await req("POST", `/api/knigi/upload/${up}/finish`, { token, json: {} });
+  return r.status === 200 ? r.data : { error: r };
+}
+const tracks = async (t, bookId) => ((await req("GET", `/api/collections/audio_tracks/records?perPage=200&${flt(`book = '${bookId}'`)}&sort=sort`, { token: t })).data || { items: [] }).items;
+async function audioFile(token, trackId, range, noCookie) {
+  const l = await req("GET", `/api/knigi/audio/${trackId}/link`, { token });
+  if (l.status !== 200) return { link: l };
+  const h = {};
+  if (!noCookie) h.Cookie = cookieOf(l);
+  if (range) h.Range = range;
+  const f = await fetch(BASE + l.data.url, { headers: h });
+  const body = Buffer.from(await f.arrayBuffer());
+  return { link: l, status: f.status, type: f.headers.get("content-type"), range: f.headers.get("content-range"), cache: f.headers.get("cache-control"), len: body.length, cookie: cookieOf(l) };
+}
+// Ссылка, чей срок уже прошёл (подписана тем же ключом, что у сервера)
+function expiredLink(trackId, userId) {
+  const key = readFileSync(join(DATA, "files.key"), "utf8");
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const head = b64({ alg: "HS256", typ: "JWT" }), body = b64({ k: "audio", i: trackId, u: userId, exp: Math.floor(Date.now() / 1000) - 60 });
+  const sig = createHmac("sha256", key).update(head + "." + body).digest("base64url");
+  return `/api/knigi/f/audio/${trackId}?t=${head}.${body}.${sig}`;
+}
+const audioFiles = () => (AUDIO && existsSync(AUDIO) ? readdirSync(AUDIO).filter((n) => !n.endsWith(".attrs")) : []);
+
 /* ---------- Часть А: книга для отдельных читателей ---------- */
 async function partA(T) {
   const { admin, anna, boris } = T;
@@ -323,6 +379,235 @@ async function partA(T) {
   return { X, Y, C, group: g };
 }
 
+/* ---------- Часть Б: аудио ---------- */
+async function partB(T, A) {
+  const { admin, anna, boris } = T;
+  const annaId = uid(anna);
+  section("Б1. Книга только из аудио");
+  let r = await req("POST", "/api/knigi/audio-books", { token: admin, json: { title: "Аудиокнига без текста", authors: "Иван Чтецов" } });
+  ok(r.status === 200 && r.data.id, "администратор создал книгу только из аудио", r.text);
+  const AB = (await viewBook(admin, r.data.id)).data;
+  ok(AB.hidden === true && AB.formats.length === 0 && AB.status === "ready", "она скрыта, форматов нет, состояние «готова»", AB);
+  ok((await req("POST", "/api/knigi/audio-books", { token: anna, json: { title: "x" } })).status === 403, "читатель такую книгу не создаёт");
+  ok((await viewBook(anna, AB.id)).status === 404, "читатель её не видит");
+  const rl = await req("GET", `/api/knigi/books/${AB.id}/link?f=pdf`, { token: admin });
+  ok(rl.status === 404, "ссылки «Читать» нет: файла книги нет", rl.text);
+
+  section("Б2. Загрузка глав: черновик, проверка содержимого");
+  const mp3 = makeMp3(200), m4a = makeM4a(95.5);
+  let up = await uploadAudio(admin, mp3, { name: "Предисловие.mp3", book: AB.id, title: "Предисловие" });
+  ok(up.track && up.format === "mp3" && Math.abs(up.duration - 200) < 1.5, "MP3 загружен, длительность ~200 с", up);
+  const t1 = up.track;
+  up = await uploadAudio(admin, m4a, { name: "Глава 1.m4a", book: AB.id, title: "Глава 1" });
+  ok(up.track && up.format === "m4a" && Math.abs(up.duration - 95.5) < 0.2, "M4A загружен, длительность 95,5 с", up);
+  const t2 = up.track;
+  up = await uploadAudio(admin, Buffer.from("это не звук, а текст ".repeat(200)), { name: "Глава 2.mp3", book: AB.id, title: "Глава 2" });
+  ok(up.error && up.error.status === 400 && /не MP3/.test(up.error.data.message), "текст под именем .mp3 отклонён по содержимому", up.error && up.error.text);
+  up = await uploadAudio(admin, makeM4a(5, { video: true }), { name: "Видео.m4a", book: AB.id, title: "Видео" });
+  ok(up.error && /видео/.test(up.error.data.message), "видео под именем .m4a отклонено", up.error && up.error.text);
+  r = await req("POST", "/api/knigi/upload/start", { token: admin, json: { name: "a.wav", size: 1000, kind: "audio", book: AB.id, title: "x" } });
+  ok(r.status === 400, "WAV не принимается", r.text);
+  r = await req("POST", "/api/knigi/upload/start", { token: admin, json: { name: "a.mp3", size: 201 * 1024 * 1024, kind: "audio", book: AB.id, title: "x" } });
+  ok(r.status === 400, "файл больше 200 МБ не принимается", r.text);
+  r = await req("POST", "/api/knigi/upload/start", { token: anna, json: { name: "a.mp3", size: 1000, kind: "audio", book: AB.id, title: "x" } });
+  ok(r.status === 403, "читатель аудио не загружает", r.text);
+  let list = await tracks(admin, AB.id);
+  ok(list.length === 2 && list.every((t) => !t.published) && list[0].title === "Предисловие", "у администратора две главы, обе черновики, по порядку", list);
+  ok(list.every((t) => t.file === undefined), "имя файла на диске не отдаётся");
+  ok(audioFiles().length === 2, "в папке аудио два файла", audioFiles());
+
+  section("Б3. Черновик видит и слушает только администратор");
+  await setReaders(admin, AB.id, [annaId]);
+  ok((await viewBook(anna, AB.id)).status === 200, "книгу открыли Анне");
+  ok((await tracks(anna, AB.id)).length === 0, "черновики Анна не видит");
+  let af = await audioFile(anna, t1);
+  ok(af.link.status === 404, "ссылку на черновик Анна не получает", af.link.text);
+  af = await audioFile(admin, t1, "bytes=0-1023");
+  ok(af.status === 206 && af.len === 1024 && af.type === "audio/mpeg", "администратор слушает черновик: часть файла 206, audio/mpeg", af);
+
+  section("Б4. Публикация, ссылка, кука, части файла");
+  r = await req("POST", `/api/knigi/audio/${t1}`, { token: admin, json: { published: true } });
+  ok(r.status === 200 && r.data.published && r.data.published_at, "«Опубликовать»: дата публикации поставлена", r.text);
+  ok((await req("POST", `/api/knigi/audio/${t1}`, { token: anna, json: { published: false } })).status === 403, "читатель публикацию не меняет");
+  list = await tracks(anna, AB.id);
+  ok(list.length === 1 && list[0].id === t1, "Анна видит только опубликованную главу", list);
+  af = await audioFile(anna, t1, "bytes=1000-1999");
+  ok(af.link.status === 200 && af.link.data.ttl === 7200, "ссылка на 2 часа", af.link.text);
+  ok(af.status === 206 && af.len === 1000 && /^bytes 1000-1999\//.test(af.range || ""), "запрос части файла: 206 и Content-Range", af);
+  ok(/no-store/.test(af.cache || ""), "файл с запретом сохранения (no-store)");
+  af = await audioFile(anna, t1, "bytes=0-99", true);
+  ok(af.status === 401, "без куки ссылка не открывается", af.status);
+  if (DATA) {
+    const s = await req("GET", "/api/knigi/session", { token: anna });
+    const ex = await fetch(BASE + expiredLink(t1, annaId), { headers: { Cookie: cookieOf(s), Range: "bytes=0-99" } });
+    ok(ex.status === 401, "ссылка старше 2 часов не открывается", ex.status);
+  }
+  af = await audioFile(boris, t1);
+  ok(af.link.status === 404, "Борису книга не открыта: ссылки нет", af.link.text);
+  ok((await tracks(boris, AB.id)).length === 0, "и глав он не видит");
+  // ограничение скорости на аудио не действует (в проверке MAX_MB_PER_HOUR = 1, глава 3 МБ)
+  af = await audioFile(anna, t1);
+  const af2 = await audioFile(anna, t1);
+  ok(af.status === 200 && af2.status === 200 && af.len === mp3.length, "главу 3 МБ можно получить дважды за минуту: лимит книг на аудио не действует", [af.status, af2.status]);
+  const mf = await audioFile(admin, t2, "bytes=0-9");
+  ok(mf.type === "audio/mp4", "M4A отдаётся как audio/mp4");
+
+  section("Б5. Прогресс слушания и журнал");
+  r = await req("POST", `/api/knigi/audio/${t1}/progress`, { token: anna, json: { pos: 42.5, played: 40 } });
+  ok(r.status === 200 && r.data.pos === 42.5 && r.data.done === false, "позиция 42,5 с сохранена", r.text);
+  r = await req("POST", `/api/knigi/audio/${t1}/progress`, { token: anna, json: { pos: 199, played: 30, done: true } });
+  ok(r.status === 200 && r.data.done === true, "глава отмечена прослушанной", r.text);
+  const ap = (await req("GET", "/api/collections/audio_progress/records", { token: anna })).data.items;
+  ok(ap.length === 1 && ap[0].pos === 199 && ap[0].book === AB.id, "Анна читает свой прогресс", ap);
+  ok((await req("GET", "/api/collections/audio_progress/records", { token: boris })).data.items.length === 0, "Борис чужой прогресс не видит");
+  ok((await req("GET", `/api/collections/audio_progress/records/${ap[0].id}`, { token: admin })).status === 404, "администратор чужой прогресс через API не видит");
+  ok((await req("PATCH", `/api/collections/audio_progress/records/${ap[0].id}`, { token: anna, json: { pos: 1 } })).status >= 400, "через API прогресс не меняется, только маршрутом");
+  ok((await req("POST", `/api/knigi/audio/${t1}/progress`, { token: boris, json: { pos: 5 } })).status === 404, "Борис прогресс не пишет");
+  const lg = await req("GET", `/api/knigi/admin/log?days=1&book=${AB.id}`, { token: admin });
+  const row = (lg.data.rows || [])[0] || {};
+  ok(row.listen_sec === 70 && (row.listen || []).some((x) => x.t === "Предисловие" && x.s === 70), "в журнале: Анна слушала 70 с, глава «Предисловие»", row);
+
+  section("Б6. Срок доступа и видимость книги");
+  r = await req("POST", "/api/knigi/admin/access", { token: admin, json: { user: annaId, action: "set", date: "2020-01-01" } });
+  ok(r.status === 200, "у Анны срок закончился", r.text);
+  ok((await tracks(anna, AB.id)).length === 1, "список глав Анна видит");
+  af = await audioFile(anna, t1);
+  ok(af.link.status === 403 && /Срок доступа/.test(af.link.data.message), "ссылку на главу не получает: «Срок доступа закончился»", af.link.text);
+  ok((await req("POST", `/api/knigi/audio/${t1}/progress`, { token: anna, json: { pos: 3 } })).status === 403, "прогресс не пишется");
+  await req("POST", "/api/knigi/admin/access", { token: admin, json: { user: annaId, action: "unlimited" } });
+  af = await audioFile(anna, t1, "bytes=0-9");
+  ok(af.status === 206, "доступ вернули: слушает снова");
+  await setReaders(admin, AB.id, []);
+  ok((await tracks(anna, AB.id)).length === 0, "Анну убрали из списка книги: глав не видно");
+  af = await audioFile(anna, t1);
+  ok(af.link.status === 403 || af.link.status === 404, "и ссылки нет", af.link.text);
+  await setVis(admin, AB.id, false);
+  ok((await tracks(boris, AB.id)).length === 1, "книгу открыли всем: Борис видит опубликованную главу");
+  await setVis(admin, AB.id, true);
+  ok((await tracks(boris, AB.id)).length === 0, "книгу скрыли: аудио тоже скрыто");
+  await setReaders(admin, AB.id, [annaId]);
+
+  section("Б7. Снять с публикации, переименовать, переставить");
+  await req("POST", `/api/knigi/audio/${t2}`, { token: admin, json: { published: true } });
+  ok((await tracks(anna, AB.id)).length === 2, "опубликована вторая глава");
+  r = await req("POST", `/api/knigi/audio/${t2}`, { token: admin, json: { published: false } });
+  ok(r.status === 200 && !r.data.published, "«Снять с публикации»");
+  ok((await tracks(anna, AB.id)).length === 1 && (await audioFile(anna, t2)).link.status === 404, "снятая глава Анне не видна, ссылки нет");
+  r = await req("POST", `/api/knigi/audio/${t2}`, { token: admin, json: { title: "Глава первая" } });
+  ok(r.status === 200 && r.data.title === "Глава первая", "переименовали");
+  await req("POST", `/api/knigi/audio/${t2}/move`, { token: admin, json: { dir: -1 } });
+  list = await tracks(admin, AB.id);
+  ok(list[0].id === t2 && list[1].id === t1, "переставили вверх", list.map((t) => t.title));
+  await req("POST", `/api/knigi/audio/${t2}/move`, { token: admin, json: { dir: 1 } });
+  ok((await tracks(admin, AB.id))[0].id === t1, "и обратно вниз");
+  ok((await req("POST", `/api/knigi/audio/${t2}/move`, { token: anna, json: { dir: -1 } })).status === 403, "читатель порядок не меняет");
+
+  section("Б8. Заменить файл главы");
+  const before = audioFiles();
+  up = await uploadAudio(admin, makeMp3(60, 64), { name: "Глава 1 новая.mp3", track: t2 });
+  ok(up.track === t2 && up.format === "mp3" && Math.abs(up.duration - 60) < 1, "файл главы заменён (M4A → MP3, 60 с)", up);
+  const after = audioFiles();
+  ok(after.length === before.length && after.some((n) => n.startsWith(t2) && n.endsWith(".mp3")) && !after.some((n) => n.startsWith(t2) && n.endsWith(".m4a")), "старый файл удалён с диска", after);
+
+  section("Б9. Группы");
+  r = await req("POST", "/api/knigi/groups", { token: admin, json: { name: "Аудио", book: AB.id } });
+  ok(r.status === 400 && /только аудио/.test(r.data.message), "книгу только из аудио нельзя выбрать книгой группы", r.text);
+
+  section("Б10. Книге только из аудио добавили PDF");
+  // добавить формат = upload/start с book
+  let s = await req("POST", "/api/knigi/upload/start", { token: admin, json: { name: "Текст.pdf", size: makePdf("Text for AB").length, kind: "book", book: AB.id } });
+  const fd = new FormData(); fd.append("chunk", new Blob([makePdf("Text for AB")]), "chunk");
+  await fetch(`${BASE}/api/knigi/upload/${s.data.upload}/0`, { method: "POST", headers: { Authorization: admin }, body: fd });
+  s = await req("POST", `/api/knigi/upload/${s.data.upload}/finish`, { token: admin, json: {} });
+  await req("POST", "/api/knigi/process", { token: admin, json: {} });
+  const AB2 = await waitReady(admin, AB.id);
+  ok(AB2.formats.includes("pdf") && AB2.title === "Аудиокнига без текста", "теперь у книги есть PDF, название прежнее", AB2);
+  const rfa = await readFile(anna, AB.id);
+  ok(rfa.link.status === 200 && rfa.file === 206, "Анна читает её в читалке");
+  ok((await tracks(anna, AB.id)).length === 1, "аудио осталось");
+
+  section("Б11. Объединение переносит главы и прогресс");
+  const M = await waitReady(admin, (await upload(admin, "Тестов - Книга M.epub", makeEpub("Книга M"))).id);
+  up = await uploadAudio(admin, makeMp3(30, 64), { name: "m.mp3", book: M.id, title: "Глава M" });
+  await req("POST", `/api/knigi/audio/${up.track}`, { token: admin, json: { published: true } });
+  await setReaders(admin, M.id, [annaId]);
+  await req("POST", `/api/knigi/audio/${up.track}/progress`, { token: anna, json: { pos: 12 } });
+  r = await req("GET", `/api/knigi/books/${AB.id}/merge/${M.id}`, { token: admin });
+  ok(r.data.audio === 1, "перед объединением видно: перейдёт 1 глава", r.text);
+  r = await req("POST", `/api/knigi/books/${AB.id}/merge/${M.id}`, { token: admin, json: {} });
+  ok(r.status === 200, "книги объединены", r.text);
+  list = await tracks(admin, AB.id);
+  ok(list.length === 3 && list[2].id === up.track, "глава второй книги встала третьей", list.map((t) => t.title));
+  const pm = (await req("GET", `/api/collections/audio_progress/records?${flt(`track = '${up.track}'`)}`, { token: anna })).data.items;
+  ok(pm.length === 1 && pm[0].book === AB.id && pm[0].pos === 12, "прогресс Анны перешёл к первой книге", pm);
+
+  section("Б12. Удаление главы и книги удаляет файлы");
+  const nBefore = audioFiles().length;
+  r = await req("DELETE", `/api/knigi/audio/${up.track}`, { token: admin });
+  ok(r.status === 200, "глава удалена");
+  ok(audioFiles().length === nBefore - 1 && !audioFiles().some((n) => n.startsWith(up.track)), "её файл удалён с диска");
+  ok((await req("GET", `/api/collections/audio_progress/records?${flt(`track = '${up.track}'`)}`, { token: anna })).data.items.length === 0, "и прогресс по ней");
+  r = await req("DELETE", `/api/knigi/books/${AB.id}?notes=keep`, { token: admin });
+  ok(r.status === 200, "книга удалена");
+  await sleep(200);
+  ok(audioFiles().length === 0, "все аудиофайлы книги удалены с диска", audioFiles());
+  ok((await req("GET", "/api/collections/audio_progress/records", { token: anna })).data.items.length === 0, "прогресс слушания удалён");
+}
+
+/* ---------- Своя одобренная книга без доступа (дополнение к срокам доступа) ---------- */
+async function partC(T, A) {
+  const { admin, anna, boris } = T;
+  const annaId = uid(anna);
+  section("В1. Анна предложила книгу, её одобрили; у Анны закончился срок");
+  const of = await upload(anna, "Анна - Моя книга.pdf", makePdf("Annas own book"), "offer");
+  ok(of && of.id, "Анна предложила книгу", of);
+  const pend = (await req("GET", `/api/collections/books/records?${flt("pending = true")}`, { token: admin })).data.items[0];
+  await waitReady(admin, pend.id);
+  ok((await req("POST", `/api/knigi/offers/${of.id}/approve`, { token: admin, json: { shelves: [] } })).status === 200, "администратор одобрил");
+  const OWN = pend.id;
+  let up = await uploadAudio(admin, makeMp3(20, 64), { name: "own.mp3", book: OWN, title: "Глава своей книги" });
+  await req("POST", `/api/knigi/audio/${up.track}`, { token: admin, json: { published: true } });
+  const ownTrack = up.track;
+  await req("POST", "/api/knigi/admin/access", { token: admin, json: { user: annaId, action: "set", date: "2020-01-01" } });
+  let rf = await readFile(anna, OWN);
+  ok(rf.link.status === 200 && rf.file === 206, "без доступа Анна читает свою одобренную книгу (ссылка и файл)", rf.link.text);
+  ok((await progress(anna, OWN, { format: "pdf", page: 2, pages: 5, seen: [1, 2] })).status === 200, "прогресс чтения своей книги сохраняется");
+  let af = await audioFile(anna, ownTrack, "bytes=0-99");
+  ok(af.link.status === 200 && af.status === 206, "и слушает её аудио", af.link.text);
+  ok((await req("POST", `/api/knigi/audio/${ownTrack}/progress`, { token: anna, json: { pos: 5, played: 5 } })).status === 200, "место в аудио сохраняется");
+  const n = await req("POST", "/api/collections/notes/records", { token: anna, json: { owner: annaId, kind: "note", book: OWN, title: "x", body: "<p>x</p>" } });
+  ok(n.status === 403, "заметку по своей книге без доступа не создать", n.text);
+  const hl = await req("POST", "/api/collections/notes/records", { token: anna, json: { owner: annaId, kind: "highlight", book: OWN, format: "pdf", page: 1, quote: "Annas", color: "yellow", anchor: { v: 1, rects: [[0.1, 0.1, 0.2, 0.02]], s: 0, e: 4 } } });
+  ok(hl.status === 403, "цитату тоже", hl.text);
+  ok((await req("POST", "/api/collections/marks/records", { token: anna, json: { user: annaId, book: OWN, status: "reading" } })).status === 403, "«Читаю» тоже");
+  rf = await readFile(anna, A.C.id, "epub");
+  ok(rf.link.status === 403 && /Срок доступа/.test(rf.link.data.message), "чужую книгу без доступа не открывает", rf.link.text);
+  ok((await progress(anna, A.C.id, { format: "epub", pct: 5 })).status === 403, "и прогресс по чужой не пишет");
+  const lg = await req("GET", `/api/knigi/admin/log?days=1&book=${OWN}`, { token: admin });
+  ok((lg.data.rows || []).some((r) => r.bytes_sent > 0), "журнал чтения по своей книге пишется как обычно");
+
+  section("В2. Своя книга скрыта, открыта лично, объединена");
+  await setVis(admin, OWN, true);
+  rf = await readFile(anna, OWN);
+  ok(rf.link.status === 403 && /Срок доступа/.test(rf.link.data.message), "книгу скрыли: исключение не действует", rf.link.text);
+  ok((await audioFile(anna, ownTrack)).link.status >= 403, "и аудио её тоже");
+  await setReaders(admin, OWN, [annaId]);
+  rf = await readFile(anna, OWN);
+  ok(rf.link.status === 200, "скрытую открыли Анне лично: снова читает");
+  await setReaders(admin, OWN, []);
+  await setVis(admin, OWN, false);
+  const Q = await waitReady(admin, (await upload(admin, "Тестов - Карточка для объединения.epub", makeEpub("Карточка для объединения"))).id);
+  await setVis(admin, Q.id, false);
+  rf = await readFile(anna, Q.id, "epub");
+  ok(rf.link.status === 403, "до объединения другую карточку Анна не открывает");
+  ok((await req("POST", `/api/knigi/books/${Q.id}/merge/${OWN}`, { token: admin, json: {} })).status === 200, "её книгу объединили с другой карточкой");
+  rf = await readFile(anna, Q.id, "pdf");
+  ok(rf.link.status === 200 && rf.file === 206, "исключение действует на всю объединённую карточку (PDF)", rf.link.text);
+  rf = await readFile(anna, Q.id, "epub");
+  ok(rf.link.status === 200, "и на EPUB той карточки");
+  await req("POST", "/api/knigi/admin/access", { token: admin, json: { user: annaId, action: "unlimited" } });
+}
+
 async function main() {
   const s = await req("POST", "/api/collections/users/auth-with-password", { json: { identity: ADMIN.email, password: ADMIN.password } });
   let admin = s.status === 200 ? s.data.token : null;
@@ -334,6 +619,8 @@ async function main() {
   const anna = await register(admin, ANNA), boris = await register(admin, BORIS);
   const T = { admin, anna, boris };
   const A = await partA(T);
+  await partB(T, A);
+  await partC(T, A);
   console.log(`\nПроверок: ${oks + fails}, прошло ${oks}, ошибок ${fails}.`);
   process.exit(fails ? 1 : 0);
 }
