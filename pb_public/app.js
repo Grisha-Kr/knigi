@@ -3135,7 +3135,7 @@ function listenBtn(b, primary){
   const list = tracksOf(b.id);
   if(!list.length || bookNA(b)) return '';
   const nw = audioNew(b.id);
-  return `<a class="btn${primary ? ' primary big' : ''} listen-btn${nw ? ' dot' : ''}" href="#/listen/${b.id}" data-act="au-listen" data-id="${b.id}">${ICON.head}<span>Слушать · ${list.length} ${plural(list.length, TRACKS_W)}</span>${nw ? '<span class="tag new">Новая глава</span>' : ''}</a>`;
+  return `<a class="btn${primary ? ' primary big' : ''} listen-btn${nw ? ' dot' : ''}" href="#/listen/${b.id}" data-act="au-listen" data-id="${b.id}">${ICON.head}<span>Слушать</span>${nw ? '<span class="tag new">Новая глава</span>' : ''}</a>`;
 }
 function trackRow(t, b){
   const p = progOf(t.id), cur = AP.track === t.id, ro = roBook(b);
@@ -3152,7 +3152,7 @@ function audioBlock(b){
   if(!list.length || bookNA(b)) return '';
   const total = list.reduce((n, t) => n + (t.duration || 0), 0);
   const drafts = list.filter(t => !t.published).length;
-  return `<section class="card audio-card" id="audio"><div class="block-h"><h2>Аудио · ${list.length} ${plural(list.length, TRACKS_W)}</h2><span class="muted">${total ? minText(total) : ''}</span></div>
+  return `<section class="card audio-card" id="audio"><div class="block-h"><h2>Аудио <span class="n">${list.length}</span></h2><span class="muted">${total ? minText(total) : ''}</span></div>
     ${isAdmin() && drafts ? `<p class="hint">Черновики видите и слушаете только вы. Читателям глава откроется, когда вы нажмёте «⋯» → «Опубликовать».</p>` : ''}
     <div class="au-list">${list.map(t => trackRow(t, b)).join('')}</div>
     ${isAdmin() ? `<button type="button" class="btn" data-act="au-add" data-id="${b.id}">${ICON.plus}<span>Добавить главу</span></button>` : ''}</section>`;
@@ -3189,7 +3189,7 @@ VIEWS.listen = r => {
       <div class="ap-head"><small>${esc(b.title)}${authorsText(b) ? ' · ' + esc(authorsText(b)) : ''}</small><h1>${esc(t.title)}</h1>${!t.published ? '<span class="tag wait">Черновик</span>' : ''}</div>
       ${ctl}
     </section>
-    <section class="card audio-card"><h2>Главы · ${list.length}</h2><div class="au-list">${list.map(x => trackRow(x, b)).join('')}</div>
+    <section class="card audio-card"><h2>Главы <span class="n">${list.length}</span></h2><div class="au-list">${list.map(x => trackRow(x, b)).join('')}</div>
       ${isAdmin() ? `<button type="button" class="btn" data-act="au-add" data-id="${b.id}">${ICON.plus}<span>Добавить главу</span></button>` : ''}</section>`;
 };
 
