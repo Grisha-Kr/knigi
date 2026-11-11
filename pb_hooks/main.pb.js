@@ -82,7 +82,7 @@ onRecordUpdate((e) => { e.record.set("search", require(`${__hooks}/lib.js`).book
 onRecordUpdateRequest((e) => {
   if (!e.hasSuperuserAuth()) {
     const o = e.record.original();
-    for (const f of ["formats", "text_file", "file_size", "pages", "has_text", "status", "status_note", "cover", "pending", "offered_by", "hidden", "opened_at", "kept_for"]) {
+    for (const f of ["formats", "text_file", "file_size", "pages", "has_text", "status", "status_note", "cover", "pending", "offered_by", "hidden", "opened_at", "kept_for", "audio_note"]) {
       e.record.set(f, o.get(f));
     }
     const title = e.record.getString("title").replace(/\s+/g, " ").trim();

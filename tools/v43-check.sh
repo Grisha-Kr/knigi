@@ -22,5 +22,10 @@ pid=$!
 trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null' EXIT
 for _ in $(seq 1 50); do curl -s -o /dev/null "$KN_BASE/api/health" && break; sleep 0.2; done
 node tools/v43-check.mjs "$@"; code=$?
+# браузер (кнопка «Слушать», описание аудио): только если установлен Playwright с Chromium
+if [ "$code" = 0 ]; then
+  if node -e "require('playwright')" >/dev/null 2>&1; then node tools/v43-ui-check.cjs; code=$?
+  else echo "Проверка в браузере пропущена: нет Playwright (npm install playwright)."; fi
+fi
 [ "$code" = 0 ] && echo "Все проверки прошли. Папка с данными проверки: $WORK" || echo "Есть ошибки. Журнал сервера: $LOG"
 exit $code

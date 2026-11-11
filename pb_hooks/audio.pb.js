@@ -43,6 +43,19 @@ routerAdd("DELETE", "/api/knigi/audio/{id}", (e) => {
   require(`${__hooks}/audio_lib.js`).deleteTrack(e.request.pathValue("id"));
   return e.json(200, { ok: true });
 }, $apis.requireAuth("users"));
+// Описание аудио у книги {text}: обычный текст до 300 знаков, пустой текст очищает (правки 4.3, дополнение)
+routerAdd("POST", "/api/knigi/books/{id}/audio-note", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  let b = null;
+  try { b = $app.findRecordById("books", e.request.pathValue("id")); } catch (_) {}
+  if (!b) throw new NotFoundError("Книга не найдена: возможно, её удалили.");
+  const text = String((e.requestInfo().body || {}).text || "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (text.length > 300) throw new BadRequestError("Описание длиннее 300 знаков. Сократите его.");
+  b.set("audio_note", text);
+  $app.save(b);
+  return e.json(200, { audio_note: b.getString("audio_note") });
+}, $apis.requireAuth("users"));
+
 // Книга только из аудио: {title, authors}. Создаётся скрытой, как любая новая книга.
 routerAdd("POST", "/api/knigi/audio-books", (e) => {
   require(`${__hooks}/lib.js`).requireAdmin(e);

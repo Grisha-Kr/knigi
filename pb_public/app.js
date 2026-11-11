@@ -26,7 +26,7 @@ const BOOK_ACCEPT = '.pdf,.epub,.djvu,.djv,.fb2,.fbz,.zip,.mobi,.azw3,.txt,appli
 const BOOK_RE = /\.(pdf|epub|djvu|djv|fb2|fbz|fb2\.zip|mobi|azw3|txt)$/i;
 const BOOK_TYPES = 'PDF, EPUB, DjVu, FB2, MOBI, AZW3 и TXT';
 const AU_EXT = /\.(mp3|m4a)$/i, AU_MAX = 200 * MB; // главы аудио (правки 4.3)
-const BOOK_FIELDS = 'id,title,authors,year,description,formats,file_size,pages,has_text,text_file,status,status_note,cover,search,hidden,opened_at,created,updated';
+const BOOK_FIELDS = 'id,title,authors,year,description,formats,file_size,pages,has_text,text_file,status,status_note,cover,search,hidden,opened_at,audio_note,created,updated';
 const BFILE_FIELDS = 'id,book,format,file_size,orig_size,ocr,pages,has_text,status,status_note,created';
 const NOTE_FIELDS = 'id,owner,book,book_title,kind,title,page,shared,group,quote,color,format,place,ai,created,updated,body_text:excerpt(400,true)';
 // Цвета выделений: в базе слово, на экране полупрозрачная заливка под текстом
@@ -2937,6 +2937,8 @@ function apEl(){
   el.preload = 'metadata'; el.hidden = true; el.setAttribute('playsinline', '');
   document.body.appendChild(el);
   el.addEventListener('loadedmetadata', apLoaded);
+  // iPhone иногда пропускает перемотку, сделанную сразу после загрузки сведений: повторяем, когда звук готов
+  el.addEventListener('canplay', () => { if(AP.real && AP.seekTo != null){ const w = AP.seekTo; AP.seekTo = null; if(Math.abs((el.currentTime || 0) - w) > 2 && el.duration && w < el.duration - 2){ try { el.currentTime = w; AP.prevT = w; } catch(e){} } } });
   el.addEventListener('timeupdate', apTime);
   for(const ev of ['play', 'playing', 'pause', 'waiting']) el.addEventListener(ev, () => { if(AP.real){ apPaint(); schedule(); } });
   el.addEventListener('pause', () => { if(AP.real) apSave(true); });
@@ -2978,7 +2980,7 @@ function apLoaded(){
   if(!AP.real) return;
   const el = AP.el;
   el.defaultPlaybackRate = AP.rate; el.playbackRate = AP.rate;
-  if(AP.want != null){ const w = AP.want; AP.want = null; if(w > 1 && el.duration && w < el.duration - 2){ try { el.currentTime = w; } catch(e){} } }
+  if(AP.want != null){ const w = AP.want; AP.want = null; if(w > 1 && el.duration && w < el.duration - 2){ AP.seekTo = w; try { el.currentTime = w; } catch(e){} } }
   AP.prevT = el.currentTime;
   apPos(); apPaint();
 }
@@ -3152,7 +3154,8 @@ function audioBlock(b){
   if(!list.length || bookNA(b)) return '';
   const total = list.reduce((n, t) => n + (t.duration || 0), 0);
   const drafts = list.filter(t => !t.published).length;
-  return `<section class="card audio-card" id="audio"><div class="block-h"><h2>Аудио <span class="n">${list.length}</span></h2><span class="muted">${total ? minText(total) : ''}</span></div>
+  return `<section class="card audio-card" id="audio"><div class="block-h"><h2>Аудио <span class="n">${list.length}</span></h2><span class="au-head-r"><span class="muted">${total ? minText(total) : ''}</span>${isAdmin() ? `<button type="button" class="icon-btn" data-act="au-head-menu" data-id="${b.id}" aria-label="Аудио: описание и новая глава" aria-haspopup="menu" title="Описание аудио, новая глава">${ICON.more}</button>` : ''}</span></div>
+    ${b.audio_note ? `<p class="au-note">${esc(b.audio_note)}</p>` : ''}
     ${isAdmin() && drafts ? `<p class="hint">Черновики видите и слушаете только вы. Читателям глава откроется, когда вы нажмёте «⋯» → «Опубликовать».</p>` : ''}
     <div class="au-list">${list.map(t => trackRow(t, b)).join('')}</div>
     ${isAdmin() ? `<button type="button" class="btn" data-act="au-add" data-id="${b.id}">${ICON.plus}<span>Добавить главу</span></button>` : ''}</section>`;
@@ -3186,7 +3189,7 @@ VIEWS.listen = r => {
   return `${back}
     <section class="ap-full">
       <div class="ap-cover">${coverHTML(b, 'lg')}</div>
-      <div class="ap-head"><small>${esc(b.title)}${authorsText(b) ? ' · ' + esc(authorsText(b)) : ''}</small><h1>${esc(t.title)}</h1>${!t.published ? '<span class="tag wait">Черновик</span>' : ''}</div>
+      <div class="ap-head"><small>${esc(b.title)}${authorsText(b) ? ' · ' + esc(authorsText(b)) : ''}</small>${b.audio_note ? `<small class="au-note">${esc(b.audio_note)}</small>` : ''}<h1>${esc(t.title)}</h1>${!t.published ? '<span class="tag wait">Черновик</span>' : ''}</div>
       ${ctl}
     </section>
     <section class="card audio-card" aria-label="Главы"><div class="au-list">${list.map(x => trackRow(x, b)).join('')}</div>
@@ -3262,6 +3265,17 @@ function audioMenu(btn, t){
       toast('Глава удалена');
     }})});
   openMenu(btn, items);
+}
+// Описание аудио у книги (до 300 знаков): видят все, кому видна книга, меняет только администратор
+function audioNoteForm(b){
+  openForm({title: 'Описание аудио', fields: [{key: 'text', type: 'textarea', rows: 3, max: 300, label: 'Обычный текст до 300 знаков',
+      placeholder: 'Например: Аудиокнига, записанная мной', hint: 'Читатели увидят его серым под заголовком «Аудио» и на экране плеера. Чтобы убрать описание, очистите поле.'}],
+    values: {text: b.audio_note || ''},
+    async onSave(v){
+      const r = await pb.send(`/api/knigi/books/${b.id}/audio-note`, {method: 'POST', body: {text: v.text}});
+      upsert('books', {id: b.id, audio_note: r.audio_note});
+      toast(r.audio_note ? 'Описание сохранено' : 'Описание убрано');
+    }});
 }
 async function audioMove(t, dir){
   try { await pb.send(`/api/knigi/audio/${t.id}/move`, {method: 'POST', body: {dir}}); await loadAll(['atracks']); } catch(e){ toast(errText(e)); }
@@ -5014,7 +5028,15 @@ document.addEventListener('click', async e => {
     case 'add-books': openMenu(a, [{label: 'Файлы книг', run: () => pickFile(BOOK_ACCEPT, true, files => { loadDisk(); addUploads(files, 'book'); })},
       {label: 'Аудиокнига без текста', run: audioBookForm}]); break;
     // аудио (правки 4.3)
-    case 'au-listen': { if(roBook(byId('books', d.id)) || AP.book === d.id) break; const t = contTrack(d.id); if(t) apPlay(t.id); break; }
+    // «Слушать»: звук включается сразу (в том же нажатии, иначе iPhone не разрешит), экран плеера открывает ссылка
+    case 'au-listen': {
+      const b = byId('books', d.id);
+      if(!b || roBook(b)) break;
+      if(AP.book === d.id && AP.track && AP.real && AP.el){ if(AP.el.paused) AP.el.play().catch(apPlayErr); break; }
+      const t = contTrack(d.id); if(t) apPlay(t.id);
+      break;
+    }
+    case 'au-head-menu': { const b = byId('books', d.id); if(b) openMenu(a, [{label: 'Описание', run: () => audioNoteForm(b)}, {label: 'Добавить главу', run: () => audioAdd(b)}]); break; }
     case 'au-track': { if(AP.track === d.id && AP.real){ apToggle(); break; } apPlay(d.id); const t = trackById(d.id); if(t && route().name !== 'listen') go('#/listen/' + t.book); break; }
     case 'au-toggle': apToggle(d.id); break;
     case 'au-cont': apToggle(d.id); break;

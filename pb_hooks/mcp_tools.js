@@ -591,7 +591,8 @@ H.get_book = (a, ctx) => {
   }).join("; ") : "книгу ещё не открывал"));
   const tracks = A().tracksOf(b.id, true);
   if (tracks.length) {
-    out.push("\nАудио (главы по порядку, звук помощнику не передаётся):\n" + tracks.map((t, i) =>
+    if (b.getString("audio_note")) out.push("\nОписание аудио: " + b.getString("audio_note"));
+    out.push((b.getString("audio_note") ? "" : "\n") + "Аудио (главы по порядку, звук помощнику не передаётся):\n" + tracks.map((t, i) =>
       `- ${i + 1}. ${t.getString("title")} · ${A().durText(t.getFloat("duration"))}${t.getBool("published") ? "" : " · черновик"}`).join("\n"));
   }
   const cnt = (k) => $app.countRecords("notes", $dbx.hashExp({ owner: u, book: b.id, kind: k }));

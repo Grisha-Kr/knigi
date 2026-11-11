@@ -10,7 +10,9 @@
   drm   ВХОД                                  защищён ли MOBI/AZW3 (Kindle DRM)
   ocr   ВХОД.pdf ВЫХОД.pdf --work ПАПКА --langs rus+eng
                                               распознавание (ocrmypdf), ход работы в ПАПКА/progress.json
-  audio ВХОД                                  глава аудио (правки 4.3): MP3 или M4A по содержимому, длительность
+  audio ВХОД [--fix]                          глава аудио (правки 4.3): MP3 или M4A (только AAC) по содержимому, длительность;
+                                              --fix: у M4A описание звука (moov) переносится в начало файла
+  audio-fix ПАПКА --db data.db --human        то же для всех M4A в папке аудио (уже загруженные главы)
 Ответ всегда одна строка JSON на stdout; ошибка: {"error": "понятное сообщение"}. Код выхода 0,
 кроме внезапного сбоя самой программы.
 """
@@ -1762,7 +1764,7 @@ def audio_m4a(f, size):
     else:
         scale = int.from_bytes(d[12:16], "big")
         dur = int.from_bytes(d[16:20], "big")
-    sound, video, codec = False, False, ""
+    sound, video, codec, oti = False, False, "", None
     for typ, data, stop in mp4_boxes(f, moov[0], moov[1]):
         if typ != b"trak":
             continue
@@ -1779,17 +1781,206 @@ def audio_m4a(f, size):
             if sd:
                 f.seek(sd[0] + 12)
                 codec = f.read(4).decode("latin-1", "replace")
+                if codec == "mp4a":
+                    oti = mp4a_object_type(f, sd[0], stop)
     if video:
         raise Fail("Это видео, а нужен звук. Сохраните главу как M4A (AAC) или MP3.")
     if not sound:
         raise Fail("В файле нет звука.")
-    if codec not in ("mp4a", "alac"):
-        raise Fail("Звук в этом файле в формате %s, его не все телефоны играют. Сохраните главу как M4A (AAC) или MP3." % (codec or "неизвестном"))
+    # iPhone и Safari надёжно играют в M4A только AAC. ALAC (сжатие без потерь) и прочее отклоняем.
+    if codec == "alac":
+        raise Fail("Звук в этом M4A записан в формате ALAC (без сжатия): на iPhone он играет ненадёжно, а файл в 5-10 раз больше нужного. Сохраните главу в MP3 или в M4A с кодеком AAC.")
+    if codec != "mp4a" or (oti is not None and oti not in AAC_OTI):
+        raise Fail("Звук в этом M4A записан не в AAC, его не все телефоны играют. Сохраните главу в MP3 или в M4A с кодеком AAC.")
     seconds = dur / scale if scale else 0
-    return {"format": "m4a", "duration": round(seconds, 2), "codec": codec, "bitrate": int(size * 8 / seconds) if seconds else 0}
+    mdat = mp4_find(f, 0, size, [b"mdat"])
+    return {"format": "m4a", "duration": round(seconds, 2), "codec": "aac", "bitrate": int(size * 8 / seconds) if seconds else 0,
+            "moov_first": bool(mdat) and moov[0] < mdat[0]}
 
 
-def cmd_audio(src):
+# Тип звука внутри mp4a: objectTypeIndication из esds (0x40 = AAC, 0x66-0x68 = AAC MPEG-2)
+AAC_OTI = (0x40, 0x66, 0x67, 0x68)
+
+
+def mp4a_object_type(f, stsd_data, stop):
+    """stsd_data: начало данных коробки stsd. None, если esds не нашли (тогда считаем AAC)."""
+    f.seek(stsd_data)
+    head = f.read(16)
+    if len(head) < 16:
+        return None
+    entry_size = int.from_bytes(head[8:12], "big")
+    entry_start = stsd_data + 8
+    f.seek(entry_start)
+    entry = f.read(min(entry_size, 4096))
+    i = entry.find(b"esds")
+    if i < 0:
+        return None
+    d = entry[i + 8:]  # после типа esds: версия и флаги (4 байта)
+    p = 0
+
+    def length(p):
+        n = 0
+        for _ in range(4):
+            if p >= len(d):
+                return n, p
+            b = d[p]
+            p += 1
+            n = (n << 7) | (b & 0x7F)
+            if not b & 0x80:
+                break
+        return n, p
+    if p >= len(d) or d[p] != 0x03:
+        return None
+    _, p = length(p + 1)
+    if p + 3 > len(d):
+        return None
+    flags = d[p + 2]
+    p += 3
+    if flags & 0x80:
+        p += 2
+    if flags & 0x40 and p < len(d):
+        p += 1 + d[p]
+    if flags & 0x20:
+        p += 2
+    if p >= len(d) or d[p] != 0x04:
+        return None
+    _, p = length(p + 1)
+    return d[p] if p < len(d) else None
+
+
+def mp4_patch_offsets(buf, base, insert_at, moov_start, shift):
+    """В коробке moov (buf, bytes) прибавить shift к смещениям кусков stco и co64, которые лежат
+    между insert_at и прежним началом moov. Коробки обходятся по вложенности."""
+    buf = bytearray(buf)
+    containers = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts", b"dinf", b"udta", b"mvex"}
+
+    def walk(start, end):
+        p = start
+        while p + 8 <= end:
+            size = int.from_bytes(buf[p:p + 4], "big")
+            typ = bytes(buf[p + 4:p + 8])
+            hdr = 8
+            if size == 1:
+                size = int.from_bytes(buf[p + 8:p + 16], "big")
+                hdr = 16
+            elif size == 0:
+                size = end - p
+            if size < hdr or p + size > end:
+                return
+            if typ in containers:
+                walk(p + hdr, p + size)
+            elif typ in (b"stco", b"co64"):
+                n = int.from_bytes(buf[p + hdr + 4:p + hdr + 8], "big")
+                w = 4 if typ == b"stco" else 8
+                q = p + hdr + 8
+                for _ in range(n):
+                    o = int.from_bytes(buf[q:q + w], "big")
+                    if insert_at <= o < moov_start:
+                        o += shift
+                        if w == 4 and o >= 1 << 32:
+                            raise Fail("Файл M4A слишком большой для переноса описания звука. Сохраните главу в MP3.")
+                        buf[q:q + w] = o.to_bytes(w, "big")
+                    q += w
+            p += size
+    walk(0, len(buf))
+    return bytes(buf)
+
+
+def mp4_faststart(src, dst):
+    """Перенести moov перед mdat (как ffmpeg -movflags +faststart), звук не трогать.
+    Возвращает True, если файл переписан в dst, False, если moov уже стоит раньше mdat."""
+    size = os.path.getsize(src)
+    with open(src, "rb") as f:
+        boxes = list(mp4_boxes(f, 0, size))
+        heads = []  # (тип, начало коробки, конец)
+        p = 0
+        for typ, data, stop in boxes:
+            heads.append((typ, p, stop))
+            p = stop
+        types = [h[0] for h in heads]
+        if b"moov" not in types or b"mdat" not in types or b"moof" in types:
+            return False
+        mi = types.index(b"moov")
+        di = types.index(b"mdat")
+        if mi < di:
+            return False
+        if p != size:
+            raise Fail("Файл M4A повреждён: после последней коробки лишние байты. Сохраните главу заново.")
+        _, ms, me = heads[mi]
+        insert_at = heads[di][1]
+        f.seek(ms)
+        moov = f.read(me - ms)
+        moov = mp4_patch_offsets(moov, ms, insert_at, ms, len(moov))
+        tmp = dst + ".tmp"
+        with open(tmp, "wb") as out:
+            def copy(a, b):
+                f.seek(a)
+                left = b - a
+                while left > 0:
+                    chunk = f.read(min(left, 4 << 20))
+                    if not chunk:
+                        raise Fail("Файл M4A прочитался не целиком.")
+                    out.write(chunk)
+                    left -= len(chunk)
+            copy(0, insert_at)       # ftyp и всё до mdat
+            out.write(moov)          # описание звука
+            copy(insert_at, ms)      # mdat и всё, что было до moov
+            copy(me, size)           # то, что было после moov (обычно ничего)
+        os.replace(tmp, dst)
+        return True
+
+
+def cmd_audio(src, fix=False):
+    """Проверка главы. fix: у M4A с описанием звука в конце перенести его в начало (на месте, через временный файл)."""
+    res = audio_check(src)
+    if fix and res["format"] == "m4a" and not res.get("moov_first"):
+        dst = src + ".fs"
+        if mp4_faststart(src, dst):
+            try:
+                st = os.stat(src)
+                os.chmod(dst, st.st_mode & 0o777)
+                if os.geteuid() == 0:
+                    os.chown(dst, st.st_uid, st.st_gid)
+            except OSError:
+                pass
+            os.replace(dst, src)
+            res = audio_check(src)
+            res["faststart"] = True
+    return res
+
+
+def cmd_audio_fix(folder, db):
+    """Исправить уже загруженные главы M4A (правки 4.3): описание звука в начало файла.
+    Звук не перекодируется, размер файла не меняется. Главы не в AAC только перечисляются: их надо заменить."""
+    names = {}
+    if db and os.path.exists(db):
+        import sqlite3
+        try:
+            con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+            for fid, title, btitle in con.execute("SELECT t.file, t.title, COALESCE(b.title, '') FROM audio_tracks t LEFT JOIN books b ON b.id = t.book"):
+                names[fid] = "«%s» · %s" % (btitle, title) if btitle else title
+            con.close()
+        except Exception:
+            names = {}
+    fixed, ok, bad = [], 0, []
+    for n in sorted(os.listdir(folder)):
+        if not n.endswith(".m4a"):
+            continue
+        path = os.path.join(folder, n)
+        label = names.get(n, n)
+        try:
+            r = cmd_audio(path, fix=True)
+            if r.get("faststart"):
+                fixed.append(label)
+            else:
+                ok += 1
+        except Fail as e:
+            bad.append("%s: %s" % (label, e))
+    return {"fixed": fixed, "already_ok": ok, "bad": bad}
+
+
+
+def audio_check(src):
     size = os.path.getsize(src)
     if size < 1024:
         raise Fail("Файл слишком маленький, в нём нет звука.")
@@ -1820,6 +2011,9 @@ def main(argv):
     ap.add_argument("--langs", default="rus+eng")
     ap.add_argument("--quality", type=int, default=0)
     ap.add_argument("--lossless", action="store_true")
+    ap.add_argument("--fix", action="store_true")
+    ap.add_argument("--db", default="")
+    ap.add_argument("--human", action="store_true")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "djvu":
@@ -1835,7 +2029,20 @@ def main(argv):
         elif a.cmd == "ocr":
             res = cmd_ocr(a.src, a.dst, a.work, a.langs)
         elif a.cmd == "audio":
-            res = cmd_audio(a.src)
+            res = cmd_audio(a.src, fix=a.fix)
+        elif a.cmd == "audio-fix":
+            res = cmd_audio_fix(a.src, a.db)
+            if a.human:
+                print("Исправлено (описание звука перенесено в начало): %d" % len(res["fixed"]))
+                for x in res["fixed"]:
+                    print("  " + x)
+                print("Уже были в порядке: %d" % res["already_ok"])
+                if res["bad"]:
+                    print("Не в AAC или повреждены, замените файл в приложении («⋯» у главы → «Заменить файл»): %d" % len(res["bad"]))
+                    for x in res["bad"]:
+                        print("  " + x)
+                else:
+                    print("Главы, которые нужно заменить: нет")
         elif a.cmd == "cover":
             with open(a.dst, "wb") as f:
                 f.write(make_cover(a.title, a.author))
@@ -1856,7 +2063,8 @@ def main(argv):
             os.replace(os.path.join(a.work, "result.json.tmp"), os.path.join(a.work, "result.json"))
         except OSError:
             pass
-    out(res)
+    if not (a.cmd == "audio-fix" and a.human):
+        out(res)
     return 0
 
 

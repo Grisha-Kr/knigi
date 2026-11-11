@@ -74,7 +74,9 @@ function finishAudio(e, up, meta) {
   FL.joinChunks(up, meta, $filepath.join(dir, tmp));
   FL.dropUpload(up);
   let info = null;
-  try { info = C.runTool(["audio", $filepath.join(dir, tmp)], 300); }
+  // --fix: у M4A описание звука (moov) переносится в начало файла, иначе iPhone качает файл целиком,
+  // прежде чем начать играть (правки 4.3, звук не перекодируется)
+  try { info = C.runTool(["audio", $filepath.join(dir, tmp), "--fix"], 600); }
   catch (err) { FL.rmFile(dir, tmp); throw new BadRequestError("Файл не удалось проверить: " + String(err.message || err)); }
   if (!info || info.error || !MIME[info.format]) {
     FL.rmFile(dir, tmp);

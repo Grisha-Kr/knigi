@@ -200,13 +200,27 @@ function makeMp3(seconds, kbps = 128) {
 }
 // M4A: коробки ftyp, moov (mvhd, дорожка со звуком mp4a), mdat. Для проверки сервера, не для прослушивания.
 function box(type, ...parts) { const body = Buffer.concat(parts); const h = Buffer.alloc(8); h.writeUInt32BE(8 + body.length, 0); h.write(type, 4, "latin1"); return Buffer.concat([h, body]); }
+// opts.moovEnd: описание звука (moov) после данных (mdat), как пишут многие программы; в stco смещение куска,
+// где лежит метка KNIGIMARK: после переноса moov в начало оно должно указывать на ту же метку.
 function makeM4a(seconds, opts = {}) {
   const mvhd = Buffer.alloc(100); mvhd.writeUInt32BE(1000, 12); mvhd.writeUInt32BE(Math.round(seconds * 1000), 16);
   const hdlr = Buffer.concat([Buffer.alloc(8), Buffer.from(opts.video ? "vide" : "soun"), Buffer.alloc(13)]);
   const entry = box(opts.codec || "mp4a", Buffer.alloc(28));
   const stsd = Buffer.concat([Buffer.alloc(4), Buffer.from([0, 0, 0, 1]), entry]);
-  const trak = box("trak", box("mdia", box("hdlr", hdlr), box("minf", box("stbl", box("stsd", stsd)))));
-  return Buffer.concat([box("ftyp", Buffer.from("M4A "), Buffer.alloc(4), Buffer.from("M4A isom")), box("moov", box("mvhd", mvhd), trak), box("mdat", Buffer.alloc(4096))]);
+  const ftyp = box("ftyp", Buffer.from("M4A "), Buffer.alloc(4), Buffer.from("M4A isom"));
+  const data = Buffer.concat([Buffer.from("KNIGIMARK"), Buffer.alloc(4087)]);
+  const stco = (off) => { const b = Buffer.alloc(12); b.writeUInt32BE(1, 4); b.writeUInt32BE(off, 8); return box("stco", b); };
+  const moovOf = (off) => box("moov", box("mvhd", mvhd), box("trak", box("mdia", box("hdlr", hdlr), box("minf", box("stbl", box("stsd", stsd), stco(off))))));
+  if (opts.moovEnd) return Buffer.concat([ftyp, box("mdat", data), moovOf(ftyp.length + 8)]);
+  const moov = moovOf(0);
+  return Buffer.concat([ftyp, moovOf(ftyp.length + moov.length + 8), box("mdat", data)]);
+}
+// Коробки верхнего уровня MP4 и смещение из первой stco
+function mp4Layout(buf) {
+  const top = [];
+  for (let p = 0; p + 8 <= buf.length;) { const n = buf.readUInt32BE(p); top.push(buf.toString("latin1", p + 4, p + 8)); if (n < 8) break; p += n; }
+  const i = buf.indexOf("stco");
+  return { top, stco: i > 0 ? buf.readUInt32BE(i + 12) : -1 };
 }
 async function uploadAudio(token, buf, { name, book, track, title }) {
   let r = await req("POST", "/api/knigi/upload/start", { token, json: { name, size: buf.length, kind: "audio", book, track, title } });
@@ -405,6 +419,20 @@ async function partB(T, A) {
   ok(up.error && up.error.status === 400 && /не MP3/.test(up.error.data.message), "текст под именем .mp3 отклонён по содержимому", up.error && up.error.text);
   up = await uploadAudio(admin, makeM4a(5, { video: true }), { name: "Видео.m4a", book: AB.id, title: "Видео" });
   ok(up.error && /видео/.test(up.error.data.message), "видео под именем .m4a отклонено", up.error && up.error.text);
+  up = await uploadAudio(admin, makeM4a(5, { codec: "alac" }), { name: "ALAC.m4a", book: AB.id, title: "ALAC" });
+  ok(up.error && /ALAC/.test(up.error.data.message) && /MP3 или в M4A с кодеком AAC/.test(up.error.data.message), "M4A со звуком ALAC отклонён: сохранить в MP3 или AAC", up.error && up.error.text);
+  const known = new Set(audioFiles());
+  up = await uploadAudio(admin, makeM4a(42, { moovEnd: true }), { name: "moov в конце.m4a", book: AB.id, title: "moov в конце" });
+  ok(up.track && up.format === "m4a" && Math.abs(up.duration - 42) < 0.2, "M4A с описанием звука (moov) в конце принят", up);
+  if (AUDIO && up.track) {
+    const fn = audioFiles().find((n) => !known.has(n) && n.startsWith(up.track));
+    const buf = readFileSync(join(AUDIO, fn));
+    const lay = mp4Layout(buf);
+    ok(lay.top.join(",") === "ftyp,moov,mdat", "после загрузки файл начинается с moov: ftyp, moov, mdat", lay.top);
+    ok(lay.stco > 0 && buf.toString("latin1", lay.stco, lay.stco + 9) === "KNIGIMARK", "смещение звука в stco пересчитано: указывает на тот же звук", lay.stco);
+    ok(buf.length === makeM4a(42, { moovEnd: true }).length, "размер файла не изменился (звук не перекодирован)");
+  }
+  if (up.track) await req("DELETE", `/api/knigi/audio/${up.track}`, { token: admin });
   r = await req("POST", "/api/knigi/upload/start", { token: admin, json: { name: "a.wav", size: 1000, kind: "audio", book: AB.id, title: "x" } });
   ok(r.status === 400, "WAV не принимается", r.text);
   r = await req("POST", "/api/knigi/upload/start", { token: admin, json: { name: "a.mp3", size: 201 * 1024 * 1024, kind: "audio", book: AB.id, title: "x" } });
@@ -424,6 +452,20 @@ async function partB(T, A) {
   ok(af.link.status === 404, "ссылку на черновик Анна не получает", af.link.text);
   af = await audioFile(admin, t1, "bytes=0-1023");
   ok(af.status === 206 && af.len === 1024 && af.type === "audio/mpeg", "администратор слушает черновик: часть файла 206, audio/mpeg", af);
+
+  section("Б3а. Описание аудио");
+  r = await req("POST", `/api/knigi/books/${AB.id}/audio-note`, { token: admin, json: { text: "  Аудиокнига,   записанная мной  " } });
+  ok(r.status === 200 && r.data.audio_note === "Аудиокнига, записанная мной", "администратор сохранил описание (лишние пробелы убраны)", r.text);
+  ok((await viewBook(anna, AB.id)).data.audio_note === "Аудиокнига, записанная мной", "читатель видит описание");
+  ok((await req("POST", `/api/knigi/books/${AB.id}/audio-note`, { token: anna, json: { text: "моё" } })).status === 403, "читатель не меняет описание маршрутом (403)");
+  r = await req("PATCH", `/api/collections/books/records/${AB.id}`, { token: anna, json: { audio_note: "моё" } });
+  ok(r.status >= 400, "и обычным изменением книги тоже", r.status);
+  r = await req("PATCH", `/api/collections/books/records/${AB.id}`, { token: admin, json: { title: AB.title, audio_note: "в обход" } });
+  ok(r.status === 200 && r.data.audio_note === "Аудиокнига, записанная мной", "обычное изменение книги описание не трогает, только маршрут", r.text);
+  ok((await req("POST", `/api/knigi/books/${AB.id}/audio-note`, { token: admin, json: { text: "я".repeat(301) } })).status === 400, "длиннее 300 знаков: 400");
+  r = await req("POST", `/api/knigi/books/${AB.id}/audio-note`, { token: admin, json: { text: "" } });
+  ok(r.status === 200 && r.data.audio_note === "", "пустой текст очищает описание");
+  await req("POST", `/api/knigi/books/${AB.id}/audio-note`, { token: admin, json: { text: "Аудиокнига, записанная мной" } });
 
   section("Б4. Публикация, ссылка, кука, части файла");
   r = await req("POST", `/api/knigi/audio/${t1}`, { token: admin, json: { published: true } });
@@ -450,7 +492,9 @@ async function partB(T, A) {
   const af2 = await audioFile(anna, t1);
   ok(af.status === 200 && af2.status === 200 && af.len === mp3.length, "главу 3 МБ можно получить дважды за минуту: лимит книг на аудио не действует", [af.status, af2.status]);
   const mf = await audioFile(admin, t2, "bytes=0-9");
-  ok(mf.type === "audio/mp4", "M4A отдаётся как audio/mp4");
+  ok(mf.type === "audio/mp4" && mf.status === 206 && /^bytes 0-9\//.test(mf.range || ""), "M4A отдаётся как audio/mp4, часть файла 206 с Content-Range", mf);
+  const mf0 = await audioFile(admin, t2, "bytes=0-1");
+  ok(mf0.status === 206 && mf0.len === 2, "первый запрос iPhone (bytes=0-1): 206 и 2 байта", mf0);
 
   section("Б5. Прогресс слушания и журнал");
   r = await req("POST", `/api/knigi/audio/${t1}/progress`, { token: anna, json: { pos: 42.5, played: 40 } });

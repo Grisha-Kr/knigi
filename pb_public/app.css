@@ -1034,3 +1034,7 @@ html.note-full .mini{display:none}
 .dlg-body > *{flex-shrink:0}
 #rd-groups .pick-row > svg:first-child{width:22px;height:22px;flex:none;margin:0;stroke:var(--accent-text)}
 .own-note{color:var(--accent-text);font-weight:600;font-size:14px;margin:0}
+.au-head-r{display:inline-flex;align-items:center;gap:2px;margin-left:auto}
+.au-head-r .icon-btn{margin-right:-10px}
+.au-note{color:var(--muted);font-size:14px;line-height:1.45;margin:-4px 0 0;overflow-wrap:anywhere}
+.ap-head .au-note{margin:0;font-size:13.5px}
