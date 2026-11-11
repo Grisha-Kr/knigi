@@ -1038,3 +1038,6 @@ html.note-full .mini{display:none}
 .au-head-r .icon-btn{margin-right:-10px}
 .au-note{color:var(--muted);font-size:14px;line-height:1.45;margin:-4px 0 0;overflow-wrap:anywhere}
 .ap-head .au-note{margin:0;font-size:13.5px}
+.ap-diag{align-self:center;color:var(--muted)}
+.diag-list{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px;font-size:12.5px;line-height:1.4;overflow-wrap:anywhere}
+.diag-list small{color:var(--muted)}

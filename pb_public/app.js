@@ -2930,7 +2930,7 @@ const AU_SILENT = (() => {
   const f = [0xff, 0xfb, 0x10, 0xc0].concat(Array(100).fill(0));
   return 'data:audio/mpeg;base64,' + btoa(String.fromCharCode(...Array(8).fill(f).flat()));
 })();
-const AP = {el: null, real: false, book: '', track: '', want: null, played: 0, prevT: null, saveAt: 0, tries: 0, next: null, msg: '', seeking: false, rate: +loadLS('apRate', 1) || 1};
+const AP = {log: [], logT0: 0, el: null, real: false, book: '', track: '', want: null, played: 0, prevT: null, saveAt: 0, tries: 0, next: null, msg: '', seeking: false, rate: +loadLS('apRate', 1) || 1};
 function apEl(){
   if(AP.el) return AP.el;
   const el = document.createElement('audio');
@@ -2944,13 +2944,27 @@ function apEl(){
   el.addEventListener('pause', () => { if(AP.real) apSave(true); });
   el.addEventListener('ended', apEnded);
   el.addEventListener('error', apError);
+  // журнал событий плеера для «Сведений о воспроизведении» (администратору): что делал плеер до начала звука
+  for(const ev of ['loadstart', 'durationchange', 'loadedmetadata', 'loadeddata', 'canplay', 'canplaythrough', 'play', 'playing', 'waiting', 'stalled', 'suspend', 'seeking', 'seeked', 'pause', 'ended', 'error', 'abort', 'emptied', 'progress'])
+    el.addEventListener(ev, () => apLogEv(ev));
   AP.el = el;
   return el;
 }
 const apOn = () => !!(AP.el && AP.real && !AP.el.paused && !AP.el.ended);
 async function apLink(tid){ return pb.send(`/api/knigi/audio/${tid}/link`, {}); }
 // Включить главу. opts.restart: с начала. Вызывать прямо из нажатия: тогда iPhone разрешает звук.
+// Журнал событий плеера с момента нажатия (последние 120)
+const apBuf = el => { try { const b = el.buffered; const r = []; for(let i = 0; i < b.length; i++) r.push(durShort(b.start(i)) + '–' + durShort(b.end(i))); return r.join(', '); } catch(e){ return ''; } };
+function apLogEv(ev){
+  const el = AP.el;
+  if(!el || (!AP.real && ev !== 'error')) return;
+  const last = AP.log[AP.log.length - 1];
+  if(ev === 'progress' && last && last.ev === 'progress'){ last.n = (last.n || 1) + 1; last.t = performance.now() - AP.logT0; last.buf = apBuf(el); return; }
+  AP.log.push({t: performance.now() - AP.logT0, ev, ct: el.currentTime || 0, dur: el.duration, rs: el.readyState, ns: el.networkState, buf: apBuf(el), err: el.error ? el.error.code + (el.error.message ? ' ' + el.error.message : '') : ''});
+  if(AP.log.length > 120) AP.log.shift();
+}
 async function apPlay(tid, opts = {}){
+  AP.log = []; AP.logT0 = performance.now();
   const t = trackById(tid);
   if(!t) return;
   if(roBook(byId('books', t.book))){ toast(`${accHead(S.access)}: слушать сейчас нельзя.`); return; }
@@ -3185,6 +3199,7 @@ VIEWS.listen = r => {
       </div>
       <div class="ap-rates" role="group" aria-label="Скорость">${AU_RATES.map(x => `<button type="button" data-act="au-rate" data-r="${x}" aria-pressed="${x === AP.rate}">${String(x).replace('.', ',')}×</button>`).join('')}</div>
       <p class="ap-msg form-err"${AP.msg && mine ? '' : ' hidden'}>${esc(mine ? AP.msg : '')}</p>
+      ${isAdmin() ? `<button type="button" class="btn sm ghost ap-diag" data-act="au-diag" data-id="${t.id}">Сведения о воспроизведении</button>` : ''}
     </div>`;
   return `${back}
     <section class="ap-full">
@@ -3265,6 +3280,22 @@ function audioMenu(btn, t){
       toast('Глава удалена');
     }})});
   openMenu(btn, items);
+}
+// «Сведения о воспроизведении» (только администратору): состояние плеера, его события с момента нажатия
+// и последние запросы файла к серверу (с какого устройства, какие части). По ним видно, почему звук не начинается.
+const RS = ['нет данных', 'есть сведения', 'есть текущий кадр', 'есть немного вперёд', 'достаточно для игры'];
+const NS = ['пусто', 'ждёт', 'загружает', 'нет источника'];
+async function audioDiag(tid){
+  const el = AP.el, t = trackById(tid), mine = AP.track === tid && el;
+  let rows = [];
+  try { rows = (await pb.send('/api/knigi/admin/audio-log', {query: {track: tid}})).rows || []; } catch(e){}
+  const sec = x => (x / 1000).toFixed(1).replace('.', ',') + ' с';
+  const state = mine ? `<p class="hint">Сейчас: ${durShort(el.currentTime)} из ${isFinite(el.duration) ? durShort(el.duration) : '?'}, ${el.paused ? 'пауза' : 'играет'}, данные: ${RS[el.readyState] || el.readyState}, сеть: ${NS[el.networkState] || el.networkState}${apBuf(el) ? ', загружено ' + apBuf(el) : ''}${el.error ? ', ошибка ' + el.error.code : ''}. Формат: ${esc((t && t.format) || '')}, ${t && t.size ? fsize(t.size) : ''}.</p>` : '<p class="hint">Эта глава сейчас не играет: нажмите «Играть», подождите и откройте сведения снова.</p>';
+  const evs = mine && AP.log.length ? `<ol class="diag-list">${AP.log.map(x => `<li><b>${sec(x.t)}</b> ${esc(x.ev)}${x.n ? ' ×' + x.n : ''} · ${durShort(x.ct)} · ${RS[x.rs] || x.rs}${x.buf ? ' · загружено ' + esc(x.buf) : ''}${x.err ? ' · ошибка ' + esc(x.err) : ''}</li>`).join('')}</ol>` : '<p class="hint">Событий пока нет.</p>';
+  const req = rows.length ? `<ol class="diag-list">${rows.map(r => `<li><b>${esc(new Date(r.at).toLocaleTimeString('ru-RU'))}</b> ${esc(r.dev)} · ${esc(r.method)} ${esc(r.range || 'весь файл')}${r.note ? ' · ' + esc(r.note) : ''}<br><small>${esc(r.ua)}</small></li>`).join('')}</ol>` : '<p class="hint">Запросов этой главы сервер пока не видел.</p>';
+  openForm({title: 'Сведения о воспроизведении', noSubmit: true,
+    html: `<p><b>${esc(t ? t.title : '')}</b></p>${state}<h3 class="sub-h">События плеера с момента нажатия</h3>${evs}<h3 class="sub-h">Запросы файла к серверу (новые сверху)</h3>${req}
+      <p class="hint">Пришлите снимок этого окна, если звук долго не начинается.</p>`});
 }
 // Описание аудио у книги (до 300 знаков): видят все, кому видна книга, меняет только администратор
 function audioNoteForm(b){
@@ -5036,6 +5067,7 @@ document.addEventListener('click', async e => {
       const t = contTrack(d.id); if(t) apPlay(t.id);
       break;
     }
+    case 'au-diag': audioDiag(d.id); break;
     case 'au-head-menu': { const b = byId('books', d.id); if(b) openMenu(a, [{label: 'Описание', run: () => audioNoteForm(b)}, {label: 'Добавить главу', run: () => audioAdd(b)}]); break; }
     case 'au-track': { if(AP.track === d.id && AP.real){ apToggle(); break; } apPlay(d.id); const t = trackById(d.id); if(t && route().name !== 'listen') go('#/listen/' + t.book); break; }
     case 'au-toggle': apToggle(d.id); break;

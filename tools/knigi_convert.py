@@ -13,6 +13,7 @@
   audio ВХОД [--fix]                          глава аудио (правки 4.3): MP3 или M4A (только AAC) по содержимому, длительность;
                                               --fix: у M4A описание звука (moov) переносится в начало файла
   audio-fix ПАПКА --db data.db --human        то же для всех M4A в папке аудио (уже загруженные главы)
+  audio-info ПАПКА|ФАЙЛ --db data.db --human  подробно о каждой главе: вид AAC, частота, фрагменты, порядок кусков
 Ответ всегда одна строка JSON на stdout; ошибка: {"error": "понятное сообщение"}. Код выхода 0,
 кроме внезапного сбоя самой программы.
 """
@@ -1794,8 +1795,27 @@ def audio_m4a(f, size):
         raise Fail("Звук в этом M4A записан не в AAC, его не все телефоны играют. Сохраните главу в MP3 или в M4A с кодеком AAC.")
     seconds = dur / scale if scale else 0
     mdat = mp4_find(f, 0, size, [b"mdat"])
-    return {"format": "m4a", "duration": round(seconds, 2), "codec": "aac", "bitrate": int(size * 8 / seconds) if seconds else 0,
-            "moov_first": bool(mdat) and moov[0] < mdat[0]}
+    res = {"format": "m4a", "duration": round(seconds, 2), "codec": "aac", "bitrate": int(size * 8 / seconds) if seconds else 0,
+           "moov_first": bool(mdat) and moov[0] < mdat[0]}
+    # подробный разбор: вид AAC, фрагменты, порядок кусков (дополнение 2: от этого зависит, играет ли iPhone сразу)
+    try:
+        info, _ = mp4_analyze(f.name)
+    except Fail:
+        raise
+    except Exception:
+        info = None
+    if info:
+        if info["aot"] and info["aot"] not in AOT_OK:
+            raise Fail("Звук в этом M4A записан в виде %s: iPhone его не играет. Сохраните главу в MP3 или в M4A с AAC-LC (обычный AAC)." % info["aot_name"])
+        # у фрагментированного файла в заголовке часто только первые секунды: настоящая длительность по отсчётам
+        if (res["duration"] < 1 or info["fragmented"]) and info["duration"] >= 1:
+            res["duration"] = info["duration"]
+            res["bitrate"] = info["bitrate"]
+        res["remux"] = info["remux"]
+        res["aac"] = info["aot_name"]
+        res["sample_rate"] = info["sample_rate"]
+        res["channels"] = info["channels"]
+    return res
 
 
 # Тип звука внутри mp4a: objectTypeIndication из esds (0x40 = AAC, 0x66-0x68 = AAC MPEG-2)
@@ -1930,10 +1950,488 @@ def mp4_faststart(src, dst):
         return True
 
 
+# ======================================================================================
+# MP4/M4A: подробный разбор и пересборка без перекодирования (правки 4.3, дополнение 2)
+# ======================================================================================
+# iPhone (AVFoundation в Safari и в приложении на экране «Домой») играет M4A сразу, только если:
+#  - описание звука (moov) стоит до звука (mdat) и в нём таблицы всех отсчётов (не фрагментированный файл);
+#  - куски звука лежат в файле по порядку, без больших промежутков;
+#  - звук AAC-LC или HE-AAC.
+# Иначе он скачивает файл целиком (у фрагментированного MP4 перебирает все moof), а это минуты.
+# mp4_remux перекладывает отсчёты звука по порядку в один mdat сразу после moov, таблицы строятся заново,
+# сами отсчёты (сжатый звук) копируются байт в байт.
+
+AOT_NAMES = {1: "AAC Main", 2: "AAC-LC", 3: "AAC SSR", 4: "AAC LTP", 5: "HE-AAC (SBR)", 29: "HE-AAC v2 (PS)",
+             23: "AAC-LD", 39: "AAC-ELD", 42: "xHE-AAC (USAC)"}
+AOT_OK = (2, 5, 29)  # то, что iPhone играет надёжно
+SR_TABLE = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
+CONTAINERS = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts", b"dinf", b"mvex", b"moof", b"traf", b"udta"}
+
+
+def mp4_children(buf, start, end):
+    """Коробки в памяти: [(тип, начало коробки, начало данных, конец)]."""
+    out, p = [], start
+    while p + 8 <= end:
+        size = int.from_bytes(buf[p:p + 4], "big")
+        typ = bytes(buf[p + 4:p + 8])
+        hdr = 8
+        if size == 1:
+            size = int.from_bytes(buf[p + 8:p + 16], "big")
+            hdr = 16
+        elif size == 0:
+            size = end - p
+        if size < hdr or p + size > end:
+            break
+        out.append((typ, p, p + hdr, p + size))
+        p += size
+    return out
+
+
+def mp4_child(buf, start, end, typ):
+    for t, b, d, e in mp4_children(buf, start, end):
+        if t == typ:
+            return b, d, e
+    return None
+
+
+def mp4_path(buf, start, end, path):
+    r = None
+    for typ in path:
+        r = mp4_child(buf, start, end, typ)
+        if not r:
+            return None
+        start, end = r[1], r[2]
+    return r
+
+
+def u32(b, p):
+    return int.from_bytes(b[p:p + 4], "big")
+
+
+def u64(b, p):
+    return int.from_bytes(b[p:p + 8], "big")
+
+
+def esds_audio_config(entry):
+    """Из записи mp4a: тип объекта (objectTypeIndication) и AudioSpecificConfig (AOT, частота, каналы)."""
+    i = entry.find(b"esds")
+    if i < 0:
+        return None, None
+    d = entry[i + 8:]
+
+    def length(p):
+        n = 0
+        for _ in range(4):
+            if p >= len(d):
+                return n, p
+            b = d[p]
+            p += 1
+            n = (n << 7) | (b & 0x7F)
+            if not b & 0x80:
+                break
+        return n, p
+    p = 0
+    if p >= len(d) or d[p] != 0x03:
+        return None, None
+    _, p = length(p + 1)
+    if p + 3 > len(d):
+        return None, None
+    flags = d[p + 2]
+    p += 3
+    if flags & 0x80:
+        p += 2
+    if flags & 0x40 and p < len(d):
+        p += 1 + d[p]
+    if flags & 0x20:
+        p += 2
+    if p >= len(d) or d[p] != 0x04:
+        return None, None
+    _, p = length(p + 1)
+    oti = d[p] if p < len(d) else None
+    p += 13
+    asc = None
+    if p < len(d) and d[p] == 0x05:
+        n, q = length(p + 1)
+        cfg = d[q:q + n]
+        if len(cfg) >= 2:
+            bits = int.from_bytes(cfg[:8].ljust(8, b"\0"), "big")
+            pos = 64
+
+            def take(k):
+                nonlocal pos
+                pos -= k
+                return (bits >> pos) & ((1 << k) - 1)
+            aot = take(5)
+            if aot == 31:
+                aot = 32 + take(6)
+            fi = take(4)
+            sr = take(24) if fi == 15 else (SR_TABLE[fi] if fi < len(SR_TABLE) else 0)
+            ch = take(4)
+            asc = {"aot": aot, "sample_rate": sr, "channels": ch}
+    return oti, asc
+
+
+def mp4_read_structure(path):
+    """Разбор файла: коробки верхнего уровня, moov в памяти, дорожка звука и все её отсчёты
+    (смещение, размер, длительность) в порядке воспроизведения, у фрагментированного файла тоже."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        top = []
+        p = 0
+        while p + 8 <= size:
+            f.seek(p)
+            h = f.read(16)
+            n = int.from_bytes(h[:4], "big")
+            typ = h[4:8]
+            hdr = 8
+            if n == 1:
+                n = int.from_bytes(h[8:16], "big")
+                hdr = 16
+            elif n == 0:
+                n = size - p
+            if n < hdr or p + n > size:
+                top.append((b"????", p, size - p))
+                break
+            top.append((typ, p, n))
+            p += n
+        moov_at = next((x for x in top if x[0] == b"moov"), None)
+        if not moov_at:
+            raise Fail("В файле нет описания звука (moov). Сохраните главу заново.")
+        f.seek(moov_at[1])
+        moov = f.read(moov_at[2])
+        ftyp_at = next((x for x in top if x[0] == b"ftyp"), None)
+        ftyp = b""
+        if ftyp_at:
+            f.seek(ftyp_at[1])
+            ftyp = f.read(min(ftyp_at[2], 256))
+        # дорожка звука
+        mv = mp4_children(moov, 0, len(moov))
+        track = None
+        for t, b, d, e in mp4_children(moov, 8, len(moov)):
+            if t != b"trak":
+                continue
+            hd = mp4_path(moov, d, e, [b"mdia", b"hdlr"])
+            if hd and moov[hd[1] + 8:hd[1] + 12] == b"soun":
+                track = (b, d, e)
+                break
+            if hd and moov[hd[1] + 8:hd[1] + 12] == b"vide":
+                raise Fail("Это видео, а нужен звук.")
+        if not track:
+            raise Fail("В файле нет звука.")
+        tb, td, te = track
+        tkhd = mp4_child(moov, td, te, b"tkhd")
+        track_id = u32(moov, tkhd[1] + 12) if moov[tkhd[1]] == 0 else u32(moov, tkhd[1] + 20)
+        mdhd = mp4_path(moov, td, te, [b"mdia", b"mdhd"])
+        mv_ = mdhd[1]
+        timescale = u32(moov, mv_ + 12) if moov[mv_] == 0 else u32(moov, mv_ + 20)
+        mdhd_dur = u32(moov, mv_ + 16) if moov[mv_] == 0 else u64(moov, mv_ + 24)
+        stbl = mp4_path(moov, td, te, [b"mdia", b"minf", b"stbl"])
+        stsd = mp4_child(moov, stbl[1], stbl[2], b"stsd")
+        entry = moov[stsd[1] + 8:stsd[2]]
+        codec = entry[4:8].decode("latin-1", "replace")
+        oti, asc = esds_audio_config(entry) if codec == "mp4a" else (None, None)
+        samples = []  # (offset, size, duration)
+        fragmented = any(x[0] == b"moof" for x in top)
+        # таблицы обычного файла
+        stts = mp4_child(moov, stbl[1], stbl[2], b"stts")
+        stsz = mp4_child(moov, stbl[1], stbl[2], b"stsz")
+        stsc = mp4_child(moov, stbl[1], stbl[2], b"stsc")
+        stco = mp4_child(moov, stbl[1], stbl[2], b"stco") or mp4_child(moov, stbl[1], stbl[2], b"co64")
+        chunks = []
+        if stsz and u32(moov, stsz[1] + 8):
+            n = u32(moov, stsz[1] + 8)
+            fixed = u32(moov, stsz[1] + 4)
+            sizes = [fixed] * n if fixed else [u32(moov, stsz[1] + 12 + 4 * i) for i in range(n)]
+            durs = []
+            for i in range(u32(moov, stts[1] + 4)):
+                c, dlt = u32(moov, stts[1] + 8 + 8 * i), u32(moov, stts[1] + 12 + 8 * i)
+                durs.extend([dlt] * c)
+            w = 4 if moov[stco[0] + 4:stco[0] + 8] == b"stco" else 8
+            cn = u32(moov, stco[1] + 4)
+            chunks = [int.from_bytes(moov[stco[1] + 8 + w * i:stco[1] + 8 + w * (i + 1)], "big") for i in range(cn)]
+            ents = [(u32(moov, stsc[1] + 8 + 12 * i), u32(moov, stsc[1] + 12 + 12 * i)) for i in range(u32(moov, stsc[1] + 4))]
+            k = 0
+            for ci, off in enumerate(chunks, 1):
+                spc = 0
+                for first, cnt in ents:
+                    if first <= ci:
+                        spc = cnt
+                for _ in range(spc):
+                    if k >= n:
+                        break
+                    samples.append((off, sizes[k], durs[k] if k < len(durs) else (durs[-1] if durs else 1024)))
+                    off += sizes[k]
+                    k += 1
+        if fragmented:
+            trex = {}
+            mvex = mp4_child(moov, 8, len(moov), b"mvex")
+            if mvex:
+                for t, b, d, e in mp4_children(moov, mvex[1], mvex[2]):
+                    if t == b"trex":
+                        trex[u32(moov, d + 4)] = (u32(moov, d + 12), u32(moov, d + 16))  # длительность, размер
+            for typ, start, n in top:
+                if typ != b"moof":
+                    continue
+                f.seek(start)
+                moof = f.read(n)
+                for t, b, d, e in mp4_children(moof, 8, len(moof)):
+                    if t != b"traf":
+                        continue
+                    tf = mp4_child(moof, d, e, b"tfhd")
+                    fl = int.from_bytes(moof[tf[1] + 1:tf[1] + 4], "big")
+                    tid = u32(moof, tf[1] + 4)
+                    if tid != track_id:
+                        continue
+                    q = tf[1] + 8
+                    base = start
+                    if fl & 0x1:
+                        base = u64(moof, q)
+                        q += 8
+                    if fl & 0x2:
+                        q += 4
+                    ddur, dsize = trex.get(tid, (0, 0))
+                    if fl & 0x8:
+                        ddur = u32(moof, q)
+                        q += 4
+                    if fl & 0x10:
+                        dsize = u32(moof, q)
+                        q += 4
+                    pos = base
+                    for t2, b2, d2, e2 in mp4_children(moof, d, e):
+                        if t2 != b"trun":
+                            continue
+                        rf = int.from_bytes(moof[d2 + 1:d2 + 4], "big")
+                        cnt = u32(moof, d2 + 4)
+                        r = d2 + 8
+                        if rf & 0x1:
+                            pos = base + int.from_bytes(moof[r:r + 4], "big", signed=True)
+                            r += 4
+                        if rf & 0x4:
+                            r += 4
+                        for _ in range(cnt):
+                            dur, sz = ddur, dsize
+                            if rf & 0x100:
+                                dur = u32(moof, r)
+                                r += 4
+                            if rf & 0x200:
+                                sz = u32(moof, r)
+                                r += 4
+                            if rf & 0x400:
+                                r += 4
+                            if rf & 0x800:
+                                r += 4
+                            samples.append((pos, sz, dur))
+                            pos += sz
+        mvhd = mp4_child(moov, 8, len(moov), b"mvhd")
+        mscale = u32(moov, mvhd[1] + 12) if moov[mvhd[1]] == 0 else u32(moov, mvhd[1] + 20)
+        mdur = u32(moov, mvhd[1] + 16) if moov[mvhd[1]] == 0 else u64(moov, mvhd[1] + 24)
+    return {"size": size, "top": top, "moov": moov, "ftyp": ftyp, "track": track, "timescale": timescale,
+            "mdhd_dur": mdhd_dur, "mvhd_scale": mscale, "mvhd_dur": mdur, "codec": codec, "oti": oti, "asc": asc,
+            "samples": samples, "chunks": chunks, "fragmented": fragmented}
+
+
+def mp4_analyze(path):
+    """Сведения для человека и список того, что мешает iPhone."""
+    s = mp4_read_structure(path)
+    top = s["top"]
+    types = [t for t, _, _ in top]
+    samples = s["samples"]
+    size = s["size"]
+    ts = s["timescale"] or 1
+    dur = sum(x[2] for x in samples) / ts if samples else (s["mdhd_dur"] / ts)
+    data = sum(x[1] for x in samples)
+    in_order = all(samples[i + 1][0] >= samples[i][0] + samples[i][1] for i in range(len(samples) - 1))
+    # промежутки: байты внутри mdat, которые не принадлежат ни одному отсчёту звука
+    mdats = [(p, p + n) for t, p, n in top if t == b"mdat"]
+    mdat_bytes = sum(b - a for a, b in mdats)
+    gaps = max(0, mdat_bytes - data - 8 * len(mdats))
+    chunk_sizes = []
+    if s["chunks"]:
+        chunk_sizes = [b - a for a, b in zip(s["chunks"], s["chunks"][1:])]
+    moov_pos = next(p for t, p, n in top if t == b"moov")
+    first_mdat = mdats[0][0] if mdats else 0
+    asc = s["asc"] or {}
+    brands = s["ftyp"][8:12].decode("latin-1", "replace") if len(s["ftyp"]) >= 12 else ""
+    compat = [s["ftyp"][i:i + 4].decode("latin-1", "replace") for i in range(16, len(s["ftyp"]), 4)]
+    info = {
+        "size": size, "brand": brands, "compatible": compat,
+        "boxes": [(t.decode("latin-1", "replace"), p, n) for t, p, n in top][:40], "boxes_total": len(top),
+        "codec": s["codec"], "oti": s["oti"], "aot": asc.get("aot"), "aot_name": AOT_NAMES.get(asc.get("aot"), "неизвестно" if asc else ""),
+        "sample_rate": asc.get("sample_rate"), "channels": asc.get("channels"), "timescale": ts,
+        "duration": round(dur, 2), "duration_header": round(s["mvhd_dur"] / (s["mvhd_scale"] or 1), 2),
+        "bitrate": int(data * 8 / dur) if dur else 0, "samples": len(samples),
+        "fragmented": s["fragmented"], "moof": types.count(b"moof"), "sidx": b"sidx" in types,
+        "moov_first": moov_pos < first_mdat, "moov_size": len(s["moov"]),
+        "in_order": in_order, "gap_bytes": gaps, "mdat_count": len(mdats),
+        "chunks": len(s["chunks"]), "chunk_max": max(chunk_sizes) if chunk_sizes else 0,
+    }
+    problems = []
+    if s["codec"] != "mp4a":
+        problems.append("звук не AAC (%s)" % s["codec"])
+    elif asc and asc.get("aot") not in AOT_OK:
+        problems.append("вид AAC %s, iPhone его не играет или играет ненадёжно" % info["aot_name"])
+    if s["fragmented"]:
+        problems.append("файл фрагментированный (%d кусков moof%s): iPhone перебирает их все, прежде чем играть" % (info["moof"], ", без sidx" if not info["sidx"] else ""))
+    if not info["moov_first"]:
+        problems.append("описание звука (moov) после звука")
+    if not in_order:
+        problems.append("куски звука лежат в файле не по порядку")
+    if gaps > 1 << 20:
+        problems.append("внутри звука %d МБ лишних данных" % (gaps >> 20))
+    if info["mdat_count"] > 1 and not s["fragmented"]:
+        problems.append("звук разбит на %d частей mdat" % info["mdat_count"])
+    if abs(info["duration_header"] - info["duration"]) > 2 and not s["fragmented"]:
+        problems.append("длительность в заголовке (%s с) не совпадает с настоящей (%s с)" % (info["duration_header"], info["duration"]))
+    info["problems"] = problems
+    info["remux"] = bool(s["fragmented"] or not in_order or gaps > 1 << 20 or (info["mdat_count"] > 1)) and s["codec"] == "mp4a"
+    return info, s
+
+
+def box_bytes(typ, payload):
+    return (8 + len(payload)).to_bytes(4, "big") + typ + payload
+
+
+def full_box(typ, version, flags, payload):
+    return box_bytes(typ, bytes([version]) + flags.to_bytes(3, "big") + payload)
+
+
+def mp4_remux(src, dst, spc=44):
+    """Пересобрать M4A: ftyp, moov (таблицы заново, только дорожка звука), один mdat с отсчётами по порядку.
+    Звук копируется байт в байт. spc: отсчётов в куске (44 кадра AAC около 1 секунды)."""
+    s = mp4_read_structure(src)
+    samples = s["samples"]
+    if not samples:
+        raise Fail("В файле нет отсчётов звука.")
+    moov = s["moov"]
+    tb, td, te = s["track"]
+    total = sum(x[2] for x in samples)
+    # stts: длительности подряд
+    stts = []
+    for _, _, d in samples:
+        if stts and stts[-1][1] == d:
+            stts[-1][0] += 1
+        else:
+            stts.append([1, d])
+    n = len(samples)
+    nchunks = (n + spc - 1) // spc
+    stsc = [(1, spc, 1)]
+    if n % spc and nchunks > 1:
+        stsc.append((nchunks, n % spc, 1))
+    elif n % spc:
+        stsc = [(1, n % spc, 1)]
+
+    def build(offsets):
+        stbl_old = mp4_path(moov, td, te, [b"mdia", b"minf", b"stbl"])
+        stsd = mp4_child(moov, stbl_old[1], stbl_old[2], b"stsd")
+        parts = [moov[stsd[0]:stsd[2]]]
+        parts.append(full_box(b"stts", 0, 0, len(stts).to_bytes(4, "big") + b"".join(c.to_bytes(4, "big") + d.to_bytes(4, "big") for c, d in stts)))
+        parts.append(full_box(b"stsc", 0, 0, len(stsc).to_bytes(4, "big") + b"".join(a.to_bytes(4, "big") + b.to_bytes(4, "big") + c.to_bytes(4, "big") for a, b, c in stsc)))
+        parts.append(full_box(b"stsz", 0, 0, (0).to_bytes(4, "big") + n.to_bytes(4, "big") + b"".join(x[1].to_bytes(4, "big") for x in samples)))
+        if offsets and offsets[-1] >= 1 << 32:
+            parts.append(full_box(b"co64", 0, 0, len(offsets).to_bytes(4, "big") + b"".join(o.to_bytes(8, "big") for o in offsets)))
+        else:
+            parts.append(full_box(b"stco", 0, 0, len(offsets).to_bytes(4, "big") + b"".join(o.to_bytes(4, "big") for o in offsets)))
+        stbl = box_bytes(b"stbl", b"".join(parts))
+
+        def rebuild(start, end, path_types):
+            """Скопировать коробки дорожки, заменив stbl, длительности в tkhd и mdhd, без edts."""
+            out = []
+            for t, b, d, e in mp4_children(moov, start, end):
+                if t == b"stbl":
+                    out.append(stbl)
+                elif t in (b"mdia", b"minf"):
+                    out.append(box_bytes(t, rebuild(d, e, path_types)))
+                elif t == b"edts" and s["fragmented"]:
+                    continue  # у фрагментированного файла монтаж описывает только часть в moov: он бы обрезал звук
+                elif t == b"tkhd":
+                    x = bytearray(moov[b:e])
+                    h = d - b
+                    if x[h] == 0:
+                        x[h + 20:h + 24] = min(total * s["mvhd_scale"] // s["timescale"], 0xFFFFFFFF).to_bytes(4, "big")
+                    else:
+                        x[h + 28:h + 36] = (total * s["mvhd_scale"] // s["timescale"]).to_bytes(8, "big")
+                    out.append(bytes(x))
+                elif t == b"mdhd":
+                    x = bytearray(moov[b:e])
+                    h = d - b
+                    if x[h] == 0:
+                        x[h + 16:h + 20] = min(total, 0xFFFFFFFF).to_bytes(4, "big")
+                    else:
+                        x[h + 24:h + 32] = total.to_bytes(8, "big")
+                    out.append(bytes(x))
+                else:
+                    out.append(moov[b:e])
+            return b"".join(out)
+        trak = box_bytes(b"trak", rebuild(td, te, None))
+        out = []
+        for t, b, d, e in mp4_children(moov, 8, len(moov)):
+            if t == b"mvhd":
+                x = bytearray(moov[b:e])
+                h = d - b
+                if x[h] == 0:
+                    x[h + 16:h + 20] = min(total * s["mvhd_scale"] // s["timescale"], 0xFFFFFFFF).to_bytes(4, "big")
+                else:
+                    x[h + 24:h + 32] = (total * s["mvhd_scale"] // s["timescale"]).to_bytes(8, "big")
+                out.append(bytes(x))
+            elif t == b"trak":
+                if b == tb:
+                    out.append(trak)
+            elif t in (b"mvex", b"iods"):
+                continue
+            else:
+                out.append(moov[b:e])
+        return box_bytes(b"moov", b"".join(out))
+    ftyp = box_bytes(b"ftyp", b"M4A " + (0).to_bytes(4, "big") + b"M4A mp42isom")
+    moov_new = build([0] * nchunks)
+    data_start = len(ftyp) + len(moov_new) + 8
+    offsets, o = [], data_start
+    for i in range(0, n, spc):
+        offsets.append(o)
+        o += sum(x[1] for x in samples[i:i + spc])
+    moov_new = build(offsets)
+    assert len(ftyp) + len(moov_new) + 8 == data_start
+    data_len = o - data_start
+    tmp = dst + ".tmp"
+    with open(src, "rb") as f, open(tmp, "wb") as out:
+        out.write(ftyp)
+        out.write(moov_new)
+        out.write((8 + data_len).to_bytes(4, "big") + b"mdat")
+        # отсчёты подряд; соседние в исходном файле читаются одним куском
+        i = 0
+        while i < n:
+            off, sz, _ = samples[i]
+            j, end = i + 1, off + sz
+            while j < n and samples[j][0] == end and end - off < (4 << 20):
+                end += samples[j][1]
+                j += 1
+            f.seek(off)
+            chunk = f.read(end - off)
+            if len(chunk) != end - off:
+                raise Fail("Файл M4A обрывается раньше, чем кончается звук. Сохраните главу заново.")
+            out.write(chunk)
+            i = j
+    os.replace(tmp, dst)
+    return True
+
+
 def cmd_audio(src, fix=False):
     """Проверка главы. fix: у M4A с описанием звука в конце перенести его в начало (на месте, через временный файл)."""
     res = audio_check(src)
-    if fix and res["format"] == "m4a" and not res.get("moov_first"):
+    if fix and res["format"] == "m4a" and res.get("remux"):
+        # фрагментированный файл, куски не по порядку, промежутки: перекладываем звук заново
+        dst = src + ".fs"
+        mp4_remux(src, dst)
+        try:
+            st = os.stat(src)
+            os.chmod(dst, st.st_mode & 0o777)
+            if os.geteuid() == 0:
+                os.chown(dst, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+        os.replace(dst, src)
+        res = audio_check(src)
+        res["remuxed"] = True
+    elif fix and res["format"] == "m4a" and not res.get("moov_first"):
         dst = src + ".fs"
         if mp4_faststart(src, dst):
             try:
@@ -1947,6 +2445,63 @@ def cmd_audio(src, fix=False):
             res = audio_check(src)
             res["faststart"] = True
     return res
+
+
+def audio_names(db):
+    names = {}
+    if db and os.path.exists(db):
+        import sqlite3
+        try:
+            con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+            for fid, title, btitle in con.execute("SELECT t.file, t.title, COALESCE(b.title, '') FROM audio_tracks t LEFT JOIN books b ON b.id = t.book"):
+                names[fid] = "«%s» · %s" % (btitle, title) if btitle else title
+            con.close()
+        except Exception:
+            names = {}
+    return names
+
+
+def cmd_audio_info(target, db, human):
+    """Подробно о главах M4A (и коротко об MP3): что внутри и что мешает iPhone. target: файл или папка."""
+    names = audio_names(db)
+    files = [target] if os.path.isfile(target) else [os.path.join(target, n) for n in sorted(os.listdir(target)) if n.endswith((".m4a", ".mp3"))]
+    out = []
+    for path in files:
+        n = os.path.basename(path)
+        item = {"file": n, "title": names.get(n, "")}
+        try:
+            if n.endswith(".mp3"):
+                item.update(audio_check(path))
+                item["problems"] = []
+            else:
+                info, _ = mp4_analyze(path)
+                item.update(info)
+        except Fail as e:
+            item["error"] = str(e)
+        out.append(item)
+    if human:
+        for it in out:
+            print("=" * 70)
+            print(it["title"] or it["file"])
+            print("  файл: %s, %.1f МБ" % (it["file"], os.path.getsize(os.path.join(target, it["file"]) if os.path.isdir(target) else target) / 1048576))
+            if it.get("error"):
+                print("  ОШИБКА: " + it["error"])
+                continue
+            if it["file"].endswith(".mp3"):
+                print("  MP3, %s с, %d кбит/с, %s Гц, каналов %s" % (it.get("duration"), it.get("bitrate", 0) // 1000, it.get("sample_rate"), it.get("channels")))
+                continue
+            print("  контейнер: %s (совместим: %s)" % (it["brand"], ", ".join(it["compatible"])))
+            print("  коробки: " + " ".join("%s@%d(%d)" % b for b in it["boxes"][:12]) + (" …ещё %d" % (it["boxes_total"] - 12) if it["boxes_total"] > 12 else ""))
+            print("  звук: %s, %s, %s Гц, каналов %s" % (it["codec"], it["aot_name"], it["sample_rate"], it["channels"]))
+            print("  длительность %s с (в заголовке %s с), %d кбит/с, отсчётов %d" % (it["duration"], it["duration_header"], it["bitrate"] // 1000, it["samples"]))
+            print("  moov в начале: %s, размер moov %d КБ; фрагментированный: %s (moof %d, sidx %s)" % (
+                "да" if it["moov_first"] else "нет", it["moov_size"] // 1024, "да" if it["fragmented"] else "нет", it["moof"], "есть" if it["sidx"] else "нет"))
+            print("  куски звука по порядку: %s; частей mdat: %d; лишних данных внутри звука: %d КБ" % ("да" if it["in_order"] else "нет", it["mdat_count"], it["gap_bytes"] // 1024))
+            print("  ИТОГ: " + ("всё в порядке для iPhone" if not it["problems"] else "; ".join(it["problems"])))
+            if it.get("remux"):
+                print("  это исправит команда audio-fix (звук переложится без перекодирования)")
+        return None
+    return {"files": out}
 
 
 def cmd_audio_fix(folder, db):
@@ -1970,7 +2525,9 @@ def cmd_audio_fix(folder, db):
         label = names.get(n, n)
         try:
             r = cmd_audio(path, fix=True)
-            if r.get("faststart"):
+            if r.get("remuxed"):
+                fixed.append(label + " (звук переложен по порядку, файл больше не фрагментированный)")
+            elif r.get("faststart"):
                 fixed.append(label)
             else:
                 ok += 1
@@ -2030,10 +2587,12 @@ def main(argv):
             res = cmd_ocr(a.src, a.dst, a.work, a.langs)
         elif a.cmd == "audio":
             res = cmd_audio(a.src, fix=a.fix)
+        elif a.cmd == "audio-info":
+            res = cmd_audio_info(a.src, a.db, a.human)
         elif a.cmd == "audio-fix":
             res = cmd_audio_fix(a.src, a.db)
             if a.human:
-                print("Исправлено (описание звука перенесено в начало): %d" % len(res["fixed"]))
+                print("Исправлено: %d" % len(res["fixed"]))
                 for x in res["fixed"]:
                     print("  " + x)
                 print("Уже были в порядке: %d" % res["already_ok"])
@@ -2063,7 +2622,7 @@ def main(argv):
             os.replace(os.path.join(a.work, "result.json.tmp"), os.path.join(a.work, "result.json"))
         except OSError:
             pass
-    if not (a.cmd == "audio-fix" and a.human):
+    if not (a.cmd in ("audio-fix", "audio-info") and a.human):
         out(res)
     return 0
 

@@ -215,6 +215,36 @@ function makeM4a(seconds, opts = {}) {
   const moov = moovOf(0);
   return Buffer.concat([ftyp, moovOf(ftyp.length + moov.length + 8), box("mdat", data)]);
 }
+// Фрагментированный M4A (как пишут некоторые программы и веб-сервисы): пустые таблицы в moov, mvex/trex,
+// дальше пары moof + mdat. В каждом отсчёте метка «Sнннн», чтобы после перекладки проверить порядок звука.
+function fullBox(type, v, flags, ...parts) { const h = Buffer.alloc(4); h.writeUInt32BE((v << 24) | flags); return box(type, h, ...parts); }
+const u32b = (...xs) => { const b = Buffer.alloc(4 * xs.length); xs.forEach((x, i) => b.writeUInt32BE(x, 4 * i)); return b; };
+function makeFragmentedM4a(frags = 3, perFrag = 20) {
+  const ts = 44100, n = frags * perFrag;
+  const esdsEntry = box("mp4a", Buffer.alloc(28));
+  const stsd = fullBox("stsd", 0, 0, u32b(1), esdsEntry);
+  const emptyT = (t) => fullBox(t, 0, 0, u32b(0));
+  const stbl = box("stbl", stsd, emptyT("stts"), emptyT("stsc"), fullBox("stsz", 0, 0, u32b(0, 0)), emptyT("stco"));
+  const hdlr = fullBox("hdlr", 0, 0, u32b(0), Buffer.from("soun"), Buffer.alloc(13));
+  const mdhd = fullBox("mdhd", 0, 0, u32b(0, 0, ts, 0), Buffer.alloc(4));
+  const tkhd = fullBox("tkhd", 0, 7, u32b(0, 0, 1, 0, 0), Buffer.alloc(60));
+  const mvhd = fullBox("mvhd", 0, 0, u32b(0, 0, 1000, 0), Buffer.alloc(80));
+  const trex = fullBox("trex", 0, 0, u32b(1, 1, 1024, 0, 0));
+  const moov = box("moov", mvhd, box("trak", tkhd, box("mdia", mdhd, hdlr, box("minf", box("dinf"), stbl))), box("mvex", trex));
+  const ftyp = box("ftyp", Buffer.from("iso6"), Buffer.alloc(4), Buffer.from("iso6dashM4A "));
+  const parts = [ftyp, moov];
+  let k = 0;
+  for (let f = 0; f < frags; f++) {
+    const samples = [];
+    for (let i = 0; i < perFrag; i++, k++) samples.push(Buffer.concat([Buffer.from("S" + String(k).padStart(4, "0")), Buffer.alloc(60 + (k % 7))]));
+    const entries = Buffer.concat(samples.map((x) => u32b(1024, x.length)));
+    const mk = (off) => box("moof", fullBox("mfhd", 0, 0, u32b(f + 1)), box("traf", fullBox("tfhd", 0, 0x20000, u32b(1)), fullBox("tfdt", 0, 0, u32b(f * perFrag * 1024)),
+      fullBox("trun", 0, 0x301, u32b(perFrag, off), entries)));
+    const moofLen = mk(0).length;
+    parts.push(mk(moofLen + 8), box("mdat", ...samples));
+  }
+  return { buf: Buffer.concat(parts), samples: n, seconds: n * 1024 / ts };
+}
 // Коробки верхнего уровня MP4 и смещение из первой stco
 function mp4Layout(buf) {
   const top = [];
@@ -431,6 +461,24 @@ async function partB(T, A) {
     ok(lay.top.join(",") === "ftyp,moov,mdat", "после загрузки файл начинается с moov: ftyp, moov, mdat", lay.top);
     ok(lay.stco > 0 && buf.toString("latin1", lay.stco, lay.stco + 9) === "KNIGIMARK", "смещение звука в stco пересчитано: указывает на тот же звук", lay.stco);
     ok(buf.length === makeM4a(42, { moovEnd: true }).length, "размер файла не изменился (звук не перекодирован)");
+  }
+  if (up.track) await req("DELETE", `/api/knigi/audio/${up.track}`, { token: admin });
+  const fr = makeFragmentedM4a(30, 50); // 1500 отсчётов, около 35 секунд
+  const known2 = new Set(audioFiles());
+  up = await uploadAudio(admin, fr.buf, { name: "фрагментированный.m4a", book: AB.id, title: "фрагменты" });
+  ok(up.track && Math.abs(up.duration - fr.seconds) < 0.2, "фрагментированный M4A принят, длительность по отсчётам (" + fr.seconds.toFixed(1) + " с)", up);
+  if (AUDIO && up.track) {
+    const fn = audioFiles().find((n) => !known2.has(n) && n.startsWith(up.track));
+    const buf = readFileSync(join(AUDIO, fn));
+    const lay = mp4Layout(buf);
+    ok(lay.top.join(",") === "ftyp,moov,mdat", "после загрузки файл обычный: ftyp, moov, один mdat, без moof", lay.top);
+    const mdat = buf.indexOf("mdat") + 4;
+    const order = [];
+    for (let p = mdat; (p = buf.indexOf("S", p)) > 0 && order.length < fr.samples + 5; p++) { const m = /^S(\d{4})/.exec(buf.toString("latin1", p, p + 5)); if (m) order.push(+m[1]); }
+    ok(order.length === fr.samples && order.every((x, i) => x === i), "отсчёты звука переложены по порядку, все на месте", [order.length, order.findIndex((x, i) => x !== i)]);
+    ok(lay.stco > 0 && buf.toString("latin1", lay.stco, lay.stco + 5) === "S0000", "первый кусок в таблице указывает на первый отсчёт");
+    const sz = buf.indexOf("stsz");
+    ok(buf.readUInt32BE(sz + 12) === fr.samples, "в таблице размеров все " + fr.samples + " отсчётов");
   }
   if (up.track) await req("DELETE", `/api/knigi/audio/${up.track}`, { token: admin });
   r = await req("POST", "/api/knigi/upload/start", { token: admin, json: { name: "a.wav", size: 1000, kind: "audio", book: AB.id, title: "x" } });

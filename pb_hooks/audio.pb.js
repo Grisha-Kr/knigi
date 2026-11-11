@@ -19,6 +19,12 @@ routerAdd("GET", "/api/knigi/f/audio/{id}", (e) => {
   return require(`${__hooks}/audio_lib.js`).serve(e, e.request.pathValue("id"));
 });
 
+// Последние запросы файлов аудио (для «Сведений о воспроизведении»), только администратору
+routerAdd("GET", "/api/knigi/admin/audio-log", (e) => {
+  require(`${__hooks}/lib.js`).requireAdmin(e);
+  return e.json(200, { rows: require(`${__hooks}/audio_lib.js`).requestLog(String((e.requestInfo().query || {}).track || "")) });
+}, $apis.requireAuth("users"));
+
 // Где человек остановился в главе {pos, done, played}
 routerAdd("POST", "/api/knigi/audio/{id}/progress", (e) => {
   return e.json(200, require(`${__hooks}/audio_lib.js`).saveProgress(e, e.request.pathValue("id")));

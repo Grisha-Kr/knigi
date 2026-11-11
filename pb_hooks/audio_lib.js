@@ -190,9 +190,27 @@ function link(e, id) {
   if (!t.getString("file") || !FL.exists($filepath.join(FL.audioDir(), t.getString("file")))) throw new NotFoundError("Файл главы не найден на сервере.");
   return { url: FL.makeLink(e, "audio", t.id, e.auth.id), ttl: FL.LINK_TTL, size: t.getInt("size"), duration: t.getFloat("duration"), format: t.getString("format") };
 }
+// Последние запросы файлов аудио (в памяти сервера, 150 штук): что и с какого устройства просил плеер.
+// Показываются администратору в «Сведениях о воспроизведении» на экране плеера.
+function logRequest(e, id, user, note) {
+  try {
+    const h = e.request.header;
+    const ua = String(h.get("User-Agent") || "");
+    const dev = /iPhone|iPad/.test(ua) ? (/AppleCoreMedia|CFNetwork/.test(ua) ? "iPhone, звук" : "iPhone") : /Macintosh/.test(ua) ? "Mac" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : "другое";
+    const row = { at: new Date().toISOString(), track: id, user: user ? user.getString("name") : "", range: String(h.get("Range") || ""),
+      ifRange: String(h.get("If-Range") || ""), method: e.request.method, dev, ua: ua.slice(0, 160), note: note || "" };
+    $app.store().setFunc("kn_alog", (old) => (old || []).concat([row]).slice(-150));
+  } catch (_) {}
+}
+function requestLog(trackId) {
+  const list = $app.store().get("kn_alog") || [];
+  return list.filter((r) => !trackId || r.track === trackId).slice(-80).reverse();
+}
 function serve(e, id) {
   const FL = F();
-  const user = FL.linkUser(e, "audio", id);
+  let user = null;
+  try { user = FL.linkUser(e, "audio", id); } catch (err) { logRequest(e, id, null, "отказ: " + String(err.message || err).slice(0, 80)); throw err; }
+  logRequest(e, id, user, "");
   const t = openTrack(id, user); // выданная раньше ссылка без доступа тоже перестаёт работать (кроме своей книги)
   const name = t.getString("file");
   if (!name) throw new NotFoundError("Файл главы не найден на сервере.");
@@ -249,4 +267,4 @@ function tracksOf(bookId, withDrafts) {
   return $app.findRecordsByFilter("audio_tracks", withDrafts ? "book = {:b}" : "book = {:b} && published = true", "sort,created", 0, 0, { b: bookId });
 }
 
-module.exports = { MIME, trackOf, openTrack, checkStart, finishAudio, editTrack, moveTrack, deleteTrack, createAudioBook, link, serve, saveProgress, durText, tracksOf, notify };
+module.exports = { logRequest, requestLog, MIME, trackOf, openTrack, checkStart, finishAudio, editTrack, moveTrack, deleteTrack, createAudioBook, link, serve, saveProgress, durText, tracksOf, notify };
