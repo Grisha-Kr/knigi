@@ -348,7 +348,19 @@ const daysLeft = a => Math.round(dnum(a.until) - dnum(a.today));
 const leftText = k => k <= 0 ? 'сегодня последний день' : `осталось ${k} ${plural(k, DAYS_W)}`;
 const accHead = a => a.reason === 'terms' ? 'Условия пользования не приняты' : a.reason === 'suspended' ? 'Доступ приостановлен' : 'Срок доступа закончился';
 const TERMS_NEED = 'Нужно принять условия пользования библиотекой.';
-const contactHTML = c => /^[^\s@]+@[^\s@]+$/.test(c || '') ? `<a href="mailto:${esc(c)}">${esc(c)}</a>` : esc(c || 'администратору');
+// Конец надписи о продлении (правки 4.4, часть Б). Почта ссылкой: открывается новое письмо с темой и текстом.
+const RENEW_SUBJ = 'Продление доступа к Библиотеке';
+function renewMailto(c){
+  const u = me();
+  const body = `Здравствуйте.\nХочу продлить доступ к библиотеке.\n\nИмя: ${u.name || ''}\nПочта в библиотеке: ${u.email || ''}\n`;
+  // русские буквы и переносы строк кодируются в UTF-8 (%D0%97…, перенос %0D%0A): так их понимают «Почта» на iPhone и Mac
+  return `mailto:${c}?subject=${encodeURIComponent(RENEW_SUBJ)}&body=${encodeURIComponent(body.replace(/\n/g, '\r\n'))}`;
+}
+function renewHTML(a){
+  const c = a && a.contact;
+  const to = /^[^\s@]+@[^\s@]+$/.test(c || '') ? `на <a href="${esc(renewMailto(c))}">${esc(c)}</a>` : 'администратору';
+  return `Чтобы продлить доступ или сделать пожертвование, напишите ${to} и укажите имя и почту, с которыми вы зарегистрированы в библиотеке.`;
+}
 async function loadAccess(){
   if(!pb.authStore.isValid) return;
   const was = readOnly();
@@ -368,9 +380,9 @@ function renderAccessBar(){
     html = '';
   } else if(a && !a.active){
     off = true;
-    html = `<b>${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}.</b> Книги сейчас не открываются${S.offers.some(o => o.user === me().id && o.status === 'approved') ? ' (кроме тех, что вы прислали и администратор одобрил: их можно читать)' : ''}, свои цитаты и заметки можно смотреть. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+    html = `<b>${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}.</b> Книги сейчас не открываются${S.offers.some(o => o.user === me().id && o.status === 'approved') ? ' (кроме тех, что вы прислали и администратор одобрил: их можно читать)' : ''}, свои цитаты и заметки можно смотреть. ${renewHTML(a)}`;
   } else if(a && a.until && !a.admin && daysLeft(a) <= 7){
-    html = `Доступ действует до ${fmtDay(a.until)} (${leftText(daysLeft(a))}). Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+    html = `Доступ действует до ${fmtDay(a.until)} (${leftText(daysLeft(a))}). ${renewHTML(a)}`;
   }
   bar.classList.toggle('off', off);
   $('#access-close').hidden = off;
@@ -383,7 +395,7 @@ function accessLine(){
   if(!a) return '';
   if(a.admin) return 'Вы администратор, доступ бессрочный.';
   if(a.reason === 'terms') return TERMS_NEED;
-  if(!a.active) return `${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}: книги не открываются, а добавлять и менять ничего нельзя. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+  if(!a.active) return `${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}: книги не открываются, а добавлять и менять ничего нельзя. ${renewHTML(a)}`;
   return a.until ? `Доступ действует до ${fmtDay(a.until)} включительно.` : 'Доступ бессрочный.';
 }
 // Короткая строка вместо кнопки, которая без доступа не работает
@@ -3600,8 +3612,8 @@ function rdOpenScreen(){
   $('#app').hidden = true; $('#reader').hidden = false; RD.open = true;
   document.documentElement.classList.add('reading');
 }
-function rdFail(text){
-  $('#reader').innerHTML = `<div class="rd-msg"><div class="rd-msg-box"><p>${esc(text)}</p><button type="button" class="btn" data-rd="close">Назад</button></div></div>`;
+function rdFail(text, html){
+  $('#reader').innerHTML = `<div class="rd-msg"><div class="rd-msg-box"><p>${html ? text : esc(text)}</p><button type="button" class="btn" data-rd="close">Назад</button></div></div>`;
 }
 // Групповой режим (#/read/ID?g=ГРУППА): человек в группе, группа сейчас читает эту книгу.
 // Новые цитаты и заметки по умолчанию видны группе, можно показать цитаты других участников.
@@ -3615,7 +3627,7 @@ async function rdShow(r){
   if(r.name === 'read'){
     const b = byId('books', r.id);
     // срок доступа закончился (правки 4.1): книги не открываются
-    if(roBook(b)){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; S.access.reason === 'terms' ? rdFail(TERMS_NEED) : rdFail(`${accHead(S.access)}: книги сейчас не открываются. Чтобы продлить, напишите: ${S.access.contact || 'администратору'}.`); return; }
+    if(roBook(b)){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; S.access.reason === 'terms' ? rdFail(TERMS_NEED) : rdFail(`${esc(accHead(S.access))}: книги сейчас не открываются. ${renewHTML(S.access)}`, true); return; }
     // скрытая книга (правки 4.1): читатель её не открывает
     if(!isAdmin() && (b ? bookNA(b) : S.notes.some(n => n.book === r.id))){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(NA_TEXT); return; }
     fmt = r.q.get('f') || (b ? defaultFormat(b) : 'pdf');

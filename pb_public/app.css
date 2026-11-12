@@ -1072,6 +1072,7 @@ html.note-full .mini{display:none}
 #tm-text{width:100%;min-height:260px;font:inherit;font-size:16px;line-height:1.5;resize:vertical}
 .usr-terms{display:block;font-size:13px;color:var(--muted)}
 .usr-terms.no{color:var(--warn-ink)}
+.rd-msg-box a{color:var(--accent-text);font-weight:600}
 .terms-body:focus{outline:none}
 .terms-checks .check,.fold-body > .check{display:flex}
 .terms-checks .check input{margin-top:0}

@@ -399,7 +399,7 @@ async function partB(T) {
   ok(old.status === 403, "выданная раньше ссылка тоже перестала работать", old.status);
   ok((await progress(vera, pdfBook.id, { format: "pdf", page: 2, pages: 5 })).status === 403, "прогресс не пишется");
   let w = await req("POST", "/api/collections/notes/records", { token: vera, json: { owner: veraId, kind: "note", book: pdfBook.id, title: "Новая", body: "<p>x</p>" } });
-  ok(w.status === 403 && /напишите: owner@example\.com/.test(w.data.message), "заметку не создать (ответ по-русски с почтой)", w.text);
+  ok(w.status === 403 && /напишите на owner@example\.com и укажите имя и почту, с которыми вы зарегистрированы в библиотеке\./.test(w.data.message), "заметку не создать (ответ по-русски с почтой)", w.text);
   ok((await req("PATCH", `/api/collections/notes/records/${hl.data.id}`, { token: vera, json: { body: "<p>мысль</p>" } })).status === 403, "цитату не изменить");
   ok((await req("DELETE", `/api/collections/notes/records/${hl.data.id}`, { token: vera })).status === 403, "цитату не удалить");
   const mine = await req("GET", `/api/collections/notes/records?${flt(`owner = '${veraId}'`)}`, { token: vera });

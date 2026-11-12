@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Проверка правок 4.4 (условия пользования) на чистом локальном PocketBase. Запуск из папки репозитория:
+# Проверка правок 4.4 (условия пользования и надписи о продлении) на чистом локальном PocketBase. Запуск из папки репозитория:
 #   PB=/путь/к/pocketbase bash tools/terms-check.sh
 # Нужны: pocketbase 0.40.3 (лежит не в /tmp), node 18+, pdftotext и qpdf (poppler-utils, qpdf), unzip.
 # Скрипт поднимает PocketBase на 127.0.0.1:8093 (порт можно сменить: PORT=8095) с отдельной папкой данных,
@@ -23,7 +23,7 @@ pid=$!
 trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null' EXIT
 for _ in $(seq 1 50); do curl -s -o /dev/null "$KN_BASE/api/health" && break; sleep 0.2; done
 node tools/terms-check.mjs "$@"; code=$?
-# браузер (окно условий, раздел «Условия», полоски): только если установлен Playwright с Chromium.
+# браузер (окно условий, раздел «Условия», полоски, письмо): только если установлен Playwright с Chromium.
 # Снимки экрана: KN_SHOTS=/папка
 if [ "$code" = 0 ]; then
   if node -e "require('playwright')" >/dev/null 2>&1; then node tools/terms-ui-check.cjs; code=$?

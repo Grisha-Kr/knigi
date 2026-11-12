@@ -53,17 +53,22 @@ function state(user) {
   const reason = termsOk ? accessReason : "terms";
   return { admin, until, suspended, active: !reason, reason, access_reason: accessReason, terms_ok: termsOk, terms_current: tv, today: t };
 }
-function contact() { return ($os.getenv("CONTACT_EMAIL") || "").trim() || "администратору"; }
+function contact() { return ($os.getenv("CONTACT_EMAIL") || "").trim(); }
+// Конец надписи о продлении (правки 4.4, часть Б)
+function renewText() {
+  const c = contact();
+  return `Чтобы продлить доступ или сделать пожертвование, напишите ${c ? "на " + c : "администратору"} и укажите имя и почту, с которыми вы зарегистрированы в библиотеке.`;
+}
 const head = (st) => st.reason === "suspended" ? "Доступ приостановлен" : "Срок доступа закончился";
 // Запись без доступа
 function message(st) {
   if (st.reason === "terms") return TERMS_MSG;
-  return `${head(st)}: можно смотреть свои записи, а добавлять и менять нельзя. Чтобы продлить, напишите: ${contact()}.`;
+  return `${head(st)}: можно смотреть свои записи, а добавлять и менять нельзя. ${renewText()}`;
 }
 // Книги и файлы уроков без доступа не открываются
 function booksMessage(st) {
   if (st.reason === "terms") return TERMS_MSG;
-  return `${head(st)}: книги сейчас не открываются. Чтобы продлить, напишите: ${contact()}.`;
+  return `${head(st)}: книги сейчас не открываются. ${renewText()}`;
 }
 const isUser = (rec) => !!(rec && rec.collection && rec.collection().name === "users");
 function userOf(userOrId) {
@@ -306,4 +311,4 @@ function isActive(userOrId) { const u = userOf(userOrId); return !!u && state(u)
 // Состояние доступа человека (запись или id); null, если такого нет
 function stateOf(userOrId) { const u = userOf(userOrId); return u ? state(u) : null; }
 
-module.exports = { today, addMonths, state, stateOf, isActive, termsVersion, termsGet, termsAccept, termsSave, applyTerms, logRegistered, TERMS_MSG, guard, guardProfile, requireBooks, message, booksMessage, untilFor, PERIODS, checkInvite, applyInvite, adminUsers, adminAccess, myAccess };
+module.exports = { today, addMonths, state, stateOf, isActive, termsVersion, termsGet, termsAccept, termsSave, applyTerms, logRegistered, TERMS_MSG, renewText, guard, guardProfile, requireBooks, message, booksMessage, untilFor, PERIODS, checkInvite, applyInvite, adminUsers, adminAccess, myAccess };

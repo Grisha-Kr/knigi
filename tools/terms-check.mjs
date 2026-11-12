@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Проверка правок 4.4 на локальном PocketBase: условия пользования (часть А).
+// Проверка правок 4.4 на локальном PocketBase: условия пользования (часть А) и надписи о продлении (часть Б).
 // Без внешних пакетов, Node 18+. Обычно запускается из tools/terms-check.sh, который сам поднимает чистый PocketBase.
 // Настройки: KN_BASE (адрес сервера), KN_SU (почта:пароль суперпользователя, им создаются «старые» читатели
 // без согласия, как после миграции, и удаляется аккаунт: удаляют только в панели).
@@ -15,6 +15,7 @@ const BORIS = { email: "boris@example.com", password: "proverka-boris-12345", na
 const VERA = { email: "vera@example.com", password: "proverka-vera-12345", name: "Вера" };
 const DINA = { email: "dina@example.com", password: "proverka-dina-12345", name: "Дина" };
 const TERMS = "Нужно принять условия пользования библиотекой.";
+const RENEW = "Чтобы продлить доступ или сделать пожертвование, напишите на owner@example.com и укажите имя и почту, с которыми вы зарегистрированы в библиотеке.";
 let fails = 0, oks = 0;
 const ok = (cond, what, extra) => {
   if (cond) { oks++; console.log("  ОК      " + what); }
@@ -277,6 +278,18 @@ async function main() {
   a = await access(vera);
   ok(!a.data.active && a.data.reason === "expired", "у Веры срок закончился", a.data);
   ok((await readFile(vera, OWN)).file === 206, "срок закончился, условия приняты: своя книга читается (как в 4.3)");
+
+  section("Б. Новый текст о продлении в сообщениях сервера");
+  rf = await readFile(vera, BOOK);
+  ok(rf.link.status === 403 && rf.link.data.message === "Срок доступа закончился: книги сейчас не открываются. " + RENEW, "ссылка на книгу: новый текст", rf.link.data);
+  r = await note(vera, veraId, OWN);
+  ok(r.status === 403 && r.data.message === "Срок доступа закончился: можно смотреть свои записи, а добавлять и менять нельзя. " + RENEW, "заметка: новый текст", r.data);
+  ok(!/Чтобы продлить, напишите:/.test(rf.link.text + r.text), "старого «Чтобы продлить, напишите:» нет");
+  ok((await access(vera)).data.contact === "owner@example.com", "почта для письма в ответе /api/knigi/access");
+  await req("POST", "/api/knigi/admin/access", { token: admin, json: { user: veraId, action: "suspend" } });
+  rf = await readFile(vera, BOOK);
+  ok(rf.link.data.message === "Доступ приостановлен: книги сейчас не открываются. " + RENEW, "пауза: тот же конец надписи", rf.link.data);
+  await req("POST", "/api/knigi/admin/access", { token: admin, json: { user: veraId, action: "set", date: "2020-01-01" } });
 
   section("А6. Исправление текста той же редакции");
   const fixed = t.data.text.replace("Короткие цитаты", "Короткие цитаты (до абзаца)");

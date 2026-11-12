@@ -1,6 +1,6 @@
 // Проверка правок 4.4 в браузере (Playwright с Chromium): окно условий при регистрации и у «старого» читателя,
 // раздел «Условия» у администратора, строки в «Пользователях», условия внизу профиля читателя,
-// жёлтая и красная полоски (снимки).
+// жёлтая и красная полоски с новым текстом и письмо по ссылке на почту.
 // Запускается из tools/terms-check.sh после terms-check.mjs (тот же сервер). Настройки: KN_BASE, KN_SU,
 // KN_SHOTS (папка для снимков; без неё снимки не делаются).
 const { chromium } = require("playwright");
@@ -168,6 +168,14 @@ async function open(browser, { width, dark, user }) {
     ({ ctx, page } = await open(browser, { ...run, user: soon }));
     await page.goto(BASE + "/#/profile");
     await page.waitForSelector("#access-bar:not([hidden])");
+    const yel = await page.textContent("#access-text");
+    ok(/Доступ действует до .* Чтобы продлить доступ или сделать пожертвование, напишите на owner@example\.com и укажите имя и почту, с которыми вы зарегистрированы в библиотеке\.$/.test(yel), "жёлтая полоска: новый текст", yel);
+    const href = await page.$eval("#access-text a", (a) => a.getAttribute("href"));
+    const u = new URL(href);
+    ok(u.protocol === "mailto:" && u.pathname === "owner@example.com", "ссылка mailto на почту из CONTACT_EMAIL", href);
+    ok(u.searchParams.get("subject") === "Продление доступа к Библиотеке", "тема письма", u.searchParams.get("subject"));
+    ok(u.searchParams.get("body") === `Здравствуйте.\r\nХочу продлить доступ к библиотеке.\r\n\r\nИмя: Марина\r\nПочта в библиотеке: ${soon.email}\r\n`, "текст письма с именем и почтой", u.searchParams.get("body"));
+    ok(/%D0%9F%D1%80%D0%BE%D0%B4%D0%BB/.test(href) && /%0D%0A/.test(href) && !/[а-яё\s]/i.test(href), "русские буквы и переносы закодированы (UTF-8, %0D%0A), пробелов в ссылке нет", href);
     const foot = await page.textContent(".terms-foot");
     ok(/^Вы приняли условия пользования \d+ [а-я]+ \d{4}\./.test(foot.trim()), "внизу профиля «Вы приняли условия пользования …»", foot);
     ok(!(await page.$(".terms-foot input, .terms-foot button")), "галочек и кнопок там нет");
@@ -182,12 +190,17 @@ async function open(browser, { width, dark, user }) {
     ({ ctx, page } = await open(browser, { ...run, user: gone }));
     await page.goto(BASE + "/#/profile");
     await page.waitForSelector("#access-bar.off:not([hidden])");
+    const red = await page.textContent("#access-text");
+    ok(/^Срок доступа закончился \d+ [а-я]+( \d{4})?\. Книги сейчас не открываются, свои цитаты и заметки можно смотреть\. Чтобы продлить доступ или сделать пожертвование, напишите на owner@example\.com и укажите имя и почту, с которыми вы зарегистрированы в библиотеке\.$/.test(red), "красная полоска: новый текст", red);
+    ok(/Чтобы продлить доступ или сделать пожертвование, напишите на owner@example\.com/.test(await page.textContent(".acc-line")), "строка в профиле: новый текст");
     await page.goto(BASE + "/#/");
     await shot(page, `reader-red-${run.tag}`);
     const books = (await req("GET", "/api/collections/books/records?perPage=50&filter=" + encodeURIComponent("hidden = false"), { token: await login(gone) })).data.items.filter((b) => (b.formats || []).length);
     if (books.length) {
       await page.goto(`${BASE}/#/read/${books[0].id}`);
       await page.waitForSelector(".rd-msg");
+      const msg = await page.textContent(".rd-msg p");
+      ok(/книги сейчас не открываются\. Чтобы продлить доступ или сделать пожертвование, напишите на owner@example\.com/.test(msg) && !!(await page.$(".rd-msg a[href^='mailto:']")), "в читалке новый текст и почта ссылкой", msg);
       await shot(page, `reader-rdfail-${run.tag}`);
     }
     await ctx.close();
