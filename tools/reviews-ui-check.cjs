@@ -89,6 +89,25 @@ const tabText = (page) => page.locator('#main .notes-card .tabs a[href*="tab=rev
     ok(/Отзывов пока нет/.test(await page.locator("#main .notes-card").textContent()), "пустая вкладка: «Отзывов пока нет…»");
     await shot(page, `${run.tag}-1-empty`);
 
+    /* ---------- Профиль читателя: «Мои отзывы» под «Мои заметки», пока пусто ---------- */
+    await page.goto(`${BASE}/#/profile`);
+    await page.waitForSelector("#myrv-link");
+    const order = await page.evaluate(() => {
+      const main = document.querySelector("#main");
+      const h2 = (t) => [...main.querySelectorAll("section.card h2")].find((h) => h.textContent.trim().startsWith(t));
+      const marks = [["Читаю", h2("Читаю")], ["Прочитанные", h2("Прочитанные")], ["Мои заметки", main.querySelector('#notes-links a[href="#/notes"]')],
+        ["Мои отзывы", main.querySelector('#notes-links a[href="#/myreviews"]')], ["Предложенные", h2("Мои предложенные книги")], ["Написать", main.querySelector(".msg-card")],
+        ["Мои сообщения", main.querySelector(".msg-card #msgs-link")], ["Оформление", h2("Оформление")]];
+      const all = [...main.querySelectorAll("*")];
+      return marks.map(([k, el]) => [k, el ? all.indexOf(el) : -1]);
+    });
+    const idx = order.map((x) => x[1]);
+    ok(idx.every((v) => v >= 0) && idx.every((v, i) => i === 0 || v > idx[i - 1]), "порядок в профиле читателя: " + order.map((x) => x[0]).join(" → "), order);
+    ok((await page.locator("#myrv-link .n").textContent()) === "0", "«Мои отзывы» с числом 0");
+    await page.click("#myrv-link");
+    await page.waitForFunction(() => location.hash === "#/myreviews" && /Мои отзывы/.test((document.querySelector("#main h1") || {}).textContent || ""));
+    ok(/Вы ещё не оставили ни одного отзыва/.test(await page.locator("#main").textContent()), "пустой экран: «Вы ещё не оставили ни одного отзыва»");
+
     /* ---------- Несколько отзывов ---------- */
     await page.goto(`${BASE}/#/b/${X}?tab=reviews`);
     await page.waitForSelector("#main .rv");
@@ -139,6 +158,45 @@ const tabText = (page) => page.locator('#main .notes-card .tabs a[href*="tab=rev
     await page.waitForFunction(() => /Дополнила/.test(document.querySelector("#main .rv").textContent));
     ok(/изменён/.test(await page.locator("#main .rv .rv-date").textContent()), "после правки «изменён»");
     await shot(page, `${run.tag}-4-mine`);
+
+    /* ---------- «Мои отзывы»: строка, переход в карточку и «Назад», бледный отзыв к скрытой книге ---------- */
+    await page.goto(`${BASE}/#/profile`);
+    await page.waitForSelector("#myrv-link");
+    ok((await page.locator("#myrv-link .n").textContent()) === "1", "в профиле «Мои отзывы» 1");
+    await page.click("#myrv-link");
+    await page.waitForSelector("#main .myrv");
+    const item = page.locator("#main a.myrv");
+    ok(await item.count() === 1, "на экране «Мои отзывы» один отзыв");
+    const it = (await item.textContent()).replace(/\s+/g, " ");
+    ok(it.includes(`Тихие вечера ${n}`) && it.includes("Мария Светлова") && /изменён/.test(it) && it.includes("Прочитала за два вечера"), "обложка, название, автор книги, дата с «изменён», начало текста", it);
+    ok(await item.locator(".myrv-ex").evaluate((el) => getComputedStyle(el).webkitLineClamp) === "3", "текст обрезан до 3 строк");
+    await shot(page, `${run.tag}-7-myreviews`);
+    await item.click();
+    await page.waitForSelector('#main .tabs a[href*="tab=reviews"][aria-selected="true"]');
+    ok(page.url().includes(`#/b/${W}?tab=reviews`), "нажатие открывает карточку книги на вкладке «Отзывы»");
+    ok((await page.locator("#main a.back").textContent()).trim() === "Мои отзывы", "у карточки «Назад» подписано «Мои отзывы»");
+    await page.click("#main a.back");
+    await page.waitForFunction(() => location.hash === "#/myreviews" && !!document.querySelector("#main .myrv"));
+    ok(true, "«Назад» возвращает в «Мои отзывы»");
+    await req("POST", `/api/knigi/books/${W}/visibility`, { token: admin, json: { hidden: true } });
+    await page.waitForSelector("#main .myrv.na", { timeout: 8000 });
+    const na = page.locator("#main .myrv.na");
+    ok(await page.locator("#main a.myrv").count() === 0 && /Книга временно недоступна/.test(await na.textContent()), "книгу скрыли: отзыв бледный, «Книга временно недоступна», без перехода");
+    ok(/Прочитала за два вечера/.test(await na.textContent()) && Number(await na.evaluate((el) => getComputedStyle(el).opacity)) < 1, "свой текст виден, строка бледная");
+    await shot(page, `${run.tag}-8-hidden`);
+    await page.goto(`${BASE}/#/b/${W}?tab=reviews`);
+    await page.waitForSelector("#main .notes-card");
+    ok(await page.locator("#main .rv").count() === 0 && (await tabText(page)).trim() === "Отзывы", "в карточке скрытой книги отзывов не видно, даже своего");
+    // без доступа «Мои отзывы» видны
+    await req("POST", "/api/knigi/admin/access", { token: admin, json: { user: R.id, action: "set", date: "2020-01-01" } });
+    await req("POST", `/api/knigi/books/${W}/visibility`, { token: admin, json: { hidden: false } });
+    await page.goto(`${BASE}/#/myreviews`);
+    await page.reload();
+    await page.waitForSelector("#main a.myrv");
+    ok(await page.locator("#access-bar.off:not([hidden])").count() === 1 && await page.locator("#main a.myrv").count() === 1, "срок закончился: «Мои отзывы» видны, книга снова открыта");
+    await req("POST", "/api/knigi/admin/access", { token: admin, json: { user: R.id, action: "unlimited" } });
+    await page.reload();
+    await page.waitForSelector("#main a.myrv");
 
     /* ---------- Главная: «Новые отзывы» ---------- */
     await page.goto(`${BASE}/#/`);

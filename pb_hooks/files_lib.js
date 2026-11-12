@@ -1223,7 +1223,7 @@ function mergeBooks(book, other) {
 }
 
 /* ---------- Скрытые книги (правки 4.1) ---------- */
-// Читатели, у которых с книгой что-то связано: цитаты, заметки, «Читаю» и «Прочитано», прогресс,
+// Читатели, у которых с книгой что-то связано: цитаты, заметки, отзыв (правки 4.6), «Читаю» и «Прочитано», прогресс,
 // личная полка, группа (текущая или прочитанная книга группы). Им видна карточка книги, файлы нет.
 function keepFor(bookId, app) {
   app = app || $app;
@@ -1232,6 +1232,7 @@ function keepFor(bookId, app) {
       SELECT "user" AS u FROM reading WHERE book = {:b}
       UNION SELECT "user" FROM marks WHERE book = {:b}
       UNION SELECT owner FROM notes WHERE book = {:b}
+      UNION SELECT "user" FROM reviews WHERE book = {:b}
       UNION SELECT s.owner FROM shelf_books sb JOIN shelves s ON s.id = sb.shelf WHERE sb.book = {:b} AND s.common = FALSE
       UNION SELECT gm."user" FROM group_books gb JOIN group_members gm ON gm."group" = gb."group" WHERE gb.book = {:b}
       UNION SELECT gm."user" FROM "groups" g JOIN group_members gm ON gm."group" = g.id WHERE g.book = {:b}

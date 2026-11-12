@@ -70,6 +70,7 @@ const ICON = {
   check: sv('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
   people: sv('<circle cx="9" cy="8" r="3"/><path d="M3 19c0-3 2.7-5 6-5s6 2 6 5"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14c2.8 0 5 1.7 5 4.5"/>'),
   chat: sv('<path d="M4 5h16v11H9l-5 4z"/>'),
+  review: sv('<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'),
   log: sv('<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/>'),
   author: sv('<circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/>'),
   moon: sv('<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'),
@@ -683,7 +684,7 @@ function render(force){
   if(RD.open) rdClose();
   noteFullSync(r);
   sideMe();
-  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : (r.name === 'note' && r.q.get('g')) || ['groups','g','join'].includes(r.name) ? 'groups' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log','ai','msgs','msg','reviews'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
+  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : (r.name === 'note' && r.q.get('g')) || ['groups','g','join'].includes(r.name) ? 'groups' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log','ai','msgs','msg','reviews','myreviews'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
   $$('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   // точка на «Группы»: новые заметки, комментарии или новая книга с прошлого захода
   const gnew = S.loaded && anyGroupNew();
@@ -970,7 +971,7 @@ VIEWS.b = r => {
   const fromText = !from ? 'Библиотека' : from.name === 'sh' ? ((byId('shelves', from.id) || {}).name || 'Полка') : from.name === 'a' ? ((byId('authors', from.id) || {}).name || 'Автор')
     : from.name === 'g' ? ((byId('groups', from.id) || {}).name || 'Группа')
     : from.name === 'home' && from.q.get('q') ? 'Поиск'
-    : {books: 'Все книги', notes: 'Заметки', note: 'Заметка', shelves: 'Полки', authors: 'Авторы', profile: 'Профиль', log: 'Журнал чтения', review: 'На проверке', groups: 'Группы', ai: 'Подключение к ИИ'}[from.name] || 'Библиотека';
+    : {books: 'Все книги', notes: 'Заметки', note: 'Заметка', shelves: 'Полки', authors: 'Авторы', profile: 'Профиль', log: 'Журнал чтения', review: 'На проверке', groups: 'Группы', ai: 'Подключение к ИИ', reviews: 'Отзывы', myreviews: 'Мои отзывы'}[from.name] || 'Библиотека';
   return `${backLink(pend ? '#/review/' + b.id : '#/', pend ? 'На проверке' : fromText)}
     ${pend ? `<p class="pend-note">Книга на проверке: её видите только вы. <a href="#/review/${b.id}">Открыть проверку</a></p>` : ''}
     ${b.hidden && isAdmin() && !pend ? `<p class="pend-note hid-bar">${ICON.lock}<span>${bookReaders(b.id).length ? `Видна вам и читателям: ${esc(bookReaders(b.id).map(u => u.name || u.email).join(', '))}. Изменить` : 'Видна только вам. Открыть всем или отдельным читателям'}: «⋯» → «Настройки».</span></p>` : ''}
@@ -2213,8 +2214,10 @@ const rvCount = t => `${msgLen(t)} из ${RV_MAX}`;
 const ownerId = () => (S.owner && S.owner.id) || (isAdmin() ? me().id : '');
 // Порядок: отзыв администратора первым, остальные новые сверху
 const rvOrder = (a, b) => (b.user === ownerId()) - (a.user === ownerId()) || String(b.created).localeCompare(String(a.created));
-const rvOfBook = id => S.reviews.filter(r => r.book === id).sort(rvOrder);
+const rvOfBook = id => { const b = byId('books', id); return b && bookNA(b) ? [] : S.reviews.filter(r => r.book === id).sort(rvOrder); };
 const myReview = id => S.reviews.find(r => r.book === id && r.user === me().id);
+// Свои отзывы, новые сверху. Свой отзыв приходит с сервера и тогда, когда книга больше не видна (её скрыли или сняли доступ)
+const myReviews = () => S.reviews.filter(r => r.user === me().id).sort((a, b) => String(b.created).localeCompare(String(a.created)));
 const rvAuthor = r => r.user === me().id ? me() : {id: r.user, name: r.user_name, avatar: r.user_avatar};
 const rvWhen = r => String(r.edited || r.created || '');
 const rvBookOk = b => !!b && !b.pending && !bookNA(b);
@@ -2318,6 +2321,21 @@ VIEWS.reviews = () => {
     ${list.length ? `<div class="rv-list">${list.map(r => rvRow(r, {book: true, isNew: UI.rvNew.has(r.id)})).join('')}</div>` : '<p class="empty">Отзывов пока нет.</p>'}`;
 };
 
+// «Мои отзывы» (дополнение к правкам 4.6): нажатие открывает карточку книги на вкладке «Отзывы», «Назад» возвращает сюда.
+// Отзыв к книге, которая больше не видна, стоит бледным с пометкой и без перехода.
+function myRvRow(r){
+  const b = byId('books', r.book), ok = rvBookOk(b);
+  const head = `${b ? coverHTML(b, 'sm') : '<span class="cover sm na"><span class="cover-ph"></span></span>'}<span class="myrv-t"><b>${esc(b ? b.title : 'Книга')}</b>${b && authorsText(b) ? `<small>${esc(authorsText(b))}</small>` : ''}
+    <small class="rv-date">${esc(fmtDate(r.created))}${r.edited ? ' · изменён' : ''}</small>${ok ? '' : '<span class="tag wait">Книга временно недоступна</span>'}
+    <span class="myrv-ex">${esc(String(r.text || '').replace(/\s+/g, ' ').trim())}</span></span>`;
+  return ok ? `<a class="myrv" href="#/b/${b.id}?tab=reviews">${head}${ICON.chev}</a>` : `<div class="myrv na" aria-disabled="true">${head}</div>`;
+}
+VIEWS.myreviews = () => {
+  const list = myReviews();
+  return `${backLink('#/profile', 'Профиль')}<header class="head"><h1>Мои отзывы</h1>${meLink()}</header>
+    ${list.length ? `<div class="myrv-list">${list.map(myRvRow).join('')}</div>` : '<p class="empty">Вы ещё не оставили ни одного отзыва. Написать его можно в карточке книги, на вкладке «Отзывы».</p>'}`;
+};
+
 /* ---------- Профиль ---------- */
 VIEWS.profile = () => {
   const u = me();
@@ -2340,7 +2358,8 @@ VIEWS.profile = () => {
     <section class="card"><h2>Прочитанные${finished.length ? ` <span class="n">${finished.length}</span>` : ''}</h2>
       ${finished.length ? `<div class="rows">${(UI.finAll ? finished : finished.slice(0, FIN_SHOW)).map(m => bookRow(byId('books', m.book), `<small class="fin-day">прочитана ${esc(fmtDate(m.finished_at))}</small>`)).join('')}</div>
         ${finished.length > FIN_SHOW ? `<button type="button" class="btn sm ghost" data-act="fin-all">${UI.finAll ? 'Свернуть' : 'Показать все · ' + finished.length}</button>` : ''}` : '<p class="empty">Здесь появятся книги с отметкой «Прочитано».</p>'}</section>
-    ${isAdmin() ? '' : `<nav class="links" id="notes-links"><a href="#/notes">${ICON.notes}Мои заметки<span class="n">${myNotes}</span>${ICON.chev}</a></nav>`}
+    ${isAdmin() ? '' : `<nav class="links" id="notes-links"><a href="#/notes">${ICON.notes}Мои заметки<span class="n">${myNotes}</span>${ICON.chev}</a>
+      <a href="#/myreviews" id="myrv-link">${ICON.review}Мои отзывы<span class="n">${myReviews().length}</span>${ICON.chev}</a></nav>`}
     ${isAdmin() ? '' : `<section class="card"><div class="block-h"><h2>Мои предложенные книги</h2></div>
       ${offers.length ? `<div class="rows">${offers.map(offerRow).join('')}</div>` : '<p class="hint">Если в библиотеке нет нужной книги, предложите её. Администратор проверит и добавит.</p>'}
       ${readOnly() ? roNote() : `<button type="button" class="btn" data-act="offer-book">${ICON.upload}<span>Предложить книгу</span></button>`}</section>`}

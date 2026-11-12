@@ -288,14 +288,20 @@ async function main() {
   // «Новые отзывы» на главной считаются из этого же списка: Борису отзыв к H не попадёт
   ok(!(await list(boris)).slice(0, 3).some((x) => x.book === H), "в «Новых отзывах» у Бориса отзыва к H нет");
   await setReaders(admin, H, []);
-  ok(!ids(await list(anna)).includes(aH.id), "Анну убрали из списка H: её отзыв ей больше не виден");
+  ok(ids(await list(anna)).includes(aH.id) && (await view(anna, aH.id)).status === 200, "Анну убрали из списка H: свой отзыв она видит («Мои отзывы»)");
+  r = await req("GET", `/api/collections/books/records/${H}`, { token: anna });
+  ok(r.status === 200 && r.data.hidden === true, "карточка H у неё осталась (временно недоступна): отзыв держит её в kept_for", r.text);
   r = await edit(anna, aH.id, "правка скрытой");
-  ok(r.status === 404, "и изменить его она не может (404)", r.text);
+  ok(r.status === 404, "изменить его она не может (404)", r.text);
+  ok((await del(anna, aH.id)).status === 404, "и удалить тоже (404)");
   await setReaders(admin, H, [ANNA_ID]);
   ok(ids(await list(anna)).includes(aH.id), "вернули Анне: снова виден");
   await setVis(admin, X, true);
-  ok(!(await list(boris)).some((x) => x.book === X), "X скрыли: у Бориса отзывов к X нет, в том числе своего");
-  ok((await view(boris, aX.id)).status === 404, "по адресу тоже 404");
+  r = await list(boris, `book = '${X}'`);
+  ok(r.length === 1 && r[0].id === bX3.id, "X скрыли: у Бориса из отзывов X только свой", r.map((x) => x.user_name));
+  ok((await view(boris, aX.id)).status === 404 && (await view(boris, admX.id)).status === 404, "чужие по адресу 404");
+  ok((await req("GET", `/api/collections/books/records/${X}`, { token: boris })).status === 200, "карточка X у Бориса осталась (временно недоступна)");
+  ok((await edit(boris, bX3.id, "правка к скрытой")).status === 404, "свой отзыв к скрытой не меняет (404)");
   ok((await write(boris, X, "к скрытой")).status >= 400, "к скрытой X Борис не пишет");
   ok((await list(admin, `book = '${X}'`)).length === 3, "у администратора отзывы X на месте (3)");
   await setVis(admin, X, false);

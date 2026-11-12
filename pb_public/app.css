@@ -1175,3 +1175,14 @@ html.note-full .mini{display:none}
 .rv-item > span:last-child{gap:2px}
 .rv-item .rv-by{font-weight:600;color:var(--ink-2)}
 .rv-item .rv-ex{font-size:13.5px;line-height:1.45;color:var(--muted);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
+/* «Мои отзывы» в профиле читателя */
+.myrv-list{display:flex;flex-direction:column;gap:8px}
+.myrv{display:flex;gap:12px;align-items:flex-start;padding:12px 14px;border-radius:14px;background:var(--card);box-shadow:var(--shadow);text-decoration:none;color:var(--ink)}
+a.myrv:hover{background:color-mix(in srgb,var(--ink) 3%,var(--card))}
+.myrv > .chev{align-self:center}
+.myrv-t{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.myrv-t b{font-family:var(--f-head);font-weight:600;font-size:15.5px;overflow-wrap:anywhere}
+.myrv-t small{font-size:13px;color:var(--muted)}
+.myrv-t .tag{margin-top:2px}
+.myrv-ex{margin-top:4px;font-family:var(--f-head);font-size:14.5px;line-height:1.5;color:var(--ink-2);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;overflow:hidden;overflow-wrap:anywhere}
+.myrv.na{opacity:.6;box-shadow:none;border:1px dashed var(--line)}
