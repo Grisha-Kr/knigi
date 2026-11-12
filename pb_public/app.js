@@ -75,6 +75,8 @@ const ICON = {
   moon: sv('<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'),
   expand: sv('<path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/>'),
   collapse: sv('<path d="M20 4l-6 6M14 5v5h5M4 20l6-6M10 19v-5H5"/>'),
+  mail: sv('<rect x="3" y="5.5" width="18" height="13" rx="2"/><path d="M3.5 7l8.5 6.5L20.5 7"/>'),
+  image: sv('<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="M4 17.5l5-4.5 3.5 3 3-2.5 4.5 4"/>'),
   camera: sv('<path d="M4 8h3.5L9 5.5h6L16.5 8H20v11H4z"/><circle cx="12" cy="13" r="3.5"/>'),
   marker: sv('<path d="M14.5 4.5l5 5L10 19H5v-5z"/><path d="M12 7l5 5"/><path d="M4 21h9"/>'),
   hl: sv('<path d="M5 20h14"/><path d="M8 16l-1.5-1.5L15 6l3 3-8.5 8.5z"/>'),
@@ -97,13 +99,14 @@ const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], n
   ocr:null, // ocr: очередь распознавания (правки 3.1, только администратору, GET /api/knigi/ocr)
   access:null, // access: срок доступа (правки 4.1, GET /api/knigi/access)
   atracks:[], aprog:[], // главы аудио и свой прогресс слушания (правки 4.3, часть Б)
-  bacc:[]}; // bacc: кому открыты скрытые книги (правки 4.3, book_access): у читателя свои строки, у администратора все
+  bacc:[], // bacc: кому открыты скрытые книги (правки 4.3, book_access): у читателя свои строки, у администратора все
+  msgs:[], mreplies:[]}; // сообщения администратору и ответы (правки 4.5): у читателя свои, у администратора все
 const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files', marks:'marks', offers:'book_offers', pbooks:'books',
-  groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users', bacc:'book_access', atracks:'audio_tracks', aprog:'audio_progress'};
+  groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users', bacc:'book_access', atracks:'audio_tracks', aprog:'audio_progress', msgs:'messages', mreplies:'message_replies'};
 const KEYS = Object.keys(PBN);
 const loadKeys = () => KEYS.filter(k => k !== 'pbooks' || isAdmin());
 const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS + (isAdmin() ? ',offered_by' : ''), filter: 'pending = false'}), pbooks: () => ({fields: BOOK_FIELDS + ',offered_by,pending', filter: 'pending = true'}),
-  bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS}), people: () => ({fields: 'id,name,avatar'}), atracks: () => ({sort: 'sort,created'})};
+  bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS}), people: () => ({fields: 'id,name,avatar'}), atracks: () => ({sort: 'sort,created'}), msgs: () => ({sort: '-last_at'}), mreplies: () => ({sort: 'created'})};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('kn_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('kn_'+k, JSON.stringify(v)); } catch(e){} };
 const dropLS = k => { try { localStorage.removeItem('kn_'+k); } catch(e){} };
@@ -356,9 +359,12 @@ function renewMailto(c){
   // русские буквы и переносы строк кодируются в UTF-8 (%D0%97…, перенос %0D%0A): так их понимают «Почта» на iPhone и Mac
   return `mailto:${c}?subject=${encodeURIComponent(RENEW_SUBJ)}&body=${encodeURIComponent(body.replace(/\n/g, '\r\n'))}`;
 }
+// После почты (правки 4.5): «Скопировать почту» (на iPhone без ящика в «Почте» ссылка открывает экран «Новый аккаунт»)
+// и «или напишите здесь»: окно «Написать администратору» с темой «Продление доступа или пожертвование».
 function renewHTML(a){
-  const c = a && a.contact;
-  const to = /^[^\s@]+@[^\s@]+$/.test(c || '') ? `на <a href="${esc(renewMailto(c))}">${esc(c)}</a>` : 'администратору';
+  const c = a && a.contact, mail = /^[^\s@]+@[^\s@]+$/.test(c || '');
+  const here = isAdmin() ? '' : `<button type="button" class="linkish" data-msgw="renew">${mail ? 'или напишите здесь' : 'здесь, в приложении'}</button>`;
+  const to = mail ? `на <a href="${esc(renewMailto(c))}">${esc(c)}</a> <button type="button" class="mail-copy" data-cpmail="${esc(c)}" title="Скопировать почту">${ICON.copy}<span>Скопировать почту</span></button>${here ? ' ' + here : ''}` : `администратору${here ? ' ' + here : ''}`;
   return `Чтобы продлить доступ или сделать пожертвование, напишите ${to} и укажите имя и почту, с которыми вы зарегистрированы в библиотеке.`;
 }
 async function loadAccess(){
@@ -569,8 +575,14 @@ function buildNav(){
 }
 // Сколько книг ждёт проверки (только у администратора): счётчик в меню и точка на фото
 const reviewCount = () => isAdmin() ? S.pbooks.length : 0;
+// Сообщения (правки 4.5): у администратора сколько новых (новые сообщения и новые ответы читателей),
+// у читателя сколько переписок с ответом администратора, который он ещё не открыл
+const msgNew = () => isAdmin() ? S.msgs.filter(m => m.status === 'new').length : S.msgs.filter(m => m.user_unread && m.author === me().id).length;
+// Точка на фото: книги на проверке или новое в сообщениях
+const meDot = () => reviewCount() > 0 || msgNew() > 0;
+const meDotText = () => [reviewCount() ? 'есть книги на проверке' : '', msgNew() ? (isAdmin() ? 'есть новые сообщения' : 'есть ответ администратора') : ''].filter(Boolean).join(', ');
 // Фото в шапке на телефоне: открывает профиль (на компьютере профиль внизу бокового меню)
-const meLink = () => `<a class="me-link${reviewCount() ? ' dot' : ''}" href="#/profile" aria-label="Профиль${reviewCount() ? ', есть книги на проверке' : ''}" title="Профиль">${faceHTML(me(), 'md')}</a>`;
+const meLink = () => `<a class="me-link${meDot() ? ' dot' : ''}" href="#/profile" aria-label="Профиль${meDot() ? ', ' + meDotText() : ''}" title="Профиль">${faceHTML(me(), 'md')}</a>`;
 
 /* ---------- Адреса экранов ----------
    #/ главная (#/?q=слово: поиск), #/review книги на проверке (#/review/ID_КНИГИ проверка одной), #/shelves полки, #/sh/ID полка, #/books все книги, #/authors авторы, #/a/ID автор,
@@ -667,7 +679,7 @@ function render(force){
   if(RD.open) rdClose();
   noteFullSync(r);
   sideMe();
-  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : (r.name === 'note' && r.q.get('g')) || ['groups','g','join'].includes(r.name) ? 'groups' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log','ai'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
+  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : (r.name === 'note' && r.q.get('g')) || ['groups','g','join'].includes(r.name) ? 'groups' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log','ai','msgs','msg'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
   $$('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   // точка на «Группы»: новые заметки, комментарии или новая книга с прошлого захода
   const gnew = S.loaded && anyGroupNew();
@@ -1046,9 +1058,9 @@ function faceHTML(u, cls){
 // Внизу бокового меню на компьютере: фото и имя
 function sideMe(){
   const el = $('#side-me'); if(!el) return;
-  const u = me(), html = `<span class="face-wrap${reviewCount() ? ' dot' : ''}">${faceHTML(u, 'sm')}</span><span>${esc(u.name || u.email || 'Профиль')}</span>`;
+  const u = me(), html = `<span class="face-wrap${meDot() ? ' dot' : ''}">${faceHTML(u, 'sm')}</span><span>${esc(u.name || u.email || 'Профиль')}</span>`;
   if(el.innerHTML !== html) el.innerHTML = html;
-  el.setAttribute('aria-label', 'Профиль' + (reviewCount() ? ', есть книги на проверке' : ''));
+  el.setAttribute('aria-label', 'Профиль' + (meDot() ? ', ' + meDotText() : ''));
   el.title = 'Профиль';
 }
 function avatarMenu(btn){
@@ -1960,6 +1972,229 @@ async function cmDelete(id, btn){
   try { await pb.collection('note_comments').delete(id); removeLocal('comments', id); cmPaint(); toast('Комментарий удалён'); } catch(e){ toast(errText(e)); }
 }
 
+/* ---------- Сообщения администратору (правки 4.5, часть А) ---------- */
+// Читатель пишет из профиля («Написать администратору») или из полоски срока («или напишите здесь»),
+// видит свои переписки в «Мои сообщения». Администратор читает и отвечает в «Сообщения читателей»
+// (входящие и архив). Сообщения и ответы приходят вместе с остальными данными (msgs, mreplies) и живыми
+// обновлениями, пишет их только сервер (маршруты /api/knigi/messages…). Писем нет: о новом говорят точки.
+const MSG_TOPICS = [['offer', 'Предложение'], ['problem', 'Что-то неудобно или не работает'], ['review', 'Отзыв'], ['renew', 'Продление доступа или пожертвование'], ['other', 'Другое']];
+const msgTopic = k => (MSG_TOPICS.find(t => t[0] === k) || [k, 'Сообщение'])[1];
+const MSG_MAX = 1000, SHOT_SIDE = 1600, SHOT_IN_MAX = 30 * MB;
+const msgLen = t => Array.from(String(t || '')).length;
+const msgCount = t => `${msgLen(t)} из ${MSG_MAX}`;
+const msgById = id => S.msgs.find(m => m.id === id);
+const msgReplies = id => S.mreplies.filter(r => r.message === id).sort((a, b) => String(a.created).localeCompare(String(b.created)));
+const byLast = (a, b) => String(b.last_at || b.created).localeCompare(String(a.last_at || a.created));
+const msgUser = m => S.users.find(u => u.id === m.author) || {id: m.author, name: m.author_name, email: m.author_email};
+const MSG_ST = {new: ['Новое', 'new'], read: ['Прочитано', 'wait'], answered: ['Отвечено', 'ok']};
+const msgStTag = m => { const st = MSG_ST[m.status] || MSG_ST.new; return `<span class="tag ${st[1]}">${st[0]}</span>`; };
+const msgText = t => esc(t).replace(/\n/g, '<br>');
+const msgExcerpt = t => { const x = String(t || '').replace(/\s+/g, ' ').trim(); return x.length > 140 ? x.slice(0, 140).trim() + '…' : x; };
+
+// Снимок экрана: открываем в браузере, уменьшаем до 1600 точек по длинной стороне и сохраняем в JPEG (около 200-500 КБ)
+async function shotPrepare(file){
+  if(file.size > SHOT_IN_MAX) throw new Error('Картинка больше 30 МБ. Выберите снимок поменьше.');
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  let img = null;
+  try { img = await createImageBitmap(file); }
+  catch(e){
+    try { img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); }); }
+    catch(e2){ img = null; }
+  }
+  if(!img) throw new Error(['heic', 'heif'].includes(ext) ? 'Это снимок в формате HEIC: этот браузер его не открывает. Выберите снимок в формате JPG или PNG.' : 'Эту картинку не удалось открыть. Выберите снимок в формате JPG, PNG или WEBP.');
+  const W = img.width || img.naturalWidth, H = img.height || img.naturalHeight;
+  const k = Math.min(1, SHOT_SIDE / Math.max(W, H));
+  const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(W * k)); cv.height = Math.max(1, Math.round(H * k));
+  const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); g.imageSmoothingQuality = 'high';
+  g.drawImage(img, 0, 0, cv.width, cv.height);
+  if(img.close) img.close();
+  let blob = null;
+  for(const q of [0.85, 0.78, 0.7, 0.6, 0.5, 0.4]){ blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', q)); if(blob && blob.size <= 500 * 1024) break; }
+  if(!blob || blob.size > 2 * MB) throw new Error('Не удалось уменьшить снимок. Выберите другой.');
+  return {blob, url: URL.createObjectURL(blob), w: cv.width, h: cv.height};
+}
+
+// Окно «Написать администратору» (topic: тема заранее, например renew из полоски срока)
+function msgWrite(topic){
+  if(isAdmin()) return;
+  if(S.access && S.access.reason === 'terms'){ termsGate(); return; }
+  let shot = null;
+  const paint = () => {
+    const box = $('#mw-shot'); if(!box) return;
+    box.innerHTML = shot ? `<span class="mw-prev"><img src="${esc(shot.url)}" alt="Снимок экрана"><button type="button" class="mw-x" data-dlg="mw-unshot" aria-label="Убрать снимок" title="Убрать">${ICON.close}</button></span><small class="hint">Снимок экрана, ${fsize(shot.blob.size)}</small>`
+      : `<button type="button" class="btn sm" data-dlg="mw-shot">${ICON.image}<span>Приложить снимок экрана</span></button>`;
+  };
+  const drop = () => { if(shot) URL.revokeObjectURL(shot.url); shot = null; };
+  openForm({title: 'Написать администратору',
+    html: `<div class="field"><label for="mw-topic">Тема</label><select id="mw-topic"><option value=""${topic ? '' : ' selected'} disabled>Выберите тему</option>${MSG_TOPICS.map(([k, l]) => `<option value="${k}"${k === topic ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+      <div class="field"><label for="mw-text">Сообщение</label><textarea id="mw-text" rows="6" maxlength="${MSG_MAX}" placeholder="Напишите, что хотите сказать или спросить"></textarea><small class="cnt" id="mw-cnt">${msgCount('')}</small></div>
+      <div class="mw-shot" id="mw-shot"></div>
+      <p class="hint">Снимок по желанию, один на сообщение. Его увидите только вы и администратор.</p>`,
+    submit: 'Отправить',
+    onInput(t){ if(t.id === 'mw-text'){ const c = $('#mw-cnt'); c.textContent = msgCount(t.value); c.classList.toggle('over', msgLen(t.value) > MSG_MAX); } },
+    async onClick(b){
+      if(b.dataset.dlg === 'mw-unshot'){ drop(); paint(); return; }
+      if(b.dataset.dlg === 'mw-shot') pickFile('image/*,.heic,.heif', false, async ([f]) => {
+        formErr(''); const box = $('#mw-shot'); if(box) box.innerHTML = '<small class="hint">Готовлю снимок…</small>';
+        try { const s2 = await shotPrepare(f); drop(); shot = s2; } catch(err){ formErr(err.message || 'Не удалось открыть картинку.'); }
+        paint();
+      });
+    },
+    async onSave(){
+      const tp = $('#mw-topic').value, text = $('#mw-text').value.trim();
+      if(!tp) throw new Error('Выберите тему.');
+      if(!text) throw new Error('Напишите текст сообщения.');
+      if(msgLen(text) > MSG_MAX) throw new Error(`Текст длиннее ${MSG_MAX} знаков.`);
+      const fd = new FormData();
+      fd.append('topic', tp); fd.append('text', text);
+      if(shot) fd.append('shot', new File([shot.blob], 'snimok.jpg', {type: 'image/jpeg'}));
+      const rec = await pb.send('/api/knigi/messages', {method: 'POST', body: fd});
+      upsert('msgs', rec);
+      thenOpen(() => info('Сообщение отправлено', 'Сообщение отправлено. Ответ появится в разделе «Мои сообщения».'));
+    },
+    onClose(){ drop(); }});
+  paint();
+}
+
+// Ссылка на снимок (защищённая, на 2 часа, с кукой): берётся при первом показе и хранится в памяти
+UI.shots = {};
+function shotSrc(m){
+  const c = UI.shots[m.id];
+  if(c && c.url && Date.now() - c.at < 100 * 60e3) return c.url;
+  if(!c || (!c.busy && !c.err)){
+    UI.shots[m.id] = {busy: true};
+    pb.send(`/api/knigi/messages/${m.id}/shot`, {}).then(l => { UI.shots[m.id] = {url: l.url, at: Date.now()}; schedule(); })
+      .catch(err => { UI.shots[m.id] = {err: errText(err)}; schedule(); });
+  }
+  return '';
+}
+function shotHTML(m){
+  if(!m.shot) return '';
+  const src = shotSrc(m), c = UI.shots[m.id] || {};
+  return `<button type="button" class="msg-shot" data-act="msg-shot" data-id="${esc(m.id)}" aria-label="Открыть снимок крупно" title="Открыть снимок крупно">${src ? `<img src="${esc(src)}" alt="Снимок экрана">` : `<span class="hint">${c.err ? esc(c.err) : 'Загружаю снимок…'}</span>`}</button>`;
+}
+function shotOpen(id){
+  const c = UI.shots[id]; if(!c || !c.url) return;
+  const d = $('#shot'); $('#shot-img').src = c.url;
+  if(!d.open) d.showModal();
+}
+$('#shot').addEventListener('click', () => $('#shot').close());
+
+// «Ответить по почте»: новое письмо читателю с темой и цитатой его текста (как письмо о продлении, правки 4.4)
+function msgMailto(m){
+  const u = msgUser(m), name = (u.name || '').trim();
+  const quote = String(m.text || '').split('\n').map(l => '> ' + l).join('\n');
+  const body = `Здравствуйте${name ? ', ' + name : ''}.\n\n\n\nВы писали в Библиотеке ${fmtDateY(m.created)}:\n${quote}\n`;
+  return `mailto:${u.email || m.author_email || ''}?subject=${encodeURIComponent('Ваше сообщение в Библиотеке: ' + msgTopic(m.topic))}&body=${encodeURIComponent(body.replace(/\n/g, '\r\n'))}`;
+}
+
+VIEWS.msgs = r => {
+  if(isAdmin()) return msgsAdmin(r);
+  const list = S.msgs.filter(m => m.author === me().id).sort(byLast);
+  return `${backLink('#/profile', 'Профиль')}<header class="head"><h1>Мои сообщения</h1>${meLink()}</header>
+    <button type="button" class="btn primary" data-act="msg-write">${ICON.mail}<span>Написать администратору</span></button>
+    ${list.length ? `<div class="rows msg-list">${list.map(m => `<a class="msg-row${m.user_unread ? ' unread' : ''}" href="#/msg/${m.id}">
+      <span class="msg-row-t"><b>${esc(msgTopic(m.topic))}</b><small>${esc(fmtWhen(m.created))}${m.shot ? ` · ${ICON.image}` : ''}</small></span>
+      <span class="msg-ex">${esc(msgExcerpt(m.text))}</span>
+      ${m.answers ? `<span class="msg-tags"><span class="tag ${m.user_unread ? 'new' : 'ok'}">${m.user_unread ? 'Новый ответ' : 'Есть ответ'}</span></span>` : ''}</a>`).join('')}</div>`
+      : '<p class="empty">Сообщений пока нет. Ответ администратора появится здесь.</p>'}`;
+};
+function msgsAdmin(r){
+  const uid = r.q.get('user') || '', box = r.q.get('box') === 'archive' ? 'archive' : 'inbox';
+  const u = uid ? S.users.find(x => x.id === uid) : null;
+  const all = S.msgs.slice().sort(byLast);
+  const list = uid ? all.filter(m => m.author === uid) : all.filter(m => !!m.archived === (box === 'archive'));
+  const inboxN = all.filter(m => !m.archived).length, archN = all.length - inboxN;
+  const tabs = uid ? `<p class="hint">Все сообщения читателя, в том числе из архива. <a href="#/msgs">Все сообщения читателей</a></p>`
+    : `<div class="tabs msg-tabs" role="tablist">${[['inbox', 'Входящие', inboxN], ['archive', 'Архив', archN]].map(([k, l, n]) => `<a role="tab" data-swap="1" href="#/msgs${k === 'archive' ? '?box=archive' : ''}" aria-selected="${k === box}">${l}${n ? ` <span class="n">${n}</span>` : ''}</a>`).join('')}</div>`;
+  return `${backLink('#/profile', 'Профиль')}<header class="head"><h1>${uid ? 'Сообщения: ' + esc(u ? u.name || u.email : (all.find(m => m.author === uid) || {}).author_name || 'читатель') : 'Сообщения читателей'}</h1>${meLink()}</header>
+    ${tabs}
+    ${list.length ? `<div class="rows msg-list">${list.map(m => { const w = msgUser(m);
+      return `<a class="msg-row adm${m.status === 'new' ? ' unread' : ''}" href="#/msg/${m.id}">
+      <span class="msg-who">${faceHTML(w, 'sm')}<span><b>${esc(w.name || w.email || 'Читатель')}</b><small>${esc(w.email || '')}</small></span></span>
+      <span class="msg-row-t"><b>${esc(msgTopic(m.topic))}</b><small>${esc(fmtWhen(m.last_at || m.created))}${m.shot ? ` · ${ICON.image}<span class="sr">есть снимок</span>` : ''}</small></span>
+      <span class="msg-ex">${esc(msgExcerpt(m.text))}</span>
+      <span class="msg-tags">${msgStTag(m)}${m.archived && uid ? '<span class="tag wait">в архиве</span>' : ''}</span></a>`; }).join('')}</div>`
+      : `<p class="empty">${uid ? 'Этот читатель пока ничего не писал.' : box === 'archive' ? 'В архиве пусто.' : 'Новых сообщений нет.'}</p>`}`;
+}
+// Переписка. Читатель, открыв её, снимает точку «есть ответ».
+UI.msgSeen = {}; UI.msgDraft = {};
+VIEWS.msg = r => {
+  const m = msgById(r.id);
+  const admin = isAdmin();
+  const back = backLink(admin && m && m.archived ? '#/msgs?box=archive' : '#/msgs', admin ? 'Сообщения читателей' : 'Мои сообщения');
+  if(!m) return back + notFound();
+  if(!admin && m.user_unread && UI.msgSeen[m.id] !== m.answers){
+    UI.msgSeen[m.id] = m.answers;
+    pb.send(`/api/knigi/messages/${m.id}/seen`, {method: 'POST'}).then(rec => upsert('msgs', rec)).catch(() => { UI.msgSeen[m.id] = -1; });
+  }
+  const w = msgUser(m);
+  const who = x => x.admin ? (admin ? 'Вы' : 'Администратор') : (admin ? (w.name || w.email || 'Читатель') : 'Вы');
+  const draft = UI.msgDraft[m.id] || '';
+  const bubble = (x, body) => `<article class="msg-b${x.admin ? ' adm' : ''}"><div class="msg-meta"><b>${esc(who(x))}</b><span>${esc(fmtWhen(x.created))}</span></div>${body}</article>`;
+  return `${back}<header class="head"><h1>${esc(msgTopic(m.topic))}</h1>${meLink()}</header>
+    ${admin ? `<section class="card msg-from">${faceHTML(w, 'md')}<div class="who"><b>${esc(w.name || 'Без имени')}</b><span>${esc(w.email || '')}</span>
+      <span class="msg-tags">${msgStTag(m)}${m.archived ? '<span class="tag wait">в архиве</span>' : ''}</span></div>
+      <a class="usr-msgs" href="#/msgs?user=${esc(m.author)}">Все сообщения · ${S.msgs.filter(x => x.author === m.author).length}</a></section>` : ''}
+    <div class="msg-thread">
+      ${bubble({admin: false, created: m.created}, `<p class="msg-text">${msgText(m.text)}</p>${shotHTML(m)}`)}
+      ${msgReplies(m.id).map(x => bubble(x, `<p class="msg-text">${msgText(x.text)}</p>`)).join('')}
+    </div>
+    <section class="card msg-reply" id="msg-reply-box" data-id="${esc(m.id)}">
+      <div class="field"><label for="msg-reply">Ответить</label><textarea id="msg-reply" rows="4" maxlength="${MSG_MAX}" placeholder="${admin ? 'Ваш ответ читателю' : 'Ваш ответ администратору'}">${esc(draft)}</textarea>
+        <small class="cnt${msgLen(draft) > MSG_MAX ? ' over' : ''}" id="msg-cnt">${msgCount(draft)}</small></div>
+      <div class="msg-acts"><button type="button" class="btn primary" data-act="msg-send" data-id="${esc(m.id)}">Ответить</button>
+        ${admin ? `<a class="btn" href="${esc(msgMailto(m))}" id="msg-mail">${ICON.mail}<span>Ответить по почте</span></a>` : ''}</div>
+      ${admin ? `<div class="msg-acts sub">${m.status === 'new' ? `<button type="button" class="btn sm" data-act="msg-st" data-id="${esc(m.id)}" data-st="read">${ICON.check}<span>Прочитано</span></button>` : ''}
+        <button type="button" class="btn sm" data-act="msg-arch" data-id="${esc(m.id)}" data-v="${m.archived ? '0' : '1'}">${ICON.inbox}<span>${m.archived ? 'Вернуть из архива' : 'В архив'}</span></button>
+        <button type="button" class="btn sm ghost danger" data-act="msg-del" data-id="${esc(m.id)}">${ICON.trash}<span>Удалить</span></button></div>
+        <p class="hint">«Ответить» показывает ответ читателю в приложении. «Ответить по почте» открывает новое письмо в вашей почтовой программе, состояние не меняется.</p>` : ''}
+    </section>`;
+};
+async function msgSend(id, btn){
+  const t = $('#msg-reply'), text = (t ? t.value : '').trim();
+  if(!text){ toast('Напишите текст ответа.'); return; }
+  if(msgLen(text) > MSG_MAX){ toast(`Текст длиннее ${MSG_MAX} знаков.`); return; }
+  btn.disabled = true;
+  try {
+    const res = await pb.send(`/api/knigi/messages/${id}/reply`, {method: 'POST', body: {text}});
+    UI.msgDraft[id] = '';
+    upsert('mreplies', res.reply); upsert('msgs', res.message);
+    if(!isAdmin()) UI.msgSeen[id] = res.message.answers;
+    render(true); toast(isAdmin() ? 'Ответ отправлен читателю' : 'Ответ отправлен');
+  } catch(e){ toast(errText(e)); }
+  finally { if(btn.isConnected) btn.disabled = false; }
+}
+async function msgState(id, body, done){
+  try { upsert('msgs', await pb.send(`/api/knigi/messages/${id}/state`, {method: 'POST', body})); render(true); toast(done); }
+  catch(e){ toast(errText(e)); }
+}
+function msgDelete(id){
+  const m = msgById(id); if(!m) return;
+  openForm({title: 'Удалить сообщение?', text: `Сообщение${m.shot ? ', снимок экрана' : ''} и все ответы в переписке удалятся навсегда, в том числе у читателя.`, submit: 'Удалить', danger: true,
+    async onSave(){
+      await pb.send(`/api/knigi/messages/${id}`, {method: 'DELETE'});
+      S.mreplies = S.mreplies.filter(x => x.message !== id); removeLocal('msgs', id);
+      toast('Сообщение удалено'); go(m.archived ? '#/msgs?box=archive' : '#/msgs', true);
+    }});
+}
+// «Или напишите здесь» и «Скопировать почту»: в полоске срока, в профиле и в читалке (вне #main тоже)
+document.addEventListener('click', async e => {
+  const w = e.target.closest('[data-msgw]');
+  if(w){ e.preventDefault(); msgWrite(w.dataset.msgw); return; }
+  const c = e.target.closest('[data-cpmail]');
+  if(c){
+    e.preventDefault();
+    try { await navigator.clipboard.writeText(c.dataset.cpmail); toast('Почта скопирована'); }
+    catch(err){ window.prompt && window.prompt('Скопируйте почту:', c.dataset.cpmail); }
+  }
+});
+document.addEventListener('input', e => {
+  if(e.target.id !== 'msg-reply') return;
+  const box = e.target.closest('#msg-reply-box'); if(box) UI.msgDraft[box.dataset.id] = e.target.value;
+  const c = $('#msg-cnt'); if(c){ c.textContent = msgCount(e.target.value); c.classList.toggle('over', msgLen(e.target.value) > MSG_MAX); }
+});
+
 /* ---------- Профиль ---------- */
 VIEWS.profile = () => {
   const u = me();
@@ -1977,6 +2212,9 @@ VIEWS.profile = () => {
       <div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span><small>${isAdmin() ? 'Администратор библиотеки' : 'Читатель'}</small></div>
       ${readOnly() ? '' : `<button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя" title="Изменить имя">${ICON.pen}</button>`}</section>
     ${S.access && !isAdmin() ? `<p class="acc-line${S.access.active ? '' : ' off'}">${accessLine()}</p>` : ''}
+    ${isAdmin() ? '' : `<section class="card msg-card"><p>Предложение, вопрос, отзыв или что-то не работает: напишите, ответ придёт сюда, в раздел «Мои сообщения».</p>
+      <button type="button" class="btn primary" data-act="msg-write">${ICON.mail}<span>Написать администратору</span></button>
+      <a href="#/msgs" id="msgs-link" class="msg-mine"${msgNew() ? ' aria-label="Мои сообщения, есть ответ"' : ''}>${ICON.chat}<span>Мои сообщения</span>${msgNew() ? '<span class="ldot" aria-hidden="true"></span>' : ''}<span class="n">${S.msgs.length}</span>${ICON.chev}</a></section>`}
     <section class="card"><h2>Читаю${reading.length ? ` <span class="n">${reading.length}</span>` : ''}</h2>
       ${reading.length ? `<div class="rows">${reading.map(m => bookRow(byId('books', m.book))).join('')}</div>` : '<p class="empty">Отметьте книгу «Читаю» в её карточке.</p>'}</section>
     <section class="card"><h2>Прочитанные${finished.length ? ` <span class="n">${finished.length}</span>` : ''}</h2>
@@ -1990,6 +2228,7 @@ VIEWS.profile = () => {
         `<input type="radio" name="p-theme" id="p-theme-${k}" value="${k}"${themePref() === k ? ' checked' : ''}><label for="p-theme-${k}">${l}</label>`).join('')}</div></section>
     <nav class="links">
       <a href="#/notes">${ICON.notes}${isAdmin() ? 'Мои заметки и уроки' : 'Мои заметки'}<span class="n">${myNotes}</span>${ICON.chev}</a>
+      ${isAdmin() ? `<a href="#/msgs" id="msgs-link">${ICON.mail}Сообщения читателей<span class="n${msgNew() ? ' hot' : ''}">${msgNew()}</span>${ICON.chev}</a>` : ''}
       ${isAdmin() ? `<a href="#/review">${ICON.inbox}На проверке<span class="n${reviewCount() ? ' hot' : ''}">${reviewCount()}</span>${ICON.chev}</a>` : ''}
       ${isAdmin() ? `<a href="#/log">${ICON.log}Журнал чтения${ICON.chev}</a>` : ''}
       ${isAdmin() ? `<a href="#/ai">${ICON.ai}Подключение к ИИ${ICON.chev}</a>` : ''}
@@ -2106,7 +2345,8 @@ function usersSection(){
           <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}${adm ? 'администратор' : 'читатель'} · с ${esc(fmtDate(x.created))}</span><span>${userState(x, t)}${x.no_mark ? ' <span class="tag nomark">без подписи</span>' : ''}</span>${termsLine(x)}</div></div>
         ${adm ? '' : `<div class="usr-acts">${[1, 3, 6].map(m => `<button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="${m}" data-id="${id}">+${m} ${plural(m, MONTHS_W)}</button>`).join('')}${x.suspended ? `<button type="button" class="btn sm" data-act="acc" data-action="resume" data-id="${id}">Возобновить</button>` : `<button type="button" class="btn sm ghost danger" data-act="acc" data-action="suspend" data-id="${id}">Приостановить</button>`}</div>
           <label class="check-chip sm usr-mark"><input type="checkbox" data-nomark="${id}"${x.no_mark ? ' checked' : ''}><span>Без подписи на страницах</span></label>
-          ${userBooksHTML(x.id)}`}
+          ${userBooksHTML(x.id)}
+          <a class="usr-msgs" href="#/msgs?user=${id}">${ICON.chat}<span>Сообщения: ${S.msgs.filter(m => m.author === x.id).length}</span></a>`}
         <details class="usr-more"${UI.openUser === x.id ? ' open' : ''} data-user="${id}"><summary>${adm ? 'Заметки' : 'Дата, заметка и история'}</summary>
           ${adm ? '' : `<div class="usr-row"><div class="field"><label for="ud-${id}">Доступ до (своя дата)</label><input type="date" id="ud-${id}" value="${esc(x.access_until || '')}"></div><div class="usr-btns"><button type="button" class="btn sm" data-act="acc" data-action="set" data-id="${id}">Поставить дату</button><button type="button" class="btn sm ghost" data-act="acc" data-action="unlimited" data-id="${id}">Бессрочно</button></div></div>`}
           <div class="usr-row"><div class="field"><label for="un-${id}">Заметка (видите только вы; добавится и к продлению)</label><input type="text" id="un-${id}" maxlength="1000" placeholder="Например: оплатил 500 ₽ 1 ноября"></div><div class="usr-btns"><button type="button" class="btn sm ghost" data-act="acc" data-action="note" data-id="${id}">Сохранить заметку</button></div></div>
@@ -5292,6 +5532,13 @@ document.addEventListener('click', async e => {
     case 'ocr-all': ocrAllAsk(); break;
     case 'ocr-cancel': ocrCancel(d.id, a); break;
     case 'offer-book': offerForm(); break;
+    // сообщения администратору (правки 4.5)
+    case 'msg-write': msgWrite(''); break;
+    case 'msg-send': msgSend(d.id, a); break;
+    case 'msg-st': msgState(d.id, {status: d.st}, 'Отмечено прочитанным'); break;
+    case 'msg-arch': msgState(d.id, {archived: d.v === '1'}, d.v === '1' ? 'Переписка в архиве' : 'Переписка во «Входящих»'); break;
+    case 'msg-del': msgDelete(d.id); break;
+    case 'msg-shot': shotOpen(d.id); break;
     case 'rev-edit': { const b = byId('books', d.id); if(b) openBookForm(b); break; }
     case 'rev-cover': { const b = byId('books', d.id); if(b) pickCover(b); break; }
     case 'rev-ok': reviewApprove(d.id, a); break;
