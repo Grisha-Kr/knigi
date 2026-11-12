@@ -452,6 +452,48 @@ function termsOpen(o){
   termsForm.querySelector('.terms-body').scrollTop = 0;
 }
 function termsClose(){ TD.mode = ''; if(termsDlg.open) termsDlg.close(); }
+// Политика конфиденциальности окном поверх приложения (правки 4.4, исправление): ссылка на /privacy.html в окне
+// условий, в галочке, на форме регистрации и в профиле не уходит со страницы. На iPhone в приложении с экрана
+// «Домой» такая ссылка открывалась вместо приложения, а после «Назад» пропадала начатая регистрация.
+const privDlg = $('#privacy');
+let privHTML = '';
+async function privacyOpen(){
+  const body = $('#priv-body');
+  if(!privDlg.open) privDlg.showModal();
+  body.scrollTop = 0;
+  if(privHTML){ body.innerHTML = privHTML; return; }
+  body.innerHTML = '<p class="hint">Загружаю…</p>';
+  try {
+    const res = await fetch('/privacy.html', {cache: 'no-store'});
+    if(!res.ok) throw new Error(String(res.status));
+    const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+    const main = doc.querySelector('main');
+    if(!main) throw new Error('нет текста');
+    // строка «← В приложение» и заголовок не нужны: заголовок уже в шапке окна
+    main.querySelectorAll('script').forEach(x => x.remove());
+    const back = main.querySelector('a[href="/"]'); if(back) back.closest('p').remove();
+    const h1 = main.querySelector('h1'); if(h1) h1.remove();
+    try {
+      const d = await (await fetch('/api/knigi/setup')).json();
+      const o = main.querySelector('#owner'), c = main.querySelector('#contact');
+      if(o && d.owner) o.textContent = d.owner;
+      if(c && d.contact) c.textContent = d.contact;
+    } catch(e){}
+    main.querySelectorAll('[id]').forEach(x => x.removeAttribute('id'));
+    privHTML = main.innerHTML;
+    body.innerHTML = privHTML;
+  } catch(e){
+    body.innerHTML = `<p>Не удалось загрузить политику. Проверьте интернет и попробуйте ещё раз.</p>`;
+  }
+}
+privDlg.addEventListener('click', e => { if(e.target.closest('[data-priv-close]')) privDlg.close(); });
+// Все ссылки на политику в приложении открывают это окно (нажатие по ссылке внутри галочки галочку не меняет)
+document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('a[href="/privacy.html"]');
+  if(!a || e.defaultPrevented || e.button > 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+  e.preventDefault();
+  privacyOpen();
+}, true);
 function termsErr(msg){ const p = $('#terms-err'); if(p){ p.textContent = msg; p.hidden = !msg; } }
 termsForm.addEventListener('change', () => {
   const ok = $('#terms-ok'); if(ok) ok.disabled = !($('#t-read').checked && $('#t-data').checked);
@@ -4956,7 +4998,21 @@ let authMode = 'login', authInvite = '', authEmail = '', isFirstRun = false;
 const RESET_WAIT = 120e3;
 const RESET_SENT = 'Если такой адрес зарегистрирован, письмо придёт в течение нескольких минут. Проверьте папку «Спам».';
 let resetSent = false, resetTimer = 0;
+// Если во время регистрации страница перезагрузилась (ушли по ссылке и вернулись «Назад»), человек возвращается
+// на форму регистрации с кодом приглашения, именем и почтой. Пароль не сохраняется. Черновик живёт 2 часа.
+const REG_TTL = 2 * 3600e3;
+function regDraft(){ const d = loadLS('regDraft', null); return d && d.t && Date.now() - d.t < REG_TTL ? d : null; }
+function saveRegDraft(){
+  const f = $('#auth-form[data-mode="register"]'); if(!f || isFirstRun) return;
+  const v = id => (f.querySelector('#' + id)?.value || '').trim();
+  const d = {invite: v('a-invite'), name: v('a-name'), email: v('a-email'), t: Date.now()};
+  if(d.invite || d.name || d.email) saveLS('regDraft', d); else dropLS('regDraft');
+}
+$('#auth').addEventListener('input', e => { if(e.target.closest('#auth-form[data-mode="register"]')) saveRegDraft(); });
 async function showAuth(mode, invite){
+  const draft = regDraft();
+  if(draft && mode !== 'register'){ mode = 'register'; invite = invite || draft.invite; }
+  else if(draft && invite && draft.invite && draft.invite !== invite) dropLS('regDraft'); // новое приглашение
   $('#app').hidden = true; $('#auth').hidden = false;
   authMode = mode || 'login'; if(invite) authInvite = invite;
   try { const r = await fetch('/api/knigi/setup'); if(r.ok) isFirstRun = !!(await r.json()).firstRun; } catch(e){}
@@ -4996,12 +5052,12 @@ function renderAuth(msg, ok){
     $('#auth-sub').textContent = isFirstRun ? 'Создайте аккаунт владельца. Вы станете администратором библиотеки и сможете приглашать других.' : 'Регистрация по приглашению.';
     b.innerHTML = `<form class="stack" id="auth-form" data-mode="register" novalidate>${joinNote}
       ${isFirstRun ? '' : `<label>Код приглашения<input type="text" id="a-invite" autocomplete="off" autocapitalize="characters" value="${esc(authInvite)}" required></label>`}
-      <label>Имя<input type="text" id="a-name" autocomplete="name"></label>
-      <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
+      <label>Имя<input type="text" id="a-name" autocomplete="name" value="${esc((regDraft() || {}).name || '')}"></label>
+      <label>Почта<input type="email" id="a-email" autocomplete="email" value="${esc((regDraft() || {}).email || '')}" required></label>
       <label>Пароль (не короче 8 символов)${passInput('a-pass', 'new-password', ' minlength="8" required')}</label>
       <label>Повторите пароль${passInput('a-pass2', 'new-password', ' required')}</label>
       ${note}<button class="btn primary big wide" type="submit">Создать аккаунт</button>
-      ${isFirstRun ? '' : `<div class="auth-links"><button type="button" class="linkbtn" data-auth="login">У меня уже есть аккаунт</button></div>`}
+      ${isFirstRun ? '' : `<div class="auth-links"><button type="button" class="linkbtn" data-auth="login">У меня уже есть аккаунт</button><a class="linkbtn" href="/privacy.html">Политика конфиденциальности</a></div>`}
     </form>`;
   } else if(authMode === 'reset'){
     $('#auth-sub').textContent = 'Пришлём ссылку для нового пароля на вашу почту.';
@@ -5026,6 +5082,7 @@ $('#auth').addEventListener('click', e => {
   const b = e.target.closest('[data-auth]'); if(!b) return;
   const em = $('#a-email'); if(em && em.value.trim()) authEmail = em.value.trim();
   if(b.dataset.auth !== 'reset') resetSent = false;
+  if(b.dataset.auth === 'login') dropLS('regDraft');
   authMode = b.dataset.auth; renderAuth();
 });
 $('#auth').addEventListener('submit', async e => {
@@ -5051,12 +5108,14 @@ $('#auth').addEventListener('submit', async e => {
         await pb.collection('users').create(body);
         await pb.collection('users').authWithPassword(body.email, pass);
         isFirstRun = false;
+        dropLS('regDraft');
         termsClose();
         startApp();
       };
       // первый пользователь (администратор) без окна условий
       if(isFirstRun){ await create(); return; }
       body.invite = v('a-invite');
+      saveRegDraft();
       await registerTerms(body, create);
     } else {
       // Ответ сервера одинаковый для любого адреса, поэтому и сообщение всегда одно

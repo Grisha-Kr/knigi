@@ -1077,3 +1077,16 @@ html.note-full .mini{display:none}
 .terms-checks .check,.fold-body > .check{display:flex}
 .terms-checks .check input{margin-top:0}
 .fold-body > .btn.sm.ghost{align-self:flex-start}
+/* Политика конфиденциальности окном (правки 4.4, исправление) */
+.priv-dlg .priv-wrap{display:flex;flex-direction:column;height:min(760px,calc(100dvh - 32px));max-height:calc(100dvh - 32px)}
+.priv-dlg .dlg-head{padding:12px 8px 8px 20px}
+.priv-dlg .dlg-head .icon-btn{font-size:26px;flex:none}
+.priv-body{font-size:15px;line-height:1.6;color:var(--ink);gap:10px;overflow-wrap:anywhere}
+.priv-body h2{font-size:17px;font-weight:700;margin:8px 0 0}
+.priv-body p{margin:0}
+.priv-body ul{margin:0;padding-left:22px;display:flex;flex-direction:column;gap:4px}
+.priv-body .muted{color:var(--muted);font-size:14px}
+.auth-links a.linkbtn{display:inline-flex;align-items:center}
+@media (max-width:560px){
+  .priv-dlg .priv-wrap{height:100dvh;max-height:100dvh;padding-top:env(safe-area-inset-top,0px)}
+}

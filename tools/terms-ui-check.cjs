@@ -92,8 +92,34 @@ async function open(browser, { width, dark, user }) {
     await shot(page, `reg-${run.tag}`);
     await page.click("#t-read");
     ok(await page.isDisabled("#terms-ok"), "одна галочка: кнопка всё ещё не нажимается");
+    // политика окном поверх приложения: ссылка в тексте условий
+    await page.click('#terms .terms-text a[href="/privacy.html"]');
+    await page.waitForSelector("#privacy[open] #priv-body h2");
+    ok(!page.url().includes("privacy"), "ссылка «Политике конфиденциальности» не уходит со страницы", page.url());
+    const pv = await page.$eval("#priv-body", (b) => { const before = b.scrollTop; b.scrollTop = 400; return [b.scrollHeight > b.clientHeight, b.scrollTop > before, b.querySelectorAll("h2").length, !!b.querySelector('a[href="/"]'), b.textContent.includes("журнал чтения и прослушивания")]; });
+    ok(pv[0] && pv[1] && pv[2] >= 5 && !pv[3] && pv[4], "политика в окне: разделы на месте, текст прокручивается, без «В приложение»", pv);
+    ok(await page.isVisible("#privacy .dlg-foot [data-priv-close]"), "кнопка «Закрыть» видна");
+    if (run.width < 600) {
+      const pb = await page.$eval("#privacy", (d) => { const r = d.getBoundingClientRect(); return [r.width, r.height, innerWidth, innerHeight]; });
+      ok(pb[0] <= pb[2] && pb[1] <= pb[3] + 1, "на телефоне окно политики по размеру экрана", pb);
+    }
+    await shot(page, `privacy-${run.tag}`);
+    await page.click("#privacy .dlg-foot [data-priv-close]");
+    await page.waitForFunction(() => !document.querySelector("#privacy[open]"));
+    ok(!!(await page.$("#terms[open]")) && await page.isChecked("#t-read") && !(await page.isChecked("#t-data")), "после «Закрыть» окно условий на месте, отмеченная галочка тоже");
+    // ссылка внутри второй галочки: открывает политику и галочку не меняет; Esc закрывает только политику
+    await page.click("#terms .terms-checks a");
+    await page.waitForSelector("#privacy[open]");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("#privacy[open]"));
+    ok(!!(await page.$("#terms[open]")) && !(await page.isChecked("#t-data")) && await page.isChecked("#t-read"), "ссылка в галочке открывает политику, галочку не меняет, Esc закрывает только политику");
     await page.click("#terms-no");
     ok(!(await page.$("#terms[open]")) && (await page.inputValue("#a-email")) === nu.email && (await page.inputValue("#a-name")) === nu.name, "«Отмена» вернула к форме, введённое на месте");
+    await page.click('#auth-form a[href="/privacy.html"]');
+    await page.waitForSelector("#privacy[open] #priv-body h2");
+    await page.click("#privacy [data-priv-close]");
+    await page.waitForFunction(() => !document.querySelector("#privacy[open]"));
+    ok(!page.url().includes("privacy") && (await page.inputValue("#a-pass")) === nu.password && (await page.inputValue("#a-email")) === nu.email, "ссылка на форме регистрации: политика окном, форма с паролем на месте");
     await page.click("#auth-form [type=submit]");
     await page.waitForSelector("#terms[open]");
     ok(!(await page.isChecked("#t-read")), "окно открывается снова с пустыми галочками");
@@ -111,6 +137,29 @@ async function open(browser, { width, dark, user }) {
     ok(acc.data.active && acc.data.terms.accepted === t.data.version, "аккаунт создан, условия приняты", acc.data);
     await ctx.close();
 
+    // 1б. Страница всё же перезагрузилась во время регистрации: форма регистрации с кодом, именем и почтой
+    {
+      const code2 = "UR" + stamp.toUpperCase() + n;
+      await req("POST", "/api/collections/invites/records", { token: admin, json: { code: code2, note: "ui", max_uses: 1, access_period: "" } });
+      const c2 = await open(browser, run), p2 = c2.page;
+      await p2.goto(`${BASE}/?invite=${code2}`);
+      await p2.waitForSelector("#a-email");
+      await p2.fill("#a-name", "Ирина"); await p2.fill("#a-email", `irina${n}-${stamp}@example.com`);
+      await p2.fill("#a-pass", "proverka-ui-12345"); await p2.fill("#a-pass2", "proverka-ui-12345");
+      await p2.goto(BASE + "/privacy.html");
+      await p2.goBack();
+      await p2.reload();
+      await p2.waitForSelector("#auth-form[data-mode=register] #a-email");
+      const vals = await p2.evaluate(() => ["a-invite", "a-name", "a-email", "a-pass", "a-pass2"].map((id) => document.getElementById(id).value));
+      ok(vals[0] === code2 && vals[1] === "Ирина" && vals[2] === `irina${n}-${stamp}@example.com` && !vals[3] && !vals[4], "после ухода и «Назад» снова форма регистрации: код, имя и почта на месте, пароля нет", vals);
+      ok(!(await p2.evaluate(() => (localStorage.getItem("kn_regDraft") || "").includes("proverka"))), "пароль нигде не сохранён");
+      await p2.click('#auth-form [data-auth="login"]');
+      await p2.reload();
+      await p2.waitForSelector("#auth-form[data-mode=login]");
+      ok(true, "«У меня уже есть аккаунт» убирает черновик: после перезагрузки экран входа");
+      await c2.ctx.close();
+    }
+
     // 2. «Старый» читатель: окно поверх всего, «Выйти»
     ({ ctx, page } = await open(browser, { ...run, user: old }));
     await page.goto(BASE + "/#/");
@@ -120,6 +169,11 @@ async function open(browser, { width, dark, user }) {
     await page.keyboard.press("Escape"); await page.keyboard.press("Escape");
     await page.waitForTimeout(200);
     ok(!!(await page.$("#terms[open]")), "Esc окно не закрывает");
+    await page.click('#terms .terms-text a[href="/privacy.html"]');
+    await page.waitForSelector("#privacy[open] #priv-body h2");
+    await page.click("#privacy .dlg-foot [data-priv-close]");
+    await page.waitForFunction(() => !document.querySelector("#privacy[open]"));
+    ok(!!(await page.$("#terms[open]")) && !page.url().includes("privacy"), "у старого читателя политика окном, после «Закрыть» окно условий на месте");
     await shot(page, `gate-${run.tag}`);
     await page.click("#terms-no");
     await page.waitForSelector("#auth:not([hidden]) #a-email");
@@ -182,6 +236,11 @@ async function open(browser, { width, dark, user }) {
     await page.evaluate(() => scrollTo(0, 0));
     await shot(page, `reader-yellow-${run.tag}`);
     await page.click(".terms-more summary");
+    await page.click('.terms-foot a[href="/privacy.html"]');
+    await page.waitForSelector("#privacy[open] #priv-body h2");
+    await page.click("#privacy .dlg-foot [data-priv-close]");
+    await page.waitForFunction(() => !document.querySelector("#privacy[open]"));
+    ok(!page.url().includes("privacy") && /#\/profile/.test(page.url()), "в профиле ссылка из условий открывает политику окном");
     await page.$eval(".terms-foot", (el) => el.scrollIntoView({ block: "end" }));
     await shot(page, `reader-foot-${run.tag}`);
     await ctx.close();
