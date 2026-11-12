@@ -1155,6 +1155,7 @@ function mergeInfo(book, other) {
     audio: $app.countRecords("audio_tracks", $dbx.hashExp({ book: other.id })),
     notes: kinds.note, lessons: kinds.lesson, highlights: kinds.highlight,
     readers: $app.findRecordsByFilter("reading", "book = {:b}", "", 0, 0, { b: other.id }).map((r) => r.getString("user")).filter((u, i, arr) => arr.indexOf(u) === i).length,
+    reviews: require(`${__hooks}/reviews_lib.js`).mergeCount(other.id),
   };
 }
 function mergeBooks(book, other) {
@@ -1200,6 +1201,8 @@ function mergeBooks(book, other) {
       WHERE book = {:a} AND EXISTS (SELECT 1 FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour)`).bind(q).execute();
     db.newQuery(`DELETE FROM read_log WHERE book = {:b} AND EXISTS (SELECT 1 FROM read_log a WHERE a.book = {:a} AND a."user" = read_log."user" AND a.hour = read_log.hour)`).bind(q).execute();
     db.newQuery("UPDATE read_log SET book = {:a}, book_title = {:t} WHERE book = {:b}").bind(q).execute();
+    // отзывы (правки 4.6): через записи, чтобы приложения получили живое обновление; у одного человека остаётся более новый
+    require(`${__hooks}/reviews_lib.js`).mergeReviews(tx, book.id, other.id);
     const a = tx.findRecordById("books", book.id);
     if (!a.getInt("year") && other.getInt("year")) a.set("year", other.getInt("year"));
     if (!a.getString("description") && other.getString("description")) a.set("description", other.getString("description"));
@@ -1211,6 +1214,8 @@ function mergeBooks(book, other) {
   if (otherCover && !keepCover) rmFile(coversDir(), otherCover);
   lib.dropLonelyAuthors($app, otherAuthors);
   syncBook(book.id);
+  // отметки «Прочитано» перешли вместе с книгой: пометки «прочитал(а)» в отзывах
+  require(`${__hooks}/reviews_lib.js`).syncFinishedBook(book.id);
   // видимость остаётся у первой книги; если она скрыта, к ней перешли записи читателей второй
   // список отдельных читателей (правки 4.3) тоже остаётся у первой книги, список второй удаляется вместе с ней
   if (book.getBool("hidden")) syncKept(book.id);

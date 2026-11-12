@@ -636,13 +636,15 @@ routerAdd("GET", "/api/knigi/admin/log", (e) => {
 /* ---------- Фото профиля (правки 1.1) ---------- */
 // Файл защищённый, а чужие записи users через API не читает никто, поэтому фото отдаёт этот маршрут:
 // своё фото каждому, любое фото администратору, фото администратора всем вошедшим
-// (оно стоит рядом с «Заметками автора библиотеки»), фото участника общей группы (этап 3).
-// Чужое фото читателя, с которым нет общей группы, другой читатель не получит.
+// (оно стоит рядом с «Заметками автора библиотеки»), фото участника общей группы (этап 3),
+// фото автора отзыва к книге, которая видна этому человеку (правки 4.6).
+// Чужое фото читателя, с которым нет общей группы и чьих отзывов не видно, другой читатель не получит.
 routerAdd("GET", "/api/knigi/users/{id}/avatar", (e) => {
   const lib = require(`${__hooks}/lib.js`);
   let u = null;
   try { u = $app.findRecordById("users", e.request.pathValue("id")); } catch (_) {}
-  const ok = u && (u.id === e.auth.id || lib.isAdmin(e.auth) || lib.isAdmin(u) || require(`${__hooks}/groups_lib.js`).shareGroup($app, e.auth.id, u.id));
+  const ok = u && (u.id === e.auth.id || lib.isAdmin(e.auth) || lib.isAdmin(u) || require(`${__hooks}/groups_lib.js`).shareGroup($app, e.auth.id, u.id)
+    || require(`${__hooks}/reviews_lib.js`).authorVisible(e.auth, u.id));
   const name = ok ? u.getString("avatar") : "";
   if (!name || $app.settings().s3.enabled) throw new NotFoundError("Фото нет.");
   e.response.header().set("Cache-Control", "private, no-store");
