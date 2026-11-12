@@ -3,8 +3,8 @@
 // книги, их страницы, обложки, файлы уроков и главы аудио (правки 4.3, /api/knigi/f/audio/…) идут только
 // через /api/, поэтому в памяти телефона от них ничего не остаётся. Запросы частей аудио (Range) идут мимо
 // сервис-воркера прямо на сервер.
-const VERSION = 'knigi-v22';
-const SHELL = ['/', '/index.html', '/app.css?v=22', '/app.js?v=22', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2'];
+const VERSION = 'knigi-v23';
+const SHELL = ['/', '/index.html', '/app.css?v=23', '/app.js?v=23', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

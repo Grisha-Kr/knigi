@@ -100,13 +100,14 @@ const S = {books:[], bfiles:[], authors:[], shelves:[], sbooks:[], reading:[], n
   access:null, // access: срок доступа (правки 4.1, GET /api/knigi/access)
   atracks:[], aprog:[], // главы аудио и свой прогресс слушания (правки 4.3, часть Б)
   bacc:[], // bacc: кому открыты скрытые книги (правки 4.3, book_access): у читателя свои строки, у администратора все
-  msgs:[], mreplies:[]}; // сообщения администратору и ответы (правки 4.5): у читателя свои, у администратора все
+  msgs:[], mreplies:[], // сообщения администратору и ответы (правки 4.5): у читателя свои, у администратора все
+  reviews:[]}; // отзывы о книгах (правки 4.6): сервер отдаёт только отзывы к книгам, которые видны этому человеку
 const PBN = {books:'books', bfiles:'book_files', authors:'authors', shelves:'shelves', sbooks:'shelf_books', reading:'reading', notes:'notes', nfiles:'note_files', marks:'marks', offers:'book_offers', pbooks:'books',
-  groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users', bacc:'book_access', atracks:'audio_tracks', aprog:'audio_progress', msgs:'messages', mreplies:'message_replies'};
+  groups:'groups', gmembers:'group_members', gbooks:'group_books', gplan:'group_plan', comments:'note_comments', people:'users', bacc:'book_access', atracks:'audio_tracks', aprog:'audio_progress', msgs:'messages', mreplies:'message_replies', reviews:'reviews'};
 const KEYS = Object.keys(PBN);
 const loadKeys = () => KEYS.filter(k => k !== 'pbooks' || isAdmin());
 const LIST_OPTS = {books: () => ({fields: BOOK_FIELDS + (isAdmin() ? ',offered_by' : ''), filter: 'pending = false'}), pbooks: () => ({fields: BOOK_FIELDS + ',offered_by,pending', filter: 'pending = true'}),
-  bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS}), people: () => ({fields: 'id,name,avatar'}), atracks: () => ({sort: 'sort,created'}), msgs: () => ({sort: '-last_at'}), mreplies: () => ({sort: 'created'})};
+  bfiles: () => ({fields: BFILE_FIELDS + (isAdmin() ? ',orig_name,hash' : '')}), notes: () => ({fields: NOTE_FIELDS}), people: () => ({fields: 'id,name,avatar'}), atracks: () => ({sort: 'sort,created'}), msgs: () => ({sort: '-last_at'}), mreplies: () => ({sort: 'created'}), reviews: () => ({sort: '-created'})};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('kn_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('kn_'+k, JSON.stringify(v)); } catch(e){} };
 const dropLS = k => { try { localStorage.removeItem('kn_'+k); } catch(e){} };
@@ -114,7 +115,8 @@ const UI = {hops:0, reorder:'', revShelves:{}, finAll:false, booksView: loadLS('
   tab:'notes', notesQ:'', notesKind:'', notesHits:null, cardFrom:{}, logQ:{days:7, user:'', book:''}, log:null, descOpen:false,
   cardFmt:{}, hlColor:'', hlThought:false, hlOpen:new Set(), noteCtx:null,
   fullFor:'', fullNow:false, normalOnce:false,
-  gState:{}, gPrev:{}, gBanner:{}, gFeed:{}, cmDraft:{}, cmEdit:'', join:null};
+  gState:{}, gPrev:{}, gBanner:{}, gFeed:{}, cmDraft:{}, cmEdit:'', join:null,
+  rvOpen:new Set(), rvDraft:{}, rvNew:new Set(), rvSeenBusy:false}; // отзывы (правки 4.6): развёрнутые, черновики, «Новый» в разделе администратора
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
@@ -262,7 +264,7 @@ async function subscribeAll(){
   await pb.realtime.subscribe('knigi_books', () => {
     if(isAdmin()) return;
     // у книги изменилось аудио (опубликовали или сняли главу) или видимость: перечитываем и главы
-    clearTimeout(visT); visT = setTimeout(() => loadAll(['books', 'bfiles', 'sbooks', 'bacc', 'atracks']).catch(() => {}), 300);
+    clearTimeout(visT); visT = setTimeout(() => loadAll(['books', 'bfiles', 'sbooks', 'bacc', 'atracks', 'reviews']).catch(() => {}), 300);
   });
   for(const k of KEYS){
     if(k === 'pbooks') continue; // книги на проверке приходят вместе с books
@@ -578,9 +580,11 @@ const reviewCount = () => isAdmin() ? S.pbooks.length : 0;
 // Сообщения (правки 4.5): у администратора сколько новых (новые сообщения и новые ответы читателей),
 // у читателя сколько переписок с ответом администратора, который он ещё не открыл
 const msgNew = () => isAdmin() ? S.msgs.filter(m => m.status === 'new').length : S.msgs.filter(m => m.user_unread && m.author === me().id).length;
-// Точка на фото: книги на проверке или новое в сообщениях
-const meDot = () => reviewCount() > 0 || msgNew() > 0;
-const meDotText = () => [reviewCount() ? 'есть книги на проверке' : '', msgNew() ? (isAdmin() ? 'есть новые сообщения' : 'есть ответ администратора') : ''].filter(Boolean).join(', ');
+// Отзывы (правки 4.6): у администратора сколько отзывов читателей он ещё не видел (новые и изменённые)
+const rvNew = () => isAdmin() ? S.reviews.filter(r => !r.seen && r.user !== me().id).length : 0;
+// Точка на фото: книги на проверке, новое в сообщениях, новые отзывы
+const meDot = () => reviewCount() > 0 || msgNew() > 0 || rvNew() > 0;
+const meDotText = () => [reviewCount() ? 'есть книги на проверке' : '', msgNew() ? (isAdmin() ? 'есть новые сообщения' : 'есть ответ администратора') : '', rvNew() ? 'есть новые отзывы' : ''].filter(Boolean).join(', ');
 // Фото в шапке на телефоне: открывает профиль (на компьютере профиль внизу бокового меню)
 const meLink = () => `<a class="me-link${meDot() ? ' dot' : ''}" href="#/profile" aria-label="Профиль${meDot() ? ', ' + meDotText() : ''}" title="Профиль">${faceHTML(me(), 'md')}</a>`;
 
@@ -679,7 +683,7 @@ function render(force){
   if(RD.open) rdClose();
   noteFullSync(r);
   sideMe();
-  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : (r.name === 'note' && r.q.get('g')) || ['groups','g','join'].includes(r.name) ? 'groups' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log','ai','msgs','msg'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
+  const tab = ['shelves','sh','books','authors','a'].includes(r.name) ? 'shelves' : (r.name === 'note' && r.q.get('g')) || ['groups','g','join'].includes(r.name) ? 'groups' : ['notes','note'].includes(r.name) ? 'notes' : ['profile','log','ai','msgs','msg','reviews'].includes(r.name) ? 'profile' : r.name === 'review' ? 'review' : 'lib';
   $$('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   // точка на «Группы»: новые заметки, комментарии или новая книга с прошлого захода
   const gnew = S.loaded && anyGroupNew();
@@ -696,8 +700,10 @@ function render(force){
   const focus = document.activeElement && document.activeElement.id && m.contains(document.activeElement) ? document.activeElement.id : '';
   const sel = focus && document.activeElement.selectionStart;
   if(r.name !== 'note' || !(ED.id && (ED.id === r.id || (r.id === 'new' && ED.isNew)))) edClose();
+  if(r.name !== 'reviews' && UI.rvNew.size) UI.rvNew.clear();
   m.innerHTML = (VIEWS[r.name] || VIEWS.home)(r);
   if(r.name === 'note') edMount(r);
+  rvClamp();
   if(focus){ const el = document.getElementById(focus); if(el){ el.focus(); try { el.setSelectionRange(sel, sel); } catch(e){} } }
   renderUploadsPanel();
   renderMini(); apTick();
@@ -770,6 +776,7 @@ VIEWS.home = r => {
         ${r ? `<span class="prog wide"><i style="width:${progPct(r)}%"></i></span><small>${multi ? FORMATS[readFmt(r)] + ' · ' : ''}${progText(r)}</small>` : '<small>ещё не открывали</small>'}</span></a>`; }).join('')}</div>`
       : '<p class="empty">Отметьте книгу «Читаю» в её карточке, и она появится здесь.</p>'}</section>
     ${contListenHTML()}
+    ${newReviewsHTML()}
     <section class="block"><div class="block-h"><h2>Полки</h2><a class="more-link" href="#/shelves">Все полки</a></div>
       ${common.length ? `<div class="shelf-cards">${common.map(shelfCard).join('')}</div>` : `<p class="empty">${isAdmin() ? 'Общих полок пока нет. Создайте первую на вкладке «Полки».' : 'Общих полок пока нет.'}</p>`}</section>
     <section class="block"><div class="block-h"><h2>Мои полки</h2>${mine.length ? '' : '<a class="more-link" href="#/shelves">Создать</a>'}</div>
@@ -930,7 +937,7 @@ VIEWS.b = r => {
   const rd = readOf(b.id, fmt);
   const shelves = S.sbooks.filter(x => x.book === b.id).map(x => byId('shelves', x.shelf)).filter(Boolean);
   const q = r.q.get('tab');
-  const tab = q === 'lessons' && isAdmin() ? 'lessons' : q === 'highlights' ? 'highlights' : 'notes';
+  const tab = q === 'lessons' && isAdmin() ? 'lessons' : q === 'highlights' ? 'highlights' : q === 'reviews' ? 'reviews' : 'notes';
   const kind = tab === 'lessons' ? 'lesson' : tab === 'highlights' ? 'highlight' : 'note';
   let mine = notesOfBook(b.id).filter(n => n.owner === me().id && n.kind === kind);
   mine = kind === 'highlight' ? mine.sort(hlOrder) : mine.sort((x, y) => String(y.updated).localeCompare(String(x.updated)));
@@ -952,10 +959,10 @@ VIEWS.b = r => {
   const ocrLine = f && f.ocr && f.has_text ? '<p class="hint ocr-note">Текст распознан автоматически, возможны ошибки.</p>' : '';
   const adminNotes = isAdmin() ? files.filter(x => x.status !== 'error' && x.status_note).map(x => `<p class="hint">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note)}</p>`).join('') : '';
   const errors = files.filter(x => x.status === 'error').map(x => `<p class="form-err">${fmts.length > 1 ? FORMATS[x.format] + ': ' : ''}${esc(x.status_note || 'Файл не удалось обработать.')}</p>`).join('');
-  const tabs = [['notes', 'Заметки'], ...(isAdmin() ? [['lessons', 'Уроки']] : []), ['highlights', 'Цитаты']];
-  // число у вкладки: сколько моих заметок, уроков и цитат к этой книге (ноль не пишем)
+  const tabs = [['notes', 'Заметки'], ...(isAdmin() ? [['lessons', 'Уроки']] : []), ['highlights', 'Цитаты'], ['reviews', 'Отзывы']];
+  // число у вкладки: сколько моих заметок, уроков и цитат к этой книге, сколько всего отзывов (ноль не пишем)
   const mineOf = k => notesOfBook(b.id).filter(n => n.owner === me().id && n.kind === k).length;
-  const tabN = {notes: mineOf('note'), lessons: isAdmin() ? mineOf('lesson') : 0, highlights: mineOf('highlight')};
+  const tabN = {notes: mineOf('note'), lessons: isAdmin() ? mineOf('lesson') : 0, highlights: mineOf('highlight'), reviews: rvOfBook(b.id).length};
   const emptyText = {notes: 'Заметок к этой книге пока нет.', lessons: 'Уроков к этой книге пока нет.',
     highlights: hlAll.length ? 'Под этот фильтр цитат нет.' : 'Цитат пока нет. Откройте книгу, выделите текст и выберите цвет: так сохраняется цитата. На телефоне нажмите «Маркер» и проведите пальцем по строкам.'}[tab];
   const inGroups = groupsOfBook(b.id);
@@ -991,10 +998,10 @@ VIEWS.b = r => {
     ${pend ? '' : audioBlock(b)}
     <section class="card notes-card">
       <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<a role="tab" data-swap="1" href="#/b/${b.id}${k === 'notes' ? '' : '?tab=' + k}" aria-selected="${tab === k}">${l}${tabN[k] ? ` <span class="n">${tabN[k]}</span>` : ''}</a>`).join('')}</div>
-      ${kind === 'highlight' ? hlFilters(hlAll) : ''}
+      ${tab === 'reviews' ? rvTab(b) : `${kind === 'highlight' ? hlFilters(hlAll) : ''}
       <div class="rows">${mine.map(n => noteRow(n, {noBook: true})).join('') || `<p class="empty">${emptyText}</p>`}</div>
       ${kind !== 'highlight' && !ro ? `<a class="btn" href="#/note/new?book=${b.id}${tab === 'lessons' ? '&kind=lesson' : ''}">${ICON.plus}<span>${tab === 'lessons' ? 'Урок' : 'Заметка'}</span></a>` : ''}
-      ${shared.length ? `<h3 class="sub-h owner-h">${S.owner ? faceHTML(S.owner, 'xs') : ''}<span>Заметки автора библиотеки</span></h3><div class="rows">${shared.map(n => noteRow(n, {noBook: true})).join('')}</div>` : ''}
+      ${shared.length ? `<h3 class="sub-h owner-h">${S.owner ? faceHTML(S.owner, 'xs') : ''}<span>Заметки автора библиотеки</span></h3><div class="rows">${shared.map(n => noteRow(n, {noBook: true})).join('')}</div>` : ''}`}
     </section>`;
 };
 
@@ -2195,6 +2202,122 @@ document.addEventListener('input', e => {
   const c = $('#msg-cnt'); if(c){ c.textContent = msgCount(e.target.value); c.classList.toggle('over', msgLen(e.target.value) > MSG_MAX); }
 });
 
+/* ---------- Отзывы о книгах (правки 4.6) ---------- */
+// Читатель пишет к книге один отзыв (до 2000 знаков), его сразу видят все, кому видна книга. Отзывы приходят
+// вместе с остальными данными (ключ reviews) и живыми обновлениями: сервер отдаёт только отзывы к книгам, которые
+// человеку видны. Пишут их только маршруты /api/knigi/reviews… В отзыве имя и фото автора, почты нет.
+// Без доступа (срок, пауза, условия) отзывы видны, а писать, менять и удалять свой нельзя. Администратор
+// удаляет любой отзыв и видит все в «Профиль» → «Отзывы» (непросмотренные с пометкой «Новый», точка на фото).
+const RV_MAX = 2000;
+const rvCount = t => `${msgLen(t)} из ${RV_MAX}`;
+const ownerId = () => (S.owner && S.owner.id) || (isAdmin() ? me().id : '');
+// Порядок: отзыв администратора первым, остальные новые сверху
+const rvOrder = (a, b) => (b.user === ownerId()) - (a.user === ownerId()) || String(b.created).localeCompare(String(a.created));
+const rvOfBook = id => S.reviews.filter(r => r.book === id).sort(rvOrder);
+const myReview = id => S.reviews.find(r => r.book === id && r.user === me().id);
+const rvAuthor = r => r.user === me().id ? me() : {id: r.user, name: r.user_name, avatar: r.user_avatar};
+const rvWhen = r => String(r.edited || r.created || '');
+const rvBookOk = b => !!b && !b.pending && !bookNA(b);
+const rvExcerpt = t => { const x = String(t || '').replace(/\s+/g, ' ').trim(); return x.length > 160 ? x.slice(0, 160).trim() + '…' : x; };
+// Один отзыв. o.book: показать книгу (раздел администратора), o.isNew: пометка «Новый»
+function rvRow(r, o){
+  o = o || {};
+  const u = rvAuthor(r), mine = r.user === me().id, own = r.user === ownerId();
+  const b = byId('books', r.book);
+  const open = UI.rvOpen.has(r.id), canMine = mine && !readOnly();
+  const acts = [canMine ? `<button type="button" class="btn sm ghost" data-act="rv-edit" data-id="${r.id}">${ICON.pen}<span>Изменить</span></button>` : '',
+    canMine || isAdmin() ? `<button type="button" class="btn sm ghost danger" data-act="rv-del" data-id="${r.id}">${ICON.trash}<span>Удалить</span></button>` : '',
+    o.book && b ? `<a class="btn sm ghost" href="#/b/${b.id}?tab=reviews">${ICON.book}<span>К книге</span></a>` : ''].filter(Boolean).join('');
+  return `<article class="rv${own && !o.book ? ' own' : ''}${o.isNew ? ' unread' : ''}" id="rv-${r.id}">
+    ${o.book ? `<a class="rv-book" href="#/b/${r.book}?tab=reviews">${b ? coverHTML(b, 'xs') : ''}<b>${esc(b ? b.title : 'Книга')}</b></a>` : ''}
+    ${own && !o.book ? '<p class="rv-own">Отзыв автора библиотеки</p>' : ''}
+    <div class="rv-head">${faceHTML(u, 'sm')}<span class="rv-who"><span class="rv-name"><b>${esc((u.name || '').trim() || r.user_name || 'Читатель')}</b>${r.finished ? '<small class="rv-fin">прочитал(а)</small>' : ''}</span>
+      <small class="rv-date">${esc(fmtDate(r.created))}${r.edited ? ' · изменён' : ''}</small></span>${o.isNew ? '<span class="tag new">Новый</span>' : ''}</div>
+    <div class="rv-text${open ? '' : ' clamp'}" data-rv="${r.id}">${msgText(r.text)}</div>
+    <button type="button" class="linkbtn sm rv-more" data-act="rv-more" data-id="${r.id}" hidden>Читать полностью</button>
+    ${acts ? `<div class="rv-acts">${acts}</div>` : ''}</article>`;
+}
+// «Читать полностью» только у отзывов, которые не уместились в 7 строк
+function rvClamp(){
+  $$('#main .rv-text.clamp').forEach(t => {
+    const btn = t.nextElementSibling;
+    if(btn && btn.classList.contains('rv-more')) btn.hidden = t.scrollHeight <= t.clientHeight + 2;
+  });
+}
+window.addEventListener('resize', () => { clearTimeout(rvClamp.t); rvClamp.t = setTimeout(rvClamp, 150); });
+// Вкладка «Отзывы» в карточке книги
+function rvTab(b){
+  const list = rvOfBook(b.id), mine = myReview(b.id);
+  const top = b.pending ? '<p class="hint">У книги на проверке отзывов нет: они появятся, когда книга станет видна читателям.</p>'
+    : bookNA(b) ? '<p class="hint">Книга временно недоступна, отзывы к ней сейчас не видны.</p>'
+    : readOnly() ? roNote()
+    : `<button type="button" class="btn${mine ? '' : ' primary'}" data-act="rv-write" data-id="${b.id}">${ICON.pen}<span>${mine ? 'Изменить мой отзыв' : 'Написать отзыв'}</span></button>`;
+  return `<div class="rv-top">${top}</div>
+    ${list.length ? `<div class="rv-list">${list.map(r => rvRow(r)).join('')}</div>` : b.pending || bookNA(b) ? '' : '<p class="empty">Отзывов пока нет. Прочитали книгу? Расскажите другим читателям, что о ней думаете.</p>'}`;
+}
+// Окно отзыва: новый или правка своего. Счётчик «N из 2000», черновик нового живёт до перезагрузки.
+function rvWrite(bookId){
+  const b = byId('books', bookId); if(!b) return;
+  if(S.access && S.access.reason === 'terms'){ termsGate(); return; }
+  if(readOnly()){ toast(accessLine().replace(/<[^>]+>/g, '')); return; }
+  const mine = myReview(bookId);
+  const start = mine ? mine.text : (UI.rvDraft[bookId] || '');
+  openForm({title: mine ? 'Мой отзыв' : 'Отзыв о книге',
+    html: `<p class="dlg-text rv-for">«${esc(b.title)}»${authorsText(b) ? ', ' + esc(authorsText(b)) : ''}</p>
+      <div class="field"><label for="rv-text">Что вы думаете о книге</label><textarea id="rv-text" rows="8" maxlength="${RV_MAX}" placeholder="Чем книга запомнилась, кому её советуете">${esc(start)}</textarea><small class="cnt" id="rv-cnt">${rvCount(start)}</small></div>
+      <p class="hint">Отзыв сразу увидят читатели, которым видна эта книга: ваше имя, фото и текст. Почту не видит никто. Изменить или удалить отзыв можно в любой момент.</p>`,
+    submit: mine ? 'Сохранить' : 'Опубликовать',
+    onInput(t){
+      if(t.id !== 'rv-text') return;
+      formErr(''); if(!mine) UI.rvDraft[bookId] = t.value;
+      const c = $('#rv-cnt'); c.textContent = rvCount(t.value); c.classList.toggle('over', msgLen(t.value) > RV_MAX);
+    },
+    async onSave(){
+      const text = $('#rv-text').value.trim();
+      if(!text) throw new Error('Напишите текст отзыва.');
+      if(msgLen(text) > RV_MAX) throw new Error(`Отзыв длиннее ${RV_MAX} знаков.`);
+      const rec = mine ? await pb.send(`/api/knigi/reviews/${mine.id}`, {method: 'POST', body: {text}})
+        : await pb.send('/api/knigi/reviews', {method: 'POST', body: {book: bookId, text}});
+      upsert('reviews', rec); delete UI.rvDraft[bookId];
+      toast(mine ? 'Отзыв сохранён' : 'Отзыв опубликован');
+    }});
+}
+function rvDelete(id){
+  const r = S.reviews.find(x => x.id === id); if(!r) return;
+  const mine = r.user === me().id;
+  openForm({title: 'Удалить отзыв?', text: mine ? 'Ваш отзыв удалится навсегда.' : `Отзыв читателя ${r.user_name || ''} удалится навсегда, его больше никто не увидит.`, submit: 'Удалить', danger: true,
+    async onSave(){
+      await pb.send(`/api/knigi/reviews/${id}`, {method: 'DELETE'});
+      removeLocal('reviews', id); toast('Отзыв удалён');
+    }});
+}
+// Главная: последние 3 отзыва к видимым книгам, кроме своих
+function newReviewsHTML(){
+  const list = S.reviews.filter(r => r.user !== me().id && rvBookOk(byId('books', r.book)))
+    .sort((a, b) => String(b.created).localeCompare(String(a.created))).slice(0, 3);
+  if(!list.length) return '';
+  return `<section class="block"><h2>Новые отзывы</h2><div class="cont rv-new">${list.map(r => { const b = byId('books', r.book);
+    return `<a class="cont-item rv-item" href="#/b/${b.id}?tab=reviews">${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small class="rv-by">${esc(r.user_name || 'Читатель')}</small><span class="rv-ex">${esc(rvExcerpt(r.text))}</span></span></a>`; }).join('')}</div></section>`;
+}
+// Раздел администратора «Отзывы»: все отзывы, новые сверху. Открыли: непросмотренные получают пометку «Новый»
+// до ухода с экрана, а на сервере становятся просмотренными (точка на фото уходит).
+VIEWS.reviews = () => {
+  if(!isAdmin()) return notFound();
+  const fresh = S.reviews.filter(r => !r.seen && r.user !== me().id);
+  if(fresh.length){
+    fresh.forEach(r => { UI.rvNew.add(r.id); r.seen = true; });
+    if(!UI.rvSeenBusy){
+      UI.rvSeenBusy = true;
+      pb.send('/api/knigi/admin/reviews/seen', {method: 'POST'}).catch(e => toast(errText(e))).finally(() => { UI.rvSeenBusy = false; });
+    }
+    schedule(); // точка на фото и в боковом меню
+  }
+  const list = S.reviews.slice().sort((a, b) => rvWhen(b).localeCompare(rvWhen(a)));
+  return `${backLink('#/profile', 'Профиль')}<header class="head"><h1>Отзывы</h1>${meLink()}</header>
+    <p class="hint">Отзывы читателей о книгах, новые сверху. Они публикуются сразу, без проверки. Удалить можно любой.</p>
+    ${list.length ? `<div class="rv-list">${list.map(r => rvRow(r, {book: true, isNew: UI.rvNew.has(r.id)})).join('')}</div>` : '<p class="empty">Отзывов пока нет.</p>'}`;
+};
+
 /* ---------- Профиль ---------- */
 VIEWS.profile = () => {
   const u = me();
@@ -2230,6 +2353,7 @@ VIEWS.profile = () => {
     ${isAdmin() ? `<nav class="links">
       <a href="#/notes">${ICON.notes}Мои заметки и уроки<span class="n">${myNotes}</span>${ICON.chev}</a>
       <a href="#/msgs" id="msgs-link">${ICON.mail}Сообщения читателей<span class="n${msgNew() ? ' hot' : ''}">${msgNew()}</span>${ICON.chev}</a>
+      <a href="#/reviews" id="rv-link"${rvNew() ? ' aria-label="Отзывы, есть новые"' : ''}>${ICON.chat}Отзывы<span class="n${rvNew() ? ' hot' : ''}">${rvNew() || S.reviews.length}</span>${ICON.chev}</a>
       <a href="#/review">${ICON.inbox}На проверке<span class="n${reviewCount() ? ' hot' : ''}">${reviewCount()}</span>${ICON.chev}</a>
       <a href="#/log">${ICON.log}Журнал чтения${ICON.chev}</a>
       <a href="#/ai">${ICON.ai}Подключение к ИИ${ICON.chev}</a>
@@ -3122,6 +3246,7 @@ function mergeBook(b){
       const notes = [m.notes ? `${m.notes} ${plural(m.notes, NOTES_W)}` : '', m.lessons ? `${m.lessons} ${plural(m.lessons, ['урок','урока','уроков'])}` : '', m.highlights ? `${m.highlights} ${plural(m.highlights, ['цитата','цитаты','цитат'])}` : ''].filter(Boolean);
       if(notes.length) parts.push(notes.join(', ') + ' (у всех пользователей)');
       if(m.readers) parts.push(`прогресс чтения: ${m.readers} ${plural(m.readers, ['человек','человека','человек'])}`);
+      if(m.reviews) parts.push(`отзывы: ${m.reviews} (если человек написал отзыв к обеим книгам, останется более новый)`);
       thenOpen(() => openForm({title: 'Объединить книги?', text: `Останется «${b.title}» (эта карточка). Из «${other.title}» сюда перейдут: ${parts.join('; ')}. Если у этой книги нет года, описания или обложки, они возьмутся у второй. Карточка «${other.title}» пропадёт. Отменить объединение нельзя.`,
         submit: 'Объединить', async onSave(){
           await pb.send(`/api/knigi/books/${b.id}/merge/${other.id}`, {method: 'POST'});
@@ -5539,6 +5664,11 @@ document.addEventListener('click', async e => {
     case 'msg-st': msgState(d.id, {status: d.st}, 'Отмечено прочитанным'); break;
     case 'msg-arch': msgState(d.id, {archived: d.v === '1'}, d.v === '1' ? 'Переписка в архиве' : 'Переписка во «Входящих»'); break;
     case 'msg-del': msgDelete(d.id); break;
+    // отзывы о книгах (правки 4.6)
+    case 'rv-write': rvWrite(d.id); break;
+    case 'rv-edit': { const r = S.reviews.find(x => x.id === d.id); if(r) rvWrite(r.book); break; }
+    case 'rv-del': rvDelete(d.id); break;
+    case 'rv-more': { UI.rvOpen.add(d.id); const t = document.querySelector(`.rv-text[data-rv="${d.id}"]`); if(t) t.classList.remove('clamp'); a.hidden = true; break; }
     case 'msg-shot': shotOpen(d.id); break;
     case 'rev-edit': { const b = byId('books', d.id); if(b) openBookForm(b); break; }
     case 'rev-cover': { const b = byId('books', d.id); if(b) pickCover(b); break; }

@@ -1146,3 +1146,32 @@ html.note-full .mini{display:none}
 .shot-dlg img{display:block;max-width:calc(100vw - 16px);max-height:calc(100dvh - 16px);object-fit:contain;cursor:zoom-out}
 .shot-dlg::backdrop{background:rgb(0 0 0 / .8)}
 .shot-x{position:absolute;top:6px;right:6px;width:44px;height:44px;border-radius:50%;background:rgb(0 0 0 / .55);color:#fff;font-size:26px}
+
+/* Отзывы о книгах (правки 4.6) */
+.rv-top{display:flex;flex-direction:column;align-items:flex-start;gap:8px}
+.rv-top:empty{display:none}
+.rv-list{display:flex;flex-direction:column}
+.rv{display:flex;flex-direction:column;gap:8px;padding:14px 0;border-top:1px solid var(--line)}
+.rv-list > .rv:first-child{border-top:0}
+.rv.own{background:color-mix(in srgb,var(--ochre) 8%,var(--card));border:0;border-radius:14px;padding:12px 14px;margin:2px 0 6px}
+.rv.own + .rv{border-top:0}
+.rv-own{margin:0;font-size:12.5px;font-weight:700;color:var(--ochre-ink)}
+.rv-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rv-who{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+.rv-name{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.rv-name b{font-size:15px;font-weight:700;overflow-wrap:anywhere}
+.rv-fin{font-size:12.5px;color:var(--muted)}
+.rv-date{font-size:12.5px;color:var(--muted)}
+.rv-head .tag{align-self:center}
+.rv-text{font-family:var(--f-head);font-size:15.5px;line-height:1.6;color:var(--ink);overflow-wrap:anywhere}
+.rv-text.clamp{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:7;line-clamp:7;overflow:hidden}
+.rv-more{align-self:flex-start;margin-top:-6px}
+.rv-acts{display:flex;gap:6px;flex-wrap:wrap}
+.rv-book{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--ink);min-height:44px}
+.rv-book b{font-family:var(--f-head);font-weight:600;font-size:15px;overflow-wrap:anywhere}
+.rv-book .cover.xs{flex:none}
+.rv-list .rv.unread{position:relative}
+.rv-for{font-weight:600}
+.rv-item > span:last-child{gap:2px}
+.rv-item .rv-by{font-weight:600;color:var(--ink-2)}
+.rv-item .rv-ex{font-size:13.5px;line-height:1.45;color:var(--muted);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
