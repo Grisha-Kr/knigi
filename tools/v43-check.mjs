@@ -110,7 +110,7 @@ async function register(admin, u, period) {
   const s = await req("POST", "/api/collections/users/auth-with-password", { json: { identity: u.email, password: u.password } });
   if (s.status === 200) return s.data.token;
   const { code } = await invite(admin, period);
-  const r = await req("POST", "/api/collections/users/records", { json: { ...u, passwordConfirm: u.password, invite: code } });
+  const r = await req("POST", "/api/collections/users/records", { json: { ...u, passwordConfirm: u.password, invite: code, terms: (await req("GET", "/api/knigi/terms")).data.version } });
   if (r.status !== 200) throw new Error("регистрация " + u.email + ": " + r.text);
   return login(u);
 }

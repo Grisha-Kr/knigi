@@ -25,10 +25,11 @@ onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).checkInvite(e
 onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).checkInvite(e); e.next(); }, "invites");
 
 // Срок и пауза другого человека не видны никому, кроме него самого (участники групп видят только имя и фото).
+// Согласие с условиями (правки 4.4) тоже.
 // «Без подписи на страницах» (no_mark, правки 4.2) не видит и сам читатель: это решение администратора.
 onRecordEnrich((e) => {
   const auth = e.requestInfo.auth;
-  if (!(auth && (auth.isSuperuser() || auth.id === e.record.id))) e.record.hide("access_until", "suspended");
+  if (!(auth && (auth.isSuperuser() || auth.id === e.record.id))) e.record.hide("access_until", "suspended", "terms_version", "terms_at");
   if (!(auth && (auth.isSuperuser() || auth.getString("role") === "admin"))) e.record.hide("no_mark");
   e.next();
 }, "users");
@@ -36,3 +37,8 @@ onRecordEnrich((e) => {
 routerAdd("GET", "/api/knigi/access", (e) => require(`${__hooks}/access_lib.js`).myAccess(e), $apis.requireAuth("users"));
 routerAdd("GET", "/api/knigi/admin/users", (e) => require(`${__hooks}/access_lib.js`).adminUsers(e), $apis.requireAuth("users"));
 routerAdd("POST", "/api/knigi/admin/access", (e) => require(`${__hooks}/access_lib.js`).adminAccess(e), $apis.requireAuth("users"));
+
+// Условия пользования (правки 4.4, часть А). Текст открыт и без входа: он нужен до регистрации.
+routerAdd("GET", "/api/knigi/terms", (e) => require(`${__hooks}/access_lib.js`).termsGet(e));
+routerAdd("POST", "/api/knigi/terms/accept", (e) => require(`${__hooks}/access_lib.js`).termsAccept(e), $apis.requireAuth("users"));
+routerAdd("POST", "/api/knigi/admin/terms", (e) => require(`${__hooks}/access_lib.js`).termsSave(e), $apis.requireAuth("users"));

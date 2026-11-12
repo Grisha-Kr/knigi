@@ -311,7 +311,7 @@ async function startApp(){
     S.loaded = true; $('#notice').hidden = true; render(true);
     if(S.access) renderAccessBar(); // в полоске учитываются свои одобренные книги (они приходят с остальными данными)
     if(isAdmin()){ loadInvites(); loadUsers(); loadOcr(); } else loadOwner();
-    loadAccess();
+    loadAccess(); loadTerms();
     subscribeAll().catch(() => {});
     if(route().name === 'g') gVisit(route().id);
     if(route().name === 'profile' && isAdmin()) loadGCount();
@@ -344,15 +344,18 @@ window.addEventListener('pagehide', () => { RD.doc && rdSave(true); apSave(true)
 const dnum = iso => { const [y, m, d] = String(iso).split('-').map(Number); return Date.UTC(y, m - 1, d) / 864e5; };
 const fmtDay = iso => { const [y, m, d] = String(iso || '').split('-').map(Number); return !y ? '' : d + ' ' + MONF[m - 1] + (y !== new Date().getFullYear() ? ' ' + y : ''); };
 const DAYS_W = ['день', 'дня', 'дней'], MONTHS_W = ['месяц', 'месяца', 'месяцев'];
-const contactHTML = c => /^[^\s@]+@[^\s@]+$/.test(c || '') ? `<a href="mailto:${esc(c)}">${esc(c)}</a>` : esc(c || 'администратору');
 const daysLeft = a => Math.round(dnum(a.until) - dnum(a.today));
 const leftText = k => k <= 0 ? 'сегодня последний день' : `осталось ${k} ${plural(k, DAYS_W)}`;
-const accHead = a => a.reason === 'suspended' ? 'Доступ приостановлен' : 'Срок доступа закончился';
+const accHead = a => a.reason === 'terms' ? 'Условия пользования не приняты' : a.reason === 'suspended' ? 'Доступ приостановлен' : 'Срок доступа закончился';
+const TERMS_NEED = 'Нужно принять условия пользования библиотекой.';
+const contactHTML = c => /^[^\s@]+@[^\s@]+$/.test(c || '') ? `<a href="mailto:${esc(c)}">${esc(c)}</a>` : esc(c || 'администратору');
 async function loadAccess(){
   if(!pb.authStore.isValid) return;
   const was = readOnly();
   try { S.access = await pb.send('/api/knigi/access', {}); } catch(e){ return; }
   renderAccessBar();
+  // условия пользования не приняты (правки 4.4): окно поверх всего
+  if(S.access.reason === 'terms' && !S.access.admin) termsGate(); else if(TD.mode === 'gate') termsClose();
   if(was !== readOnly() && S.loaded) render(true); else schedule();
 }
 const accKey = a => [me().id, a.reason, a.until].join('|');
@@ -360,7 +363,10 @@ function renderAccessBar(){
   const a = S.access, bar = $('#access-bar');
   if(!bar) return;
   let html = '', off = false;
-  if(a && !a.active){
+  // условия не приняты (правки 4.4): полосок срока нет, вместо них окно с условиями
+  if(a && a.reason === 'terms'){
+    html = '';
+  } else if(a && !a.active){
     off = true;
     html = `<b>${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}.</b> Книги сейчас не открываются${S.offers.some(o => o.user === me().id && o.status === 'approved') ? ' (кроме тех, что вы прислали и администратор одобрил: их можно читать)' : ''}, свои цитаты и заметки можно смотреть. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
   } else if(a && a.until && !a.admin && daysLeft(a) <= 7){
@@ -376,6 +382,7 @@ function accessLine(){
   const a = S.access;
   if(!a) return '';
   if(a.admin) return 'Вы администратор, доступ бессрочный.';
+  if(a.reason === 'terms') return TERMS_NEED;
   if(!a.active) return `${accHead(a)}${a.reason === 'expired' && a.until ? ' ' + fmtDay(a.until) : ''}: книги не открываются, а добавлять и менять ничего нельзя. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
   return a.until ? `Доступ действует до ${fmtDay(a.until)} включительно.` : 'Доступ бессрочный.';
 }
@@ -383,8 +390,94 @@ function accessLine(){
 // Своя книга читателя (правки 4.3): он её предложил, администратор одобрил. Без доступа она открывается для чтения
 // и слушания (сервер проверяет то же самое, openForRead), записи по ней без доступа не создаются.
 const myOwnBook = b => !!b && !isAdmin() && S.offers.some(o => o.book === b.id && o.user === me().id && o.status === 'approved');
-const roBook = b => readOnly() && !(myOwnBook(b) && !bookNA(b));
+// Пока не приняты условия пользования (правки 4.4), своя книга тоже не открывается.
+const roBook = b => readOnly() && !(S.access.reason !== 'terms' && myOwnBook(b) && !bookNA(b));
 const roNote = () => `<p class="na-note">${ICON.lock}<span>${accessLine()}</span></p>`;
+
+/* ---------- Условия пользования (правки 4.4, часть А) ---------- */
+// Текст хранится на сервере простым: каждая строка абзац, строка с «- » в начале пункт списка, [слова](адрес) ссылка.
+// Читатель принимает действующую редакцию при регистрации или (уже зарегистрированный) в окне поверх всего
+// при следующем открытии приложения. Пока не принял, сервер ведёт себя как при закончившемся сроке доступа.
+function termsInline(line){
+  const re = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+  let out = '', last = 0, m;
+  while((m = re.exec(line))){
+    const url = m[2], ok = /^(https?:\/\/|\/(?!\/)|mailto:)/i.test(url);
+    out += esc(line.slice(last, m.index)) + (ok ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(m[1])}</a>` : esc(m[0]));
+    last = re.lastIndex;
+  }
+  return out + esc(line.slice(last));
+}
+function termsHTML(text){
+  const out = []; let list = null;
+  for(const raw of String(text || '').split('\n')){
+    const line = raw.trim(), li = /^[-•*]\s+(.*)$/.exec(line);
+    if(li){ (list = list || []).push(`<li>${termsInline(li[1])}</li>`); continue; }
+    if(list){ out.push(`<ul>${list.join('')}</ul>`); list = null; }
+    if(line) out.push(`<p>${termsInline(line)}</p>`);
+  }
+  if(list) out.push(`<ul>${list.join('')}</ul>`);
+  return out.join('');
+}
+const fmtDateY = s => { const d = dateOf(s); return isNaN(d) ? '' : d.getDate() + ' ' + MONF[d.getMonth()] + ' ' + d.getFullYear(); };
+async function loadTerms(){ try { S.terms = await pb.send('/api/knigi/terms', {}); schedule(); } catch(e){} }
+// Окно: mode 'register' (кнопки «Принять и создать аккаунт» и «Отмена») или 'gate' («Принять» и «Выйти», иначе не закрыть)
+const TD = {mode: '', version: 0, onAccept: null, onCancel: null};
+const termsDlg = $('#terms'), termsForm = $('#terms-form');
+function termsOpen(o){
+  Object.assign(TD, o);
+  const reg = o.mode === 'register';
+  termsForm.innerHTML = `<div class="dlg-head"><h2 id="terms-title">Условия пользования библиотекой</h2></div>
+    <div class="dlg-body terms-body"><div class="terms-text">${termsHTML(o.text)}</div></div>
+    <div class="terms-checks">
+      <label class="check"><input type="checkbox" id="t-read"><span>Я прочитал(а) условия и обязуюсь их соблюдать</span></label>
+      <label class="check"><input type="checkbox" id="t-data"><span>Согласен(на) на <a href="/privacy.html" target="_blank" rel="noopener">хранение моего имени и почты</a> для работы библиотеки</span></label>
+    </div>
+    <p class="dlg-err" id="terms-err"${o.err ? '' : ' hidden'}>${esc(o.err || '')}</p>
+    <div class="dlg-foot"><button type="button" class="btn" id="terms-no">${reg ? 'Отмена' : 'Выйти'}</button><button type="submit" class="btn primary" id="terms-ok" disabled>${reg ? 'Принять и создать аккаунт' : 'Принять'}</button></div>`;
+  if(dlg.open) dlg.close();
+  if(!termsDlg.open) termsDlg.showModal();
+  termsForm.querySelector('.terms-body').scrollTop = 0;
+}
+function termsClose(){ TD.mode = ''; if(termsDlg.open) termsDlg.close(); }
+function termsErr(msg){ const p = $('#terms-err'); if(p){ p.textContent = msg; p.hidden = !msg; } }
+termsForm.addEventListener('change', () => {
+  const ok = $('#terms-ok'); if(ok) ok.disabled = !($('#t-read').checked && $('#t-data').checked);
+});
+termsForm.addEventListener('click', e => { if(e.target.closest('#terms-no') && TD.onCancel) TD.onCancel(); });
+termsForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  const ok = $('#terms-ok');
+  if(!ok || ok.disabled || !$('#t-read').checked || !$('#t-data').checked) return;
+  ok.disabled = true; termsErr('');
+  try { await TD.onAccept(); }
+  catch(err){ termsErr(errText(err)); }
+  finally { if(ok.isConnected) ok.disabled = !($('#t-read').checked && $('#t-data').checked); }
+});
+// Esc не закрывает окно; если браузер всё же закрыл окно-барьер, оно открывается снова
+termsDlg.addEventListener('cancel', e => { e.preventDefault(); if(TD.mode === 'register' && TD.onCancel) TD.onCancel(); });
+termsDlg.addEventListener('close', () => { if(TD.mode === 'gate') setTimeout(() => { if(TD.mode === 'gate' && !termsDlg.open) termsDlg.showModal(); }, 0); });
+// Уже зарегистрированный читатель с непринятой (или старой) редакцией
+let gateBusy = false;
+async function termsGate(err){
+  if(gateBusy || (TD.mode === 'gate' && termsDlg.open && !err)) return;
+  gateBusy = true;
+  try {
+    const t = await pb.send('/api/knigi/terms', {});
+    S.terms = t;
+    if(t.ok || !t.version){ termsClose(); return; }
+    apStop();
+    termsOpen({mode: 'gate', text: t.text, version: t.version, err,
+      async onAccept(){
+        try { await pb.send('/api/knigi/terms/accept', {method: 'POST', body: {version: TD.version}}); }
+        catch(e){ if(e.status === 409){ TD.mode = ''; gateBusy = false; termsGate(errText(e)); return; } throw e; }
+        termsClose();
+        await loadAccess(); loadTerms(); render(true);
+        toast('Спасибо, условия приняты');
+      },
+      onCancel(){ TD.mode = ''; logOut(); }});
+  } catch(e){} finally { gateBusy = false; }
+}
 
 /* ---------- Проверка новой версии ---------- */
 // Сравниваем ?v= у app.js и app.css в открытой странице и в свежем index.html с сервера
@@ -1860,6 +1953,7 @@ VIEWS.profile = () => {
         ${used(i).length ? `<span class="inv-who">${used(i).map(x => `<span class="who-chip">${faceHTML(x, 'xs')}${esc(x.name || x.email)}</span>`).join('')}</span>` : ''}
         <div class="acts"><button type="button" class="btn sm" data-act="copy-invite" data-code="${esc(i.code)}">Скопировать ссылку</button><button type="button" class="btn sm ghost danger" data-act="del-invite" data-id="${esc(i.id)}">Удалить</button></div></div>`).join('') : '<p class="hint">Приглашений пока нет.</p>'}</div>
     </div></details>
+    ${termsSection()}
     ${usersSection()}` : ''}
     <details class="fold"><summary><span>Сменить пароль</span>${ICON.chev}</summary><div class="fold-body">
       <div class="field"><label for="p-old">Текущий пароль</label><input type="password" id="p-old" autocomplete="current-password"></div>
@@ -1868,14 +1962,63 @@ VIEWS.profile = () => {
       <button type="button" class="btn" data-act="save-pass">Сменить пароль</button></div></details>
     ${isAdmin() && S.disk ? `<p class="hint">Книг: ${S.disk.count}, ${fsize(S.disk.books || 1)}.${S.disk.audio_count ? ` Глав аудио: ${S.disk.audio_count}, ${fsize(S.disk.audio || 1)}.` : ''} Свободно на диске сервера ${fsize(S.disk.free)}.</p>` : ''}
     <button type="button" class="btn wide" data-act="logout">Выйти</button>
-    <p class="hint"><a href="/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a></p>`;
+    <p class="hint"><a href="/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a></p>
+    ${isAdmin() ? '' : termsFoot()}`;
 };
+/* ---------- Условия пользования в профиле (правки 4.4) ---------- */
+// Читатель: внизу мелко, когда принял, и текст под «Показать условия»
+function termsFoot(){
+  const t = S.terms, a = S.access && S.access.terms;
+  if(!t || !t.version) return '';
+  return `<div class="terms-foot">${a && a.ok && a.accepted_at ? `<p>Вы приняли условия пользования ${esc(fmtDateY(a.accepted_at))}.</p>` : ''}
+    <details class="terms-more"><summary>Показать условия</summary><div class="terms-text">${termsHTML(t.text)}</div></details></div>`;
+}
+// Администратор: раздел «Условия» с правкой текста
+function termsSection(){
+  const t = S.terms;
+  const body = !t ? '<p class="hint">Загружаю…</p>' : `
+      <p class="hint">${t.version ? `Действует редакция ${t.version} от ${esc(fmtDateY(t.created))}${t.updated && fmtDateY(t.updated) !== fmtDateY(t.created) ? `, исправлена ${esc(fmtDateY(t.updated))}` : ''}${t.by ? ` (${esc(t.by)})` : ''}.` : 'Условий пока нет.'} На вас как на администратора условия не действуют.</p>
+      ${t.version ? `<p class="terms-stat">Приняли действующую редакцию: <b>${t.accepted ?? '…'} из ${t.total ?? '…'}</b> ${plural(t.total || 0, ['читателя', 'читателей', 'читателей'])}</p>` : ''}
+      <div class="field"><label for="tm-text">Текст условий</label><textarea id="tm-text" rows="14" maxlength="20000">${esc(UI.termsDraft ?? t.text)}</textarea>
+        <small class="hint">Каждая строка абзац. Строка с «- » в начале пункт списка. Ссылка: [слова](адрес).</small></div>
+      <button type="button" class="btn sm ghost" data-act="terms-preview">Посмотреть</button>
+      <label class="check"><input type="checkbox" id="tm-new"${UI.termsNew ? ' checked' : ''}><span>Новая редакция: попросить всех согласиться заново</span></label>
+      <p class="hint">Без галочки исправляется текст той же редакции (для опечаток), заново никого не спрашивают. С галочкой все читатели при следующем открытии приложения снова увидят окно с условиями. Прежние редакции остаются в базе.</p>
+      <button type="button" class="btn primary" data-act="terms-save">Сохранить</button>`;
+  return `<details class="fold" id="terms-fold"${UI.termsOpen ? ' open' : ''}><summary><span>Условия</span>${ICON.chev}</summary><div class="fold-body">${body}</div></details>`;
+}
+function termsPreview(){
+  const text = ($('#tm-text') || {}).value || '';
+  openForm({title: 'Условия пользования библиотекой', html: `<div class="terms-text">${termsHTML(text) || '<p class="hint">Текст пустой.</p>'}</div>
+    <div class="terms-checks prev"><label class="check"><input type="checkbox" disabled><span>Я прочитал(а) условия и обязуюсь их соблюдать</span></label>
+    <label class="check"><input type="checkbox" disabled><span>Согласен(на) на <a href="/privacy.html" target="_blank" rel="noopener">хранение моего имени и почты</a> для работы библиотеки</span></label></div>
+    <p class="hint">Так текст увидит читатель. Сохраните, чтобы изменения вступили в силу.</p>`, submit: 'Закрыть', noCancel: true, async onSave(){}});
+}
+async function termsSave(btn){
+  const text = ($('#tm-text') || {}).value || '';
+  const isNew = !!($('#tm-new') || {}).checked;
+  if(!text.trim()){ toast('Текст условий пустой.'); return; }
+  const send = async () => {
+    const t = await pb.send('/api/knigi/admin/terms', {method: 'POST', body: {text, new: isNew, version: S.terms ? S.terms.version : 0}});
+    S.terms = t; UI.termsDraft = null; UI.termsNew = false;
+    render(true);
+    toast(isNew ? `Сохранена редакция ${t.version}` : 'Текст условий исправлен');
+  };
+  if(isNew){
+    openForm({title: 'Новая редакция условий', text: 'Все читатели должны будут заново принять условия. Продолжить?', submit: 'Продолжить', async onSave(){ await send(); }});
+    return;
+  }
+  btn.disabled = true;
+  try { await send(); } finally { btn.disabled = false; }
+}
 /* ---------- Раздел «Пользователи»: срок доступа (правки 4.1, только администратору) ---------- */
 const ACC_PERIODS = {'': 'бессрочно', '1m': '1 месяц', '3m': '3 месяца', '6m': '6 месяцев'};
 const ACC_DONE = {extend: 'Доступ продлён', set: 'Дата доступа изменена', unlimited: 'Доступ бессрочный', suspend: 'Доступ приостановлен', resume: 'Доступ возобновлён', note: 'Заметка сохранена',
   mark_off: 'Подпись на страницах выключена', mark_on: 'Подпись на страницах включена'};
 const ACC_LOG = {set: 'новая дата', unlimited: 'бессрочно', suspend: 'приостановлен', resume: 'возобновлён', note: 'заметка', mark_off: 'Подпись выключена', mark_on: 'Подпись включена'};
 function accLogText(a){
+  const tm = /^terms:(\d+)$/.exec(a || '');
+  if(tm) return `Принял(а) условия, редакция ${tm[1]}`;
   const m = /^extend:(\d+)$/.exec(a || '');
   return m ? `продлён на ${m[1]} ${plural(+m[1], MONTHS_W)}` : ACC_LOG[a] || a;
 }
@@ -1888,6 +2031,12 @@ function userState(x, today){
   return `<span class="tag${k <= 7 ? ' warn' : ' ok'}">до ${fmtDay(x.access_until)}${k <= 7 ? ', ' + leftText(k) : ''}</span>`;
 }
 const untilText = d => d ? fmtDay(d) : 'бессрочно';
+// «Условия: приняты 12 ноября 2026, редакция 1» или «Условия: не приняты» (правки 4.4)
+function termsLine(x){
+  if(x.role === 'admin') return '';
+  if(x.terms_ok && x.terms_version) return `<span class="usr-terms">Условия: приняты ${esc(fmtDateY(x.terms_at))}, редакция ${x.terms_version}</span>`;
+  return `<span class="usr-terms no">Условия: не приняты${x.terms_version ? ` (принята прежняя редакция ${x.terms_version}, ${esc(fmtDateY(x.terms_at))})` : ''}</span>`;
+}
 function usersSection(){
   const t = S.access && S.access.today;
   // сначала без доступа, потом с датой (ближайшие сверху), потом бессрочные, вы в конце
@@ -1900,7 +2049,7 @@ function usersSection(){
       const log = (x.log || []).map(l => `<li><span class="d">${fmtDate(l.created)}</span> ${esc(accLogText(l.action))}${l.until_before !== l.until_after ? `: ${untilText(l.until_before)} → ${untilText(l.until_after)}` : ''}${l.note ? ` · ${esc(l.note)}` : ''}${l.by ? ` <span class="muted">(${esc(l.by)})</span>` : ''}</li>`).join('');
       return `<div class="usr">
         <div class="usr-head">${faceHTML(x, 'md')}
-          <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}${adm ? 'администратор' : 'читатель'} · с ${esc(fmtDate(x.created))}</span><span>${userState(x, t)}${x.no_mark ? ' <span class="tag nomark">без подписи</span>' : ''}</span></div></div>
+          <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}${adm ? 'администратор' : 'читатель'} · с ${esc(fmtDate(x.created))}</span><span>${userState(x, t)}${x.no_mark ? ' <span class="tag nomark">без подписи</span>' : ''}</span>${termsLine(x)}</div></div>
         ${adm ? '' : `<div class="usr-acts">${[1, 3, 6].map(m => `<button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="${m}" data-id="${id}">+${m} ${plural(m, MONTHS_W)}</button>`).join('')}${x.suspended ? `<button type="button" class="btn sm" data-act="acc" data-action="resume" data-id="${id}">Возобновить</button>` : `<button type="button" class="btn sm ghost danger" data-act="acc" data-action="suspend" data-id="${id}">Приостановить</button>`}</div>
           <label class="check-chip sm usr-mark"><input type="checkbox" data-nomark="${id}"${x.no_mark ? ' checked' : ''}><span>Без подписи на страницах</span></label>
           ${userBooksHTML(x.id)}`}
@@ -3466,7 +3615,7 @@ async function rdShow(r){
   if(r.name === 'read'){
     const b = byId('books', r.id);
     // срок доступа закончился (правки 4.1): книги не открываются
-    if(roBook(b)){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(`${accHead(S.access)}: книги сейчас не открываются. Чтобы продлить, напишите: ${S.access.contact || 'администратору'}.`); return; }
+    if(roBook(b)){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; S.access.reason === 'terms' ? rdFail(TERMS_NEED) : rdFail(`${accHead(S.access)}: книги сейчас не открываются. Чтобы продлить, напишите: ${S.access.contact || 'администратору'}.`); return; }
     // скрытая книга (правки 4.1): читатель её не открывает
     if(!isAdmin() && (b ? bookNA(b) : S.notes.some(n => n.book === r.id))){ if(READER.mode === 'epub') epDispose(); READER.mode = ''; RD.back = b ? '#/b/' + b.id : '#/'; rdFail(NA_TEXT); return; }
     fmt = r.q.get('f') || (b ? defaultFormat(b) : 'pdf');
@@ -4839,7 +4988,6 @@ function renderAuth(msg, ok){
       <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
       <label>Пароль (не короче 8 символов)${passInput('a-pass', 'new-password', ' minlength="8" required')}</label>
       <label>Повторите пароль${passInput('a-pass2', 'new-password', ' required')}</label>
-      <label class="check"><input type="checkbox" id="a-consent"><span>Согласен на обработку персональных данных по <a href="/privacy.html" target="_blank" rel="noopener">политике конфиденциальности</a></span></label>
       ${note}<button class="btn primary big wide" type="submit">Создать аккаунт</button>
       ${isFirstRun ? '' : `<div class="auth-links"><button type="button" class="linkbtn" data-auth="login">У меня уже есть аккаунт</button></div>`}
     </form>`;
@@ -4886,13 +5034,18 @@ $('#auth').addEventListener('submit', async e => {
       if(!v('a-email')) throw {msg:'Введите почту.'};
       if(pass.length < 8) throw {msg:'Пароль должен быть не короче 8 символов.'};
       if(pass !== pass2) throw {msg:'Пароли не совпадают.'};
-      if(!f.querySelector('#a-consent').checked) throw {msg:'Нужно согласие на обработку персональных данных.'};
       const body = {email: v('a-email'), password: pass, passwordConfirm: pass2, name: v('a-name'), theme: themePref()};
-      if(!isFirstRun) body.invite = v('a-invite');
-      await pb.collection('users').create(body);
-      await pb.collection('users').authWithPassword(body.email, pass);
-      isFirstRun = false;
-      startApp();
+      const create = async () => {
+        await pb.collection('users').create(body);
+        await pb.collection('users').authWithPassword(body.email, pass);
+        isFirstRun = false;
+        termsClose();
+        startApp();
+      };
+      // первый пользователь (администратор) без окна условий
+      if(isFirstRun){ await create(); return; }
+      body.invite = v('a-invite');
+      await registerTerms(body, create);
     } else {
       // Ответ сервера одинаковый для любого адреса, поэтому и сообщение всегда одно
       const email = v('a-email');
@@ -4910,6 +5063,22 @@ $('#auth').addEventListener('submit', async e => {
   }catch(err){ authErr(err.msg || errText(err)); }
   finally{ if(f.dataset.mode === 'reset') tickReset(); else btn.disabled = false; }
 });
+// Регистрация по приглашению (правки 4.4): поля в порядке → окно условий. «Отмена» возвращает к форме, введённое остаётся.
+async function registerTerms(body, create, err){
+  const t = await pb.send('/api/knigi/terms', {});
+  if(!t.version){ await create(); return; }
+  termsOpen({mode: 'register', text: t.text, version: t.version, err,
+    async onAccept(){
+      body.terms = TD.version;
+      try { await create(); }
+      catch(e){
+        // пока окно было открыто, вышла новая редакция: показываем её
+        if(errText(e) === TERMS_NEED){ await registerTerms(body, create, 'Условия только что изменились. Прочитайте новую редакцию.'); return; }
+        termsClose(); authErr(errText(e));
+      }
+    },
+    onCancel(){ termsClose(); }});
+}
 function authErr(text){
   const fe = $('#auth-form'); if(!fe) return;
   let p = fe.querySelector('.form-err');
@@ -5185,6 +5354,8 @@ document.addEventListener('change', e => {
 document.addEventListener('input', e => {
   if(e.target.id === 'cm-text'){ const box = e.target.closest('#cm-box'); if(box) UI.cmDraft[box.dataset.note] = e.target.value; }
   if(e.target.id === 'q') setSearch(e.target.value);
+  if(e.target.id === 'tm-text') UI.termsDraft = e.target.value;
+  if(e.target.id === 'tm-new') UI.termsNew = e.target.checked;
   if(e.target.id === 'nq'){ UI.notesQ = e.target.value; notesSearch(); schedule(); }
   // перемотка в плеере: пока тянут, только время на экране
   if(e.target.classList && e.target.classList.contains('ap-seek')){ AP.seeking = true; const box = e.target.closest('.ap-ctl'); const n = box && box.querySelector('.ap-now'); if(n) n.textContent = durShort(+e.target.value); }
@@ -5192,6 +5363,7 @@ document.addEventListener('input', e => {
 document.addEventListener('toggle', e => {
   // событие приходит и при отрисовке уже раскрытого блока: реагируем только на настоящее изменение
   if(e.target.id === 'inv-fold' && e.target.open !== UI.invOpen){ UI.invOpen = e.target.open; if(UI.invOpen && isAdmin()){ loadInvites(); loadUsers(); } }
+  if(e.target.id === 'terms-fold' && e.target.open !== !!UI.termsOpen){ UI.termsOpen = e.target.open; if(UI.termsOpen && isAdmin()) loadTerms(); }
   if(e.target.id === 'users-fold' && e.target.open !== UI.usersOpen){ UI.usersOpen = e.target.open; if(UI.usersOpen && isAdmin()) loadUsers(); }
   if(e.target.classList && e.target.classList.contains('desc')) UI.descOpen = e.target.open;
   if(e.target.id === 'ocr-past') UI.ocrPast = e.target.open;
@@ -5245,22 +5417,26 @@ async function accountAction(a, d){
         UI.openUser = d.id;
         await loadUsers(); render(true); toast(ACC_DONE[d.action] || 'Сохранено'); break;
       }
-      case 'logout': {
-        apStop();
-        dropLS('accHide');
-        await fetch('/api/knigi/logout', {method: 'POST'}).catch(() => {});
-        Object.keys(localStorage).filter(k => k.startsWith('kn_draft_')).forEach(k => localStorage.removeItem(k));
-        pb.authStore.clear(); location.hash = ''; location.reload(); break;
-      }
+      case 'logout': await logOut(); break;
+      case 'terms-preview': termsPreview(); break;
+      case 'terms-save': await termsSave(a); break;
     }
   }catch(e){ toast(errText(e)); }
+}
+
+async function logOut(){
+  apStop();
+  dropLS('accHide');
+  await fetch('/api/knigi/logout', {method: 'POST'}).catch(() => {});
+  Object.keys(localStorage).filter(k => k.startsWith('kn_draft_')).forEach(k => localStorage.removeItem(k));
+  pb.authStore.clear(); location.hash = ''; location.reload();
 }
 
 let tt = 0;
 function toast(msg){
   // подсказка могла уйти вместе с читалкой, когда её содержимое собрали заново: создаём снова
   let el = $('#toast');
-  if(!el){ el = document.createElement('div'); el.className = 'toast'; el.id = 'toast'; el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite'); } const host = dlg.open ? dlg : RD.open ? $('#reader') : document.body; if(el.parentNode !== host) host.appendChild(el); el.textContent = msg; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2800); }
+  if(!el){ el = document.createElement('div'); el.className = 'toast'; el.id = 'toast'; el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite'); } const host = termsDlg.open ? termsDlg : dlg.open ? dlg : RD.open ? $('#reader') : document.body; if(el.parentNode !== host) host.appendChild(el); el.textContent = msg; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2800); }
 
 boot();
 })();

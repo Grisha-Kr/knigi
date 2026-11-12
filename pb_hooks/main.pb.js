@@ -10,8 +10,12 @@ onRecordCreateRequest((e) => {
   if (e.hasSuperuserAuth()) { e.next(); return; }
   const invite = require(`${__hooks}/lib.js`).checkRegistration(e);
   // срок доступа (правки 4.1): по приглашению «сегодня + срок», первый пользователь бессрочный
-  require(`${__hooks}/access_lib.js`).applyInvite(e.record, invite);
+  const A = require(`${__hooks}/access_lib.js`);
+  A.applyInvite(e.record, invite);
+  // условия пользования (правки 4.4): по приглашению без согласия с действующей редакцией аккаунт не создаётся
+  const terms = A.applyTerms(e.record, invite, e.requestInfo().body);
   e.next();
+  A.logRegistered(e.record, terms);
   if (invite) {
     invite.set("uses", invite.getInt("uses") + 1);
     invite.set("used_by", invite.getStringSlice("used_by").concat([e.record.id]));

@@ -1041,3 +1041,38 @@ html.note-full .mini{display:none}
 .ap-diag{align-self:center;color:var(--muted)}
 .diag-list{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px;font-size:12.5px;line-height:1.4;overflow-wrap:anywhere}
 .diag-list small{color:var(--muted)}
+/* Условия пользования (правки 4.4) */
+.terms-dlg{width:min(640px,calc(100vw - 24px))}
+.terms-dlg form{height:min(760px,calc(100dvh - 32px))}
+.terms-dlg .dlg-head{padding:16px 20px 8px}
+.terms-dlg .dlg-head h2{font-family:var(--f-head);font-size:21px;font-weight:600;line-height:1.25}
+.terms-body{flex:1 1 auto;min-height:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding-top:14px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.terms-text{font-size:15.5px;line-height:1.6;color:var(--ink);overflow-wrap:anywhere}
+.terms-text p{margin:0 0 10px}
+.terms-text ul{margin:0 0 10px;padding-left:22px;display:flex;flex-direction:column;gap:6px}
+.terms-text a{color:var(--accent-text);font-weight:600}
+.terms-checks{display:flex;flex-direction:column;gap:12px;padding:14px 20px 4px}
+.terms-checks .check{line-height:1.45;font-size:15px!important;cursor:pointer;min-height:24px}
+.terms-checks .check input{width:22px;height:22px;margin-top:0}
+.terms-checks a{color:var(--accent-text);font-weight:600}
+.terms-checks.prev{padding:12px 0 0;border-top:1px solid var(--line)}
+.terms-dlg .dlg-foot .btn{min-height:46px}
+.terms-dlg .dlg-foot .btn.primary:disabled{opacity:.45}
+@media (max-width:560px){
+  .terms-dlg{width:100vw;max-width:100vw;max-height:100dvh;border-radius:0;margin:0}
+  .terms-dlg form{height:100dvh;max-height:100dvh;padding-top:env(safe-area-inset-top,0px)}
+  .terms-text{font-size:15px}
+}
+.terms-stat{margin:0;font-size:14.5px}
+.terms-foot{margin:4px 4px 8px;color:var(--muted);font-size:12.5px;line-height:1.5}
+.terms-foot p{margin:0 0 4px}
+.terms-more summary{cursor:pointer;color:var(--muted);text-decoration:underline;text-underline-offset:3px;min-height:32px;display:inline-flex;align-items:center}
+.terms-more .terms-text{font-size:12.5px;color:var(--muted);line-height:1.55;margin-top:6px}
+.terms-more .terms-text a{color:inherit}
+#tm-text{width:100%;min-height:260px;font:inherit;font-size:16px;line-height:1.5;resize:vertical}
+.usr-terms{display:block;font-size:13px;color:var(--muted)}
+.usr-terms.no{color:var(--warn-ink)}
+.terms-body:focus{outline:none}
+.terms-checks .check,.fold-body > .check{display:flex}
+.terms-checks .check input{margin-top:0}
+.fold-body > .btn.sm.ghost{align-self:flex-start}

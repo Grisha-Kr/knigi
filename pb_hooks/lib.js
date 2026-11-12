@@ -53,9 +53,13 @@ function ownBook(b, user) {
 // Срок доступа проверяется первым. Без доступа открывается только своя одобренная книга (ownBook) и только если
 // она этому человеку открыта (bookOpen: скрытую и не открытую ему лично исключение не касается).
 // Цитаты, заметки, отметки и полки по своей книге без доступа закрыты, как по остальным (guard в хуках).
+// Пока не приняты условия пользования (правки 4.4), своя книга тоже не открывается.
 function openForRead(id, user) {
   const A = require(`${__hooks}/access_lib.js`);
-  if (!A.isActive(user)) {
+  const st = A.stateOf(user);
+  if (!st || !st.active) {
+    // пока условия пользования не приняты (правки 4.4), исключение для своей книги не действует
+    if (!st || st.reason === "terms") A.requireBooks(user);
     let b = null;
     try { b = $app.findRecordById("books", String(id || "")); } catch (_) {}
     if (!(b && bookOpen(b, user) && ownBook(b, user))) A.requireBooks(user);

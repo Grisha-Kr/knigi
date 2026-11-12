@@ -148,7 +148,7 @@ async function setup() {
   try { reader = await login(READER); } catch (_) {
     const code = "PROVERKA" + randomBytes(3).toString("hex").toUpperCase();
     await req("POST", "/api/collections/invites/records", { token: admin, json: { code, max_uses: 1, uses: 0 } });
-    const r = await req("POST", "/api/collections/users/records", { json: { ...READER, passwordConfirm: READER.password, invite: code } });
+    const r = await req("POST", "/api/collections/users/records", { json: { ...READER, passwordConfirm: READER.password, invite: code, terms: (await req("GET", "/api/knigi/terms")).data.version } });
     if (r.status !== 200) throw new Error("Читатель не зарегистрировался: " + r.text);
     reader = await login(READER);
   }
