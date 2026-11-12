@@ -2212,27 +2212,28 @@ VIEWS.profile = () => {
       <div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span><small>${isAdmin() ? 'Администратор библиотеки' : 'Читатель'}</small></div>
       ${readOnly() ? '' : `<button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя" title="Изменить имя">${ICON.pen}</button>`}</section>
     ${S.access && !isAdmin() ? `<p class="acc-line${S.access.active ? '' : ' off'}">${accessLine()}</p>` : ''}
-    ${isAdmin() ? '' : `<section class="card msg-card"><p>Предложение, вопрос, отзыв или что-то не работает: напишите, ответ придёт сюда, в раздел «Мои сообщения».</p>
-      <button type="button" class="btn primary" data-act="msg-write">${ICON.mail}<span>Написать администратору</span></button>
-      <a href="#/msgs" id="msgs-link" class="msg-mine"${msgNew() ? ' aria-label="Мои сообщения, есть ответ"' : ''}>${ICON.chat}<span>Мои сообщения</span>${msgNew() ? '<span class="ldot" aria-hidden="true"></span>' : ''}<span class="n">${S.msgs.length}</span>${ICON.chev}</a></section>`}
     <section class="card"><h2>Читаю${reading.length ? ` <span class="n">${reading.length}</span>` : ''}</h2>
       ${reading.length ? `<div class="rows">${reading.map(m => bookRow(byId('books', m.book))).join('')}</div>` : '<p class="empty">Отметьте книгу «Читаю» в её карточке.</p>'}</section>
     <section class="card"><h2>Прочитанные${finished.length ? ` <span class="n">${finished.length}</span>` : ''}</h2>
       ${finished.length ? `<div class="rows">${(UI.finAll ? finished : finished.slice(0, FIN_SHOW)).map(m => bookRow(byId('books', m.book), `<small class="fin-day">прочитана ${esc(fmtDate(m.finished_at))}</small>`)).join('')}</div>
         ${finished.length > FIN_SHOW ? `<button type="button" class="btn sm ghost" data-act="fin-all">${UI.finAll ? 'Свернуть' : 'Показать все · ' + finished.length}</button>` : ''}` : '<p class="empty">Здесь появятся книги с отметкой «Прочитано».</p>'}</section>
+    ${isAdmin() ? '' : `<nav class="links" id="notes-links"><a href="#/notes">${ICON.notes}Мои заметки<span class="n">${myNotes}</span>${ICON.chev}</a></nav>`}
     ${isAdmin() ? '' : `<section class="card"><div class="block-h"><h2>Мои предложенные книги</h2></div>
       ${offers.length ? `<div class="rows">${offers.map(offerRow).join('')}</div>` : '<p class="hint">Если в библиотеке нет нужной книги, предложите её. Администратор проверит и добавит.</p>'}
       ${readOnly() ? roNote() : `<button type="button" class="btn" data-act="offer-book">${ICON.upload}<span>Предложить книгу</span></button>`}</section>`}
+    ${isAdmin() ? '' : `<section class="card msg-card"><p>Предложение, вопрос, отзыв или что-то не работает: напишите, ответ придёт сюда, в раздел «Мои сообщения».</p>
+      <button type="button" class="btn primary" data-act="msg-write">${ICON.mail}<span>Написать администратору</span></button>
+      <a href="#/msgs" id="msgs-link" class="msg-mine"${msgNew() ? ' aria-label="Мои сообщения, есть ответ"' : ''}>${ICON.chat}<span>Мои сообщения</span>${msgNew() ? '<span class="ldot" aria-hidden="true"></span>' : ''}<span class="n">${S.msgs.length}</span>${ICON.chev}</a></section>`}
     <section class="card"><h2>Оформление</h2>
       <div class="seg3" role="radiogroup" aria-label="Тема">${[['light','Светлая'],['dark','Тёмная'],['auto','Как в системе']].map(([k, l]) =>
         `<input type="radio" name="p-theme" id="p-theme-${k}" value="${k}"${themePref() === k ? ' checked' : ''}><label for="p-theme-${k}">${l}</label>`).join('')}</div></section>
-    <nav class="links">
-      <a href="#/notes">${ICON.notes}${isAdmin() ? 'Мои заметки и уроки' : 'Мои заметки'}<span class="n">${myNotes}</span>${ICON.chev}</a>
-      ${isAdmin() ? `<a href="#/msgs" id="msgs-link">${ICON.mail}Сообщения читателей<span class="n${msgNew() ? ' hot' : ''}">${msgNew()}</span>${ICON.chev}</a>` : ''}
-      ${isAdmin() ? `<a href="#/review">${ICON.inbox}На проверке<span class="n${reviewCount() ? ' hot' : ''}">${reviewCount()}</span>${ICON.chev}</a>` : ''}
-      ${isAdmin() ? `<a href="#/log">${ICON.log}Журнал чтения${ICON.chev}</a>` : ''}
-      ${isAdmin() ? `<a href="#/ai">${ICON.ai}Подключение к ИИ${ICON.chev}</a>` : ''}
-    </nav>
+    ${isAdmin() ? `<nav class="links">
+      <a href="#/notes">${ICON.notes}Мои заметки и уроки<span class="n">${myNotes}</span>${ICON.chev}</a>
+      <a href="#/msgs" id="msgs-link">${ICON.mail}Сообщения читателей<span class="n${msgNew() ? ' hot' : ''}">${msgNew()}</span>${ICON.chev}</a>
+      <a href="#/review">${ICON.inbox}На проверке<span class="n${reviewCount() ? ' hot' : ''}">${reviewCount()}</span>${ICON.chev}</a>
+      <a href="#/log">${ICON.log}Журнал чтения${ICON.chev}</a>
+      <a href="#/ai">${ICON.ai}Подключение к ИИ${ICON.chev}</a>
+    </nav>` : ''}
     ${isAdmin() ? `<p class="hint">Групп в библиотеке: ${S.gcount == null ? '…' : S.gcount}</p>` : ''}
     ${isAdmin() ? ocrSection() : ''}
     ${isAdmin() ? `<details class="fold" id="inv-fold"${UI.invOpen ? ' open' : ''}><summary><span>Приглашения</span>${ICON.chev}</summary><div class="fold-body">

@@ -85,6 +85,21 @@ const dotOnPhoto = async (page, width) => width < 600 ? page.locator("header .me
     await page.goto(`${BASE}/#/profile`);
     await page.waitForSelector('#main [data-act="msg-write"]');
     ok(await page.locator('#main [data-act="msg-write"]').isVisible(), "в профиле кнопка «Написать администратору»");
+    // порядок блоков в профиле читателя: фото и имя, срок, «Читаю», «Прочитанные», «Мои заметки»,
+    // «Мои предложенные книги», «Написать администратору» с «Мои сообщения», «Оформление», пароль, «Выйти», политика, условия
+    const order = await page.evaluate(() => {
+      const main = document.querySelector("#main");
+      const h2 = (t) => [...main.querySelectorAll("section.card h2")].find((h) => h.textContent.trim().startsWith(t));
+      const marks = [["фото", main.querySelector(".me-card")], ["срок", main.querySelector(".acc-line")], ["Читаю", h2("Читаю")], ["Прочитанные", h2("Прочитанные")],
+        ["Мои заметки", main.querySelector('#notes-links a[href="#/notes"]')], ["Предложенные", h2("Мои предложенные книги")], ["Написать", main.querySelector(".msg-card")],
+        ["Мои сообщения", main.querySelector(".msg-card #msgs-link")], ["Оформление", h2("Оформление")], ["Пароль", [...main.querySelectorAll("details.fold summary")].find((x) => /Сменить пароль/.test(x.textContent))],
+        ["Выйти", main.querySelector('[data-act="logout"]')], ["Политика", main.querySelector('a[href="/privacy.html"]')]];
+      const all = [...main.querySelectorAll("*")];
+      return marks.map(([k, el]) => [k, el ? all.indexOf(el) : -1]);
+    });
+    const idx = order.map((x) => x[1]);
+    ok(idx.every((v) => v >= 0) && idx.every((v, i) => i === 0 || v > idx[i - 1]), "порядок блоков в профиле читателя: " + order.map((x) => x[0]).join(" → "), order);
+    ok(await page.locator('#main a[href="#/notes"]').count() === 1, "«Мои заметки» в профиле одна (внизу среди ссылок её больше нет)");
     await page.click('#main [data-act="msg-write"]');
     await page.waitForSelector("#mw-text");
     ok(await page.locator("#mw-cnt").textContent() === "0 из 1000", "счётчик «0 из 1000»");
@@ -148,6 +163,7 @@ const dotOnPhoto = async (page, width) => width < 600 ? page.locator("header .me
     await ap.waitForSelector("#msgs-link");
     ok(/Сообщения читателей/.test(await ap.locator("#msgs-link").textContent()) && await ap.locator("#msgs-link .n.hot").count() === 1, "у администратора «Сообщения читателей» с числом новых");
     ok(await ap.locator('#main [data-act="msg-write"]').count() === 0, "у администратора кнопки «Написать администратору» нет");
+    ok(await ap.locator("#notes-links").count() === 0 && await ap.locator('nav.links a[href="#/notes"]').count() === 1 && await ap.locator("nav.links #msgs-link").count() === 1, "профиль администратора прежний: заметки и сообщения в общем списке ссылок");
     await ap.goto(`${BASE}/#/`);
     await ap.waitForSelector("#q");
     ok(await dotOnPhoto(ap, run.width) === 1, "точка на фото администратора");
