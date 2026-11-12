@@ -125,7 +125,12 @@ if systemctl is-active --quiet $NAME; then
   else
     echo "Внимание: адрес для ИИ-помощников не ответил. Покажите помощнику вывод: journalctl -u knigi -n 50"
   fi
-  djvu="$(ls "$APP/books"/*.djvu 2>/dev/null | wc -l)"
+  # Книги DjVu, которые ждут перевода в PDF или переводятся сейчас (status processing в book_files).
+  # Файлы *.djvu в books не считаем: после перевода оригинал остаётся рядом с PDF.
+  djvu="$(timeout 10 /usr/bin/python3 -c 'import sqlite3, sys
+db = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True, timeout=5)
+print(db.execute("SELECT COUNT(*) FROM book_files WHERE format = ? AND status = ?", ("djvu", "processing")).fetchone()[0])' "$APP/pb_data/data.db" 2>/dev/null || echo 0)"
+  case "$djvu" in ''|*[!0-9]*) djvu=0 ;; esac
   [ "$djvu" -gt 0 ] && echo "Книги DjVu ($djvu) переводятся в PDF в фоне, по одной. Это может занять несколько минут на книгу."
   exit 0
 fi
