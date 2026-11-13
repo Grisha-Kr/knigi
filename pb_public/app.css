@@ -433,7 +433,18 @@ html.note-full .ed-box .ql-editor{min-height:70vh}
 .lr-num{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 .log-row.bad{background:color-mix(in srgb,var(--danger) 9%,transparent);border-radius:10px;padding:10px 8px;margin:2px -8px}
 .log-row.bad .lr-num,.log-row.bad .lr-time{color:var(--danger);font-weight:700}
-@media (max-width: 420px){ .log-row{grid-template-columns:minmax(0,1fr) auto} .lr-time{grid-column:1/-1;margin-bottom:-6px} }
+/* Правки 4.8: файл получен почти целиком, а прочитано мало */
+.log-row.sus{background:var(--warn-bg);border-radius:10px;padding:10px 8px;margin:2px -8px}
+.log-row.sus.bad{background:color-mix(in srgb,var(--danger) 9%,var(--warn-bg))}
+.lr-sus{grid-column:2/-1;font-size:13.5px;color:var(--warn-ink);line-height:1.45}
+.tag.sus{background:var(--warn-ink);color:var(--card);margin-right:4px}
+.log-sus-chip{white-space:nowrap}
+@media (max-width: 420px){ .log-row{grid-template-columns:minmax(0,1fr) auto} .lr-time{grid-column:1/-1;margin-bottom:-6px} .lr-sus{grid-column:1/-1} }
+/* Правки 4.8: окно «Убрать формат», когда удаляются цитаты */
+.rmf-box{display:flex;flex-direction:column;gap:10px}
+.rmf-sum{margin:0;padding:12px 14px;border-radius:12px;background:color-mix(in srgb,var(--danger) 10%,var(--card));color:var(--ink);line-height:1.5}
+.rmf-who{margin:0;padding-left:20px;line-height:1.6}
+.rmf-ok{align-self:flex-start;min-height:44px}
 
 /* Поля форм */
 input[type=text],input[type=email],input[type=password],input[type=date],input[type=number],input[type=search]:not(.search input),select,textarea{min-height:48px;border-radius:12px;border:1.5px solid var(--field-line);background:var(--field);padding:0 14px;font-size:16px;color:var(--ink);width:100%;min-width:0}

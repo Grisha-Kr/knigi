@@ -228,7 +228,7 @@ routerAdd("GET", "/api/knigi/f/cover/{id}", (e) => {
   return e.fileFS($os.dirFS(F.coversDir()), name);
 });
 
-// Ссылка на файл книги нужного формата (?f=pdf|epub|djvu|fb2|mobi|azw3|txt, без f: PDF): на 2 часа и только
+// Ссылка на файл книги нужного формата (?f=pdf|epub|djvu|fb2|mobi|azw3|txt, без f: PDF): на 15 минут (правки 4.8) и только
 // вместе с кукой, которую ставит этот же ответ. В ключе ссылки номер файла (book_files). DjVu отдаётся
 // переведённым в PDF, FB2, MOBI, AZW3 и TXT переведёнными в EPUB (правки 3.1): view говорит, какой читалкой открывать.
 routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
@@ -246,7 +246,7 @@ routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
   const size = F.exists($filepath.join(F.booksDir(), f.getString("file"))) ? f.getInt("file_size") : 0;
   if (!size) throw new NotFoundError("Файл книги не найден на сервере.");
   if (view === "epub" && size > F.EPUB_MAX) throw new BadRequestError("Эта книга слишком большая для читалки.");
-  return e.json(200, { url: F.makeLink(e, "book", f.id, e.auth.id), size, ttl: F.LINK_TTL, mark: F.watermarkFor(e.auth), mark_cfg: F.watermarkCfg(), chunk: 512 * 1024,
+  return e.json(200, { url: F.makeLink(e, "book", f.id, e.auth.id), size, ttl: F.BOOK_LINK_TTL, mark: F.watermarkFor(e.auth), mark_cfg: F.watermarkCfg(), chunk: 512 * 1024,
     file: f.id, format: fmt, view, whole: view === "epub" });
 }, $apis.requireAuth("users"));
 
@@ -254,8 +254,11 @@ routerAdd("GET", "/api/knigi/books/{id}/link", (e) => {
 // PDF только частями (Range) и не больше 4 МБ за раз. EPUB целиком: читалке нужен весь архив, файлы небольшие.
 // Вход проверяется дважды: ключ в адресе и кука. У читателей сервер считает отданные байты (лимит в час)
 // и пишет журнал. На администратора это не действует.
+// Правки 4.8: файл не открывается как страница (новая вкладка, «Сохранить ссылку как»), и отдаётся ровно тот кусок,
+// что посчитан в ограничении и журнале, какие бы заголовки ни пришли (If-Range раньше давал файл целиком).
 routerAdd("GET", "/api/knigi/f/book/{id}", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
+  F.refuseAsPage(e);
   const id = e.request.pathValue("id");
   const user = F.linkUser(e, "book", id);
   let f = null;
@@ -277,12 +280,12 @@ routerAdd("GET", "/api/knigi/f/book/{id}", (e) => {
       F.logBytes(user.id, b, 0, true);
       return e.json(429, { message: `Вы читаете очень быстро. Сделайте паузу и продолжите через ${wait} мин.`, wait });
     }
-    F.logBytes(user.id, b, range.len, false);
+    F.logBytes(user.id, b, range.len, false, f.id);
   }
   F.noStore(e);
   e.response.header().set("Content-Type", "application/octet-stream");
   e.response.header().set("Content-Disposition", "inline");
-  return e.fileFS($os.dirFS(F.booksDir()), name);
+  return F.serveRange(e, F.booksDir(), name, range, whole);
 });
 
 // Файл урока. PDF открывается в читалке (как книга, частями); остальное только скачивает владелец (администратор).
@@ -305,6 +308,8 @@ routerAdd("GET", "/api/knigi/files/{id}/link", (e) => {
 routerAdd("GET", "/api/knigi/f/file/{id}", (e) => {
   const F = require(`${__hooks}/files_lib.js`);
   const id = e.request.pathValue("id");
+  // открыть как страницу нельзя (правки 4.8); скачивание своего файла администратором (dl=1) это и есть переход по ссылке
+  if (String((e.requestInfo().query || {}).dl || "") !== "1") F.refuseAsPage(e, "Файл открывается только в читалке приложения.");
   const user = F.linkUser(e, "file", id);
   require(`${__hooks}/access_lib.js`).requireBooks(user);
   let f = null;
@@ -335,7 +340,7 @@ routerAdd("GET", "/api/knigi/f/file/{id}", (e) => {
   }
   e.response.header().set("Content-Type", "application/octet-stream");
   e.response.header().set("Content-Disposition", "inline");
-  return e.fileFS($os.dirFS(F.filesDir()), f.getString("file"));
+  return F.serveRange(e, F.filesDir(), f.getString("file"), range, false);
 });
 
 // Прогресс чтения и какие страницы открыты (для журнала). Пишет только сервер.
@@ -595,7 +600,8 @@ routerAdd("DELETE", "/api/knigi/book-files/{id}", (e) => {
   let f = null;
   try { f = $app.findRecordById("book_files", e.request.pathValue("id")); } catch (_) {}
   if (!f) throw new NotFoundError("Файл не найден: возможно, его уже убрали.");
-  F.removeFormat(f);
+  // confirm: сколько цитат администратор видел в окне подтверждения (правки 4.8)
+  F.removeFormat(f, (e.requestInfo().query || {}).confirm);
   return e.json(200, { ok: true });
 }, $apis.requireAuth("users"));
 
@@ -622,12 +628,23 @@ routerAdd("GET", "/api/knigi/admin/log", (e) => {
   if (params.u) filter += " && user = {:u}";
   if (params.b) filter += " && book = {:b}";
   const rows = $app.findRecordsByFilter("read_log", filter, "-hour", 3000, 0, params);
+  // файлы книг для пометки «подозрительно» (правки 4.8)
+  const fcache = {};
+  const fileOf = (fid) => {
+    if (!(fid in fcache)) {
+      let r = null;
+      try { r = $app.findRecordById("book_files", fid); } catch (_) {}
+      fcache[fid] = r ? { format: r.getString("format"), view: F.VIEW[r.getString("format")] || "pdf", size: r.getInt("file_size"), pages: r.getInt("pages") } : null;
+    }
+    return fcache[fid];
+  };
   const people = {};
   for (const u of $app.findAllRecords("users")) people[u.id] = { id: u.id, name: u.getString("name"), email: u.getString("email"), admin: u.getString("role") === "admin" };
   return e.json(200, {
     rows: rows.map((r) => ({ id: r.id, hour: r.getString("hour"), user: r.getString("user"), book: r.getString("book"), book_title: r.getString("book_title"),
       pages_seen: r.getInt("pages_seen"), bytes_sent: r.getInt("bytes_sent"), over_limit: r.getBool("over_limit"),
-      listen_sec: r.getInt("listen_sec"), listen: (() => { try { const v = JSON.parse(toString(r.get("listen")) || "[]"); return Array.isArray(v) ? v : []; } catch (_) { return []; } })() })),
+      listen_sec: r.getInt("listen_sec"), listen: (() => { try { const v = JSON.parse(toString(r.get("listen")) || "[]"); return Array.isArray(v) ? v : []; } catch (_) { return []; } })(),
+      suspect: F.logSuspect(r, fileOf) })),
     users: Object.keys(people).map((k) => people[k]),
     settings: { log: F.S.readLog(), days: F.S.logDays(), limit: F.S.maxBytesHour(), watermark: F.S.watermark() },
   });

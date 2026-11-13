@@ -113,7 +113,7 @@ const loadLS = (k, d) => { try { const v = localStorage.getItem('kn_'+k); return
 const saveLS = (k, v) => { try { localStorage.setItem('kn_'+k, JSON.stringify(v)); } catch(e){} };
 const dropLS = k => { try { localStorage.removeItem('kn_'+k); } catch(e){} };
 const UI = {hops:0, reorder:'', revShelves:{}, finAll:false, booksView: loadLS('booksView', 'grid'), booksSort: loadLS('booksSort', 'title'), booksFmt:'', booksScan:false, booksHidden:false, booksAudio:false,
-  tab:'notes', notesQ:'', notesKind:'', notesHits:null, cardFrom:{}, logQ:{days:7, user:'', book:''}, log:null, descOpen:false,
+  tab:'notes', notesQ:'', notesKind:'', notesHits:null, cardFrom:{}, logQ:{days:7, user:'', book:'', sus:false}, log:null, descOpen:false,
   cardFmt:{}, hlColor:'', hlThought:false, hlOpen:new Set(), noteCtx:null,
   fullFor:'', fullNow:false, normalOnce:false,
   gState:{}, gPrev:{}, gBanner:{}, gFeed:{}, cmDraft:{}, cmEdit:'', join:null,
@@ -2745,20 +2745,33 @@ VIEWS.log = () => {
   }
   const st = L.settings;
   const limitMB = Math.round(st.limit / MB);
+  const susN = L.rows.filter(r => r.suspect).length;
+  if(q.sus) for(const g of days) g.rows = g.rows.filter(r => r.suspect);
+  const shown = days.filter(g => g.rows.length);
   return `${backLink('#/profile', 'Профиль')}<header class="head"><h1>Журнал чтения</h1></header>
-    <p class="hint">${st.log ? `Журнал включён, записи хранятся ${st.days} дн.` : 'Журнал выключен (READ_LOG=0): новые записи не появляются.'} ${st.limit ? `Ограничение ${limitMB} МБ в час на читателя.` : 'Ограничение скорости выключено.'} ${st.watermark ? 'Подпись на страницах включена.' : 'Подпись на страницах выключена.'} Красным отмечены часы, где превышен лимит или открыто больше 150 страниц.</p>
+    <p class="hint">${st.log ? `Журнал включён, записи хранятся ${st.days} дн.` : 'Журнал выключен (READ_LOG=0): новые записи не появляются.'} ${st.limit ? `Ограничение ${limitMB} МБ в час на читателя.` : 'Ограничение скорости выключено.'} ${st.watermark ? 'Подпись на страницах включена.' : 'Подпись на страницах выключена.'} Красным отмечены часы, где превышен лимит или открыто больше 150 страниц. Жёлтым и пометкой «скачано больше, чем прочитано» отмечены часы, где файл книги получен почти целиком (PDF больше чем на 80%, а страниц просмотрено мало; EPUB целиком 3 раза и больше).</p>
     <div class="toolbar">
       <label class="sel"><span class="sr">Читатель</span><select id="log-user"><option value="">все читатели</option>${readers.map(u => `<option value="${u.id}"${q.user === u.id ? ' selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select></label>
       <label class="sel"><span class="sr">Книга</span><select id="log-book"><option value="">все книги</option>${bookIds.filter(r => r.book).map(r => `<option value="${r.book}"${q.book === r.book ? ' selected' : ''}>${esc(r.book_title)}</option>`).join('')}</select></label>
       <label class="sel"><span class="sr">За сколько дней</span><select id="log-days">${[[1,'сегодня и вчера'],[7,'7 дней'],[30,'30 дней'],[180,'180 дней']].map(([k, l]) => `<option value="${k}"${+q.days === k ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="check-chip sm log-sus-chip"><input type="checkbox" id="log-sus"${q.sus ? ' checked' : ''}><span>Только подозрительные${susN ? ` (${susN})` : ''}</span></label>
     </div>
-    ${days.length ? days.map(g => `<section class="card log-day"><h2>${g.t.getDate()} ${MONF[g.t.getMonth()]}${g.t.getFullYear() !== new Date().getFullYear() ? ' ' + g.t.getFullYear() : ''}</h2>
+    ${shown.length ? shown.map(g => `<section class="card log-day"><h2>${g.t.getDate()} ${MONF[g.t.getMonth()]}${g.t.getFullYear() !== new Date().getFullYear() ? ' ' + g.t.getFullYear() : ''}</h2>
       ${g.rows.map(r => { const u = people[r.user] || {}; const bad = r.over_limit || r.pages_seen > 150; const h = r.t.getHours();
-        return `<div class="log-row${bad ? ' bad' : ''}"><span class="lr-time">${pad(h)}:00–${pad((h + 1) % 24)}:00</span>
+        return `<div class="log-row${bad ? ' bad' : ''}${r.suspect ? ' sus' : ''}"><span class="lr-time">${pad(h)}:00–${pad((h + 1) % 24)}:00</span>
           <span class="lr-main"><b>${esc(u.name || u.email || 'Пользователь удалён')}</b> <span class="muted">${esc(u.email || '')}</span><br>${r.book ? `<a href="#/b/${r.book}">${esc(r.book_title)}</a>` : esc(r.book_title) + ' (удалена)'}</span>
           <span class="lr-num">${r.pages_seen || !r.listen_sec ? `${r.pages_seen} ${plural(r.pages_seen, ['стр.', 'стр.', 'стр.'])}<br>${fsize(r.bytes_sent || 0)}` : ''}${r.listen_sec ? `${r.pages_seen ? '<br>' : ''}слушал ${minText(r.listen_sec)}` : ''}${r.over_limit ? '<br><b>лимит</b>' : ''}</span>
-          ${r.listen_sec && (r.listen || []).length ? `<span class="lr-listen">${ICON.head}${(r.listen || []).map(x => `${esc(x.t)} (${minText(x.s)})`).join(', ')}</span>` : ''}</div>`; }).join('')}</section>`).join('') : '<p class="empty">За это время записей нет.</p>'}`;
+          ${r.suspect ? `<span class="lr-sus"><span class="tag sus">скачано больше, чем прочитано</span> ${esc(susText(r.suspect))}</span>` : ''}
+          ${r.listen_sec && (r.listen || []).length ? `<span class="lr-listen">${ICON.head}${(r.listen || []).map(x => `${esc(x.t)} (${minText(x.s)})`).join(', ')}</span>` : ''}</div>`; }).join('')}</section>`).join('') : `<p class="empty">${q.sus ? 'Подозрительных часов за это время нет.' : 'За это время записей нет.'}</p>`}`;
 };
+// Пояснение к подозрительному часу журнала (правки 4.8)
+function susText(x){
+  const f = FORMATS[x.format] || x.format;
+  if(x.view === 'epub') return `${f}: файл ${fsize(x.size)} отдан целиком ${x.copies} ${plural(x.copies, ['раз', 'раза', 'раз'])} за час.`;
+  const pages = `просмотрено ${x.seen} из ${x.pages || '?'} стр.`;
+  if(x.bytes >= x.size) return `${f}: файл ${fsize(x.size)} получен целиком (отдано ${fsize(x.bytes)}), ${pages}`;
+  return `${f}: отдано ${x.pct}% файла (${fsize(x.bytes)} из ${fsize(x.size)}), ${pages}`;
+}
 let logBusy = false;
 async function loadLog(){
   if(logBusy) return; logBusy = true;
@@ -3354,13 +3367,38 @@ function removeFormat(b){
   if(files.length < 2){ info('Это последний формат', 'Последний формат убрать нельзя. Чтобы убрать книгу совсем, выберите «Удалить книгу».'); return; }
   const ask = async f => {
     const m = await pb.send(`/api/knigi/book-files/${f.id}`, {});
-    thenOpen(() => openForm({title: `Убрать ${FORMATS[f.format]}?`, text: `Из книги «${b.title}» удалятся файл ${FORMATS[f.format]} и его текст, прогресс чтения в ${FORMATS[f.format]}${m.readers ? ` (у ${m.readers} ${plural(m.readers, ['человека','человек','человек'])})` : ''} и цитаты в этом формате у всех: ${m.highlights}. Заметки останутся. Вернуть можно только новой загрузкой файла.`,
-      submit: 'Убрать', danger: true, async onSave(){
-        await pb.send(`/api/knigi/book-files/${f.id}`, {method: 'DELETE'});
-        delete UI.cardFmt[b.id];
-        await loadAll(['books', 'bfiles', 'reading', 'notes']);
-        toast(`${FORMATS[f.format]} убран`);
-      }}));
+    const F = FORMATS[f.format];
+    const done = async () => {
+      await pb.send(`/api/knigi/book-files/${f.id}`, {method: 'DELETE', query: {confirm: m.highlights}});
+      delete UI.cardFmt[b.id];
+      await loadAll(['books', 'bfiles', 'reading', 'notes']);
+      toast(`${F} убран`);
+    };
+    const prog = m.readers ? ` Прогресс чтения в ${F} сбросится у ${m.readers} ${plural(m.readers, ['человека','человек','человек'])}.` : '';
+    // цитат нет: обычное окно
+    if(!m.highlights){
+      thenOpen(() => openForm({title: `Убрать ${F}?`, text: `Из книги «${b.title}» удалятся файл ${F} и его текст.${prog} Цитат в этом формате нет. Заметки останутся. Вернуть можно только новой загрузкой файла.`,
+        submit: 'Убрать', danger: true, onSave: done}));
+      dlg.close();
+      return;
+    }
+    // правки 4.8: цитаты и мысли читателей удаляются без возврата, поэтому отдельное окно с числами и подтверждением
+    const who = m.people.map(p => `<li><b>${esc(p.admin ? p.name + ' (вы)' : p.name)}</b>: ${p.highlights} ${plural(p.highlights, ['цитата', 'цитаты', 'цитат'])}${p.thoughts ? `, с мыслями ${p.thoughts}` : ''}</li>`).join('');
+    const nPeople = m.people.length;
+    thenOpen(() => {
+      openForm({title: `Удалятся цитаты в ${F}`, submit: `Удалить вместе с цитатами`, danger: true,
+        html: `<div class="rmf-box">
+          <p class="rmf-sum"><b>${m.highlights} ${plural(m.highlights, ['цитата', 'цитаты', 'цитат'])}</b>, из них с мыслями <b>${m.thoughts}</b>, у ${nPeople} ${plural(nPeople, ['человека', 'человек', 'человек'])}:</p>
+          <ul class="rmf-who">${who}</ul>
+          <p class="dlg-text">Вместе с форматом ${F} из книги «${esc(b.title)}» удалятся файл и его текст и все эти цитаты с мыслями, без возврата.${prog} Заметки останутся, но без привязки к ${F}.</p>
+          <label class="check-chip rmf-ok"><input type="checkbox" id="rmf-ok"><span>Понимаю, что цитаты и мысли удалятся</span></label></div>`,
+        onChange(el){ if(el.id === 'rmf-ok') $('#dlg-ok').disabled = !el.checked; },
+        async onSave(){
+          if(!$('#rmf-ok').checked) throw {message: 'Отметьте, что понимаете: цитаты удалятся.'};
+          await done();
+        }});
+      $('#dlg-ok').disabled = true;
+    });
     dlg.close();
   };
   openForm({title: 'Убрать формат', text: 'Какой формат убрать из книги?', noSubmit: true,
@@ -3958,7 +3996,7 @@ async function audioDiag(tid){
   const sec = x => (x / 1000).toFixed(1).replace('.', ',') + ' с';
   const state = mine ? `<p class="hint">Сейчас: ${durShort(el.currentTime)} из ${isFinite(el.duration) ? durShort(el.duration) : '?'}, ${el.paused ? 'пауза' : 'играет'}, данные: ${RS[el.readyState] || el.readyState}, сеть: ${NS[el.networkState] || el.networkState}${apBuf(el) ? ', загружено ' + apBuf(el) : ''}${el.error ? ', ошибка ' + el.error.code : ''}. Формат: ${esc((t && t.format) || '')}, ${t && t.size ? fsize(t.size) : ''}.</p>` : '<p class="hint">Эта глава сейчас не играет: нажмите «Играть», подождите и откройте сведения снова.</p>';
   const evs = mine && AP.log.length ? `<ol class="diag-list">${AP.log.map(x => `<li><b>${sec(x.t)}</b> ${esc(x.ev)}${x.n ? ' ×' + x.n : ''} · ${durShort(x.ct)} · ${RS[x.rs] || x.rs}${x.buf ? ' · загружено ' + esc(x.buf) : ''}${x.err ? ' · ошибка ' + esc(x.err) : ''}</li>`).join('')}</ol>` : '<p class="hint">Событий пока нет.</p>';
-  const req = rows.length ? `<ol class="diag-list">${rows.map(r => `<li><b>${esc(new Date(r.at).toLocaleTimeString('ru-RU'))}</b> ${esc(r.dev)} · ${esc(r.method)} ${esc(r.range || 'весь файл')}${r.note ? ' · ' + esc(r.note) : ''}<br><small>${esc(r.ua)}</small></li>`).join('')}</ol>` : '<p class="hint">Запросов этой главы сервер пока не видел.</p>';
+  const req = rows.length ? `<ol class="diag-list">${rows.map(r => `<li><b>${esc(new Date(r.at).toLocaleTimeString('ru-RU'))}</b> ${esc(r.dev)} · ${esc(r.method)} ${esc(r.range || 'весь файл')}${r.note ? ' · ' + esc(r.note) : ''}<br><small>${r.dest || r.mode ? `Sec-Fetch: ${esc(r.dest || '-')}, ${esc(r.mode || '-')} · ` : ''}${esc(r.ua)}</small></li>`).join('')}</ol>` : '<p class="hint">Запросов этой главы сервер пока не видел.</p>';
   openForm({title: 'Сведения о воспроизведении', noSubmit: true,
     html: `<p><b>${esc(t ? t.title : '')}</b></p>${state}<h3 class="sub-h">События плеера с момента нажатия</h3>${evs}<h3 class="sub-h">Запросы файла к серверу (новые сверху)</h3>${req}
       <p class="hint">Пришлите снимок этого окна, если звук долго не начинается.</p>`});
@@ -4002,7 +4040,7 @@ function audioBookForm(){
 // Текстовый слой есть у всех (READER_TEXT_LAYER), у читателей копирование, контекстное меню и перетаскивание выключены.
 // Выделения рисуются отдельным слоем под текстовым (.hl-layer), подпись остаётся на холсте.
 const READER = {mode: ''}; // 'pdf' или 'epub': какая читалка сейчас на экране
-const RD = {open: false, key: '', fmt: 'pdf', src: null, doc: null, lib: null, link: null, linkAt: 0, mark: '', title: '', page: 1, pages: 0, zoom: 1,
+const RD = {open: false, key: '', fmt: 'pdf', src: null, doc: null, lib: null, link: null, linkAt: 0, linkP: null, mark: '', title: '', page: 1, pages: 0, zoom: 1,
   cache: new Map(), seq: 0, seen: new Set(), saveT: 0, pending: [], pause: 0, bars: true, outline: null, back: '#/',
   hls: [], marker: false, mk: null, flash: '', group: null, ghls: [], focusO: ''};
 const rdText = () => isAdmin() || READER_TEXT_LAYER;
@@ -4013,12 +4051,17 @@ function loadPdfjs(){
   if(!pdfjsLoad) pdfjsLoad = import('/vendor/pdfjs/pdf.min.mjs').then(lib => { lib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs'; return lib; }).catch(e => { pdfjsLoad = null; throw e; });
   return pdfjsLoad;
 }
+// Ссылка на файл живёт 15 минут у книги и 2 часа у урока (правки 4.8): читалка берёт новую заранее, когда прошла
+// половина срока, и сразу, если сервер ответил 401. Одновременные куски ждут один общий запрос новой ссылки.
 async function rdGetLink(force){
-  if(!force && RD.link && Date.now() - RD.linkAt < (RD.link.ttl - 600) * 1000) return RD.link;
-  const s = RD.src;
-  RD.link = await pb.send(s.kind === 'book' ? `/api/knigi/books/${s.id}/link?f=${RD.fmt}` : `/api/knigi/files/${s.id}/link`, {});
-  RD.linkAt = Date.now();
-  return RD.link;
+  const ttl = RD.link ? +RD.link.ttl || 0 : 0;
+  if(!force && RD.link && Date.now() - RD.linkAt < Math.max(ttl * 0.5, ttl - 600) * 1000) return RD.link;
+  if(RD.linkP) return RD.linkP;
+  const s = RD.src, fmt = RD.fmt;
+  RD.linkP = pb.send(s.kind === 'book' ? `/api/knigi/books/${s.id}/link?f=${fmt}` : `/api/knigi/files/${s.id}/link`, {})
+    .then(l => { if(RD.src === s && RD.fmt === fmt){ RD.link = l; RD.linkAt = Date.now(); } return l; })
+    .finally(() => { RD.linkP = null; });
+  return RD.linkP;
 }
 class RangeError429 extends Error {}
 async function rdFetch(begin, end, attempt){
@@ -4207,7 +4250,7 @@ function rdDispose(){
   clearTimeout(RD.saveT); clearTimeout(RD.pauseT);
   if(RD.doc) RD.doc.destroy().catch(() => {});
   else if(RD.task) RD.task.destroy().catch(() => {});
-  RD.doc = null; RD.task = null; RD.transport = null; RD.cache.clear(); RD.key = ''; RD.link = null; RD.outline = null; RD.pause = 0; RD.pending = []; RD.hls = []; RD.ghls = []; RD.mk = null;
+  RD.doc = null; RD.task = null; RD.transport = null; RD.cache.clear(); RD.key = ''; RD.link = null; RD.linkP = null; RD.outline = null; RD.pause = 0; RD.pending = []; RD.hls = []; RD.ghls = []; RD.mk = null;
 }
 function rdClose(){
   askHide();
@@ -5897,6 +5940,7 @@ document.addEventListener('change', e => {
   if(t.id === 'hl-thought'){ UI.hlThought = t.checked; render(true); return; }
   if(t.dataset && t.dataset.shelf){ const set = UI.revShelves[t.dataset.book] || (UI.revShelves[t.dataset.book] = new Set()); t.checked ? set.add(t.dataset.shelf) : set.delete(t.dataset.shelf); return; }
   if(t.id === 'log-user' || t.id === 'log-book' || t.id === 'log-days'){ UI.logQ[t.id.slice(4)] = t.value; UI.log = null; render(true); return; }
+  if(t.id === 'log-sus'){ UI.logQ.sus = t.checked; render(true); return; }
   if(t.id === 'note-files'){ const files = [...t.files]; t.value = ''; if(files.length) addUploads(files, 'file', t.dataset.note); return; }
 });
 document.addEventListener('input', e => {

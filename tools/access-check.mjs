@@ -5,9 +5,18 @@
 //
 // Пользователи: администратор, Анна (читатель, у неё с книгой есть цитата, заметка, «Читаю», прогресс,
 // личная полка), Борис (читатель без связей с книгой, участник группы), Вера (по приглашению на 1 месяц).
+// Часть В (правки 4.8): выдача файлов (If-Range, открытие как страницы, ссылка на 15 минут, журнал, «Убрать формат»).
+// Режим restart (tools/access-check.sh запускает его после перезапуска сервера с MAX_MB_PER_HOUR=8):
+// счётчик ограничения скорости пережил перезапуск. Настройка KN_DATA (папка pb_data) нужна для просроченной ссылки.
 import { setTimeout as sleep } from "node:timers/promises";
+import { readFileSync } from "node:fs";
+import { createHmac } from "node:crypto";
+import { join } from "node:path";
+import http from "node:http";
 
 const BASE = (process.env.KN_BASE || "http://127.0.0.1:8093").replace(/\/+$/, "");
+const DATA = process.env.KN_DATA || "";
+const GLEB = { email: "gleb@example.com", password: "proverka-gleb-12345", name: "Глеб" };
 const ADMIN = { email: "admin@example.com", password: "proverka-admin-12345", name: "Григорий" };
 const ANNA = { email: "anna@example.com", password: "proverka-anna-12345", name: "Анна" };
 const BORIS = { email: "boris@example.com", password: "proverka-boris-12345", name: "Борис" };
@@ -485,6 +494,261 @@ async function partB(T) {
   ok(ul.no_mark === false && ul.log[0].action === "mark_on", "в истории «Подпись включена»");
 }
 
+
+/* ---------- Часть В: выдача файлов (правки 4.8) ---------- */
+// Запрос без добавок: fetch в Node сам ставит Sec-Fetch-Mode, поэтому файлы спрашиваем модулем http
+function raw(path, headers = {}, max = 64 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(BASE + path);
+    const r = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: "GET", headers }, (res) => {
+      const parts = []; let n = 0;
+      res.on("data", (c) => { n += c.length; if (n <= max) parts.push(c); else res.destroy(); });
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, len: n, body: Buffer.concat(parts) }));
+      res.on("close", () => resolve({ status: res.statusCode, headers: res.headers, len: n, body: Buffer.concat(parts) }));
+    });
+    r.on("error", reject); r.end();
+  });
+}
+const cookieOf = (r) => (r.headers.get("set-cookie") || "").split(";")[0];
+const jwtBody = (url) => JSON.parse(Buffer.from(new URL(BASE + url).searchParams.get("t").split(".")[1], "base64url"));
+function expiredUrl(kind, id, userId) {
+  const key = readFileSync(join(DATA, "files.key"), "utf8");
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const head = b64({ alg: "HS256", typ: "JWT" }), body = b64({ k: kind, i: id, u: userId, exp: Math.floor(Date.now() / 1000) - 60 });
+  return `/api/knigi/f/${kind}/${id}?t=${head}.${body}.${createHmac("sha256", key).update(head + "." + body).digest("base64url")}`;
+}
+// PDF около 6,3 МБ: 5 страниц, на первой картинка из случайных байт (qpdf её не сжимает)
+function makeBigPdf() {
+  const W = 2500, H = 2500;
+  const img = Buffer.alloc(W * H); for (let i = 0; i < img.length; i++) img[i] = (i * 2654435761 >>> 13) & 255;
+  const parts = [], offs = [];
+  let size = 0;
+  const push = (b) => { parts.push(b); size += b.length; };
+  const obj = (n, head, stream) => { offs[n] = size; push(Buffer.from(`${n} 0 obj\n${head}\n`, "latin1")); if (stream) { push(Buffer.from("stream\n", "latin1")); push(stream); push(Buffer.from("\nendstream\n", "latin1")); } push(Buffer.from("endobj\n", "latin1")); };
+  push(Buffer.from("%PDF-1.4\n", "latin1"));
+  obj(1, "<< /Type /Catalog /Pages 2 0 R >>");
+  const kids = [5, 7, 9, 11, 13];
+  obj(2, `<< /Type /Pages /Kids [${kids.map((k) => k + " 0 R").join(" ")}] /Count 5 >>`);
+  obj(3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  obj(4, `<< /Type /XObject /Subtype /Image /Width ${W} /Height ${H} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length ${img.length} >>`, img);
+  kids.forEach((k, i) => {
+    const c = Buffer.from(`BT /F1 14 Tf 72 720 Td (Big book page ${i + 1}) Tj ET` + (i === 0 ? " q 400 0 0 400 100 200 cm /Im1 Do Q" : ""), "latin1");
+    obj(k, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> /XObject << /Im1 4 0 R >> >> /Contents ${k + 1} 0 R >>`);
+    obj(k + 1, `<< /Length ${c.length} >>`, c);
+  });
+  const xref = size;
+  let t = `xref\n0 15\n0000000000 65535 f \n`;
+  for (let n = 1; n <= 14; n++) t += String(offs[n]).padStart(10, "0") + " 00000 n \n";
+  t += `trailer\n<< /Size 15 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  push(Buffer.from(t, "latin1"));
+  return Buffer.concat(parts);
+}
+function makeMp3(seconds) { // кадры MPEG-1 Layer III с тишиной, 128 кбит/с, 44,1 кГц
+  const len = Math.floor(144 * 128000 / 44100), n = Math.ceil(seconds * 44100 / 1152);
+  const frame = Buffer.alloc(len); frame[0] = 0xff; frame[1] = 0xfb; frame[2] = 9 << 4; frame[3] = 0xc0;
+  return Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, 0]), ...Array(n).fill(frame)]);
+}
+async function uploadParts(token, json, buf) {
+  let r = await req("POST", "/api/knigi/upload/start", { token, json: { size: buf.length, ...json } });
+  if (r.status !== 200) return { error: r };
+  const up = r.data.upload;
+  for (let i = 0; i < r.data.chunks; i++) {
+    const fd = new FormData(); fd.append("chunk", new Blob([buf.subarray(i * r.data.chunk, (i + 1) * r.data.chunk)]), "chunk");
+    const c = await fetch(`${BASE}/api/knigi/upload/${up}/${i}`, { method: "POST", headers: { Authorization: token }, body: fd });
+    if (c.status !== 200) return { error: { status: c.status, text: await c.text() } };
+  }
+  r = await req("POST", `/api/knigi/upload/${up}/finish`, { token, json: {} });
+  await req("POST", "/api/knigi/process", { token, json: {} });
+  return r.status === 200 ? r.data : { error: r };
+}
+async function bookLink(token, bookId, fmt) {
+  const l = await req("GET", `/api/knigi/books/${bookId}/link?f=${fmt}`, { token });
+  return { status: l.status, data: l.data, cookie: cookieOf(l), text: l.text };
+}
+// Как читалка PDF: куски по 512 КБ (большие запросы по 2 МБ), Sec-Fetch-Dest: empty
+async function readAll(link, step) {
+  let got = 0, last = 0;
+  for (let s = 0; s < link.data.size; s += step) {
+    const r = await raw(link.data.url, { Cookie: link.cookie, Range: `bytes=${s}-${Math.min(link.data.size, s + step) - 1}`, "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors" });
+    last = r.status; if (r.status !== 206) break; got += r.len;
+  }
+  return { got, last };
+}
+const logRows = async (admin, bookId, userId) => ((await req("GET", `/api/knigi/admin/log?days=1&book=${bookId}&user=${userId}`, { token: admin })).data || { rows: [] }).rows;
+
+async function partC(T) {
+  const { admin, anna, boris } = T;
+  const annaId = uid(anna);
+  section("В0. Книги для проверки: большой PDF (6 МБ), EPUB, урок с PDF, глава аудио");
+  const big = makeBigPdf();
+  const up1 = await uploadParts(admin, { name: "Проверкин - Большая книга.pdf", kind: "book" }, big);
+  ok(up1.id, "большой PDF загружен", up1.error);
+  const B = await waitReady(admin, up1.id);
+  await setVis(admin, B.id, false);
+  const up2 = await uploadParts(admin, { name: "Проверкин - Большая книга.epub", kind: "book", book: B.id }, makeEpub("Большая книга"));
+  ok(up2.id === B.id, "к книге добавлен EPUB", up2.error);
+  await waitReady(admin, B.id);
+  const files = ((await req("GET", `/api/collections/book_files/records?${flt(`book = '${B.id}'`)}`, { token: admin })).data || { items: [] }).items;
+  const pdfF = files.find((f) => f.format === "pdf"), epF = files.find((f) => f.format === "epub");
+  ok(pdfF && pdfF.file_size > 5 * 1024 * 1024 && epF && epF.status === "ready", "у книги PDF больше 5 МБ и EPUB", files.map((f) => [f.format, f.file_size, f.status]));
+  const lesson = await req("POST", "/api/collections/notes/records", { token: admin, json: { owner: uid(admin), kind: "lesson", book: B.id, title: "Урок с PDF", body: "<p>урок</p>", shared: true } });
+  const up3 = await uploadParts(admin, { name: "урок.pdf", kind: "file", note: lesson.data.id }, big);
+  const nf = ((await req("GET", `/api/collections/note_files/records?${flt(`note = '${lesson.data.id}'`)}`, { token: admin })).data || { items: [] }).items[0];
+  ok(nf && nf.ext === "pdf", "к общему уроку загружен PDF", up3.error || nf);
+  const au = await uploadParts(admin, { name: "глава.mp3", kind: "audio", book: B.id, title: "Глава 1" }, makeMp3(30));
+  const trackId = au.track;
+  await req("POST", `/api/knigi/audio/${trackId}`, { token: admin, json: { published: true } });
+  ok(!!trackId, "глава аудио загружена и опубликована", au.error);
+
+  section("В1. If-Range больше не отдаёт весь файл; кусок не больше 4 МБ");
+  let L = await bookLink(anna, B.id, "pdf");
+  const size = L.data.size;
+  let r = await raw(L.data.url, { Cookie: L.cookie, Range: "bytes=0-1", "If-Range": '"x"' });
+  ok(r.status === 206 && r.len === 2, "Range 0-1 и If-Range с чужой меткой: 2 байта (раньше весь файл)", [r.status, r.len, size]);
+  r = await raw(L.data.url, { Cookie: L.cookie, Range: "bytes=0-1", "If-Range": "Mon, 01 Jan 2001 00:00:00 GMT" });
+  ok(r.status === 206 && r.len === 2, "If-Range датой: 2 байта", [r.status, r.len]);
+  r = await raw(L.data.url, { Cookie: L.cookie, Range: "bytes=100-199", "If-None-Match": "*", "If-Modified-Since": new Date(Date.now() + 864e5).toUTCString(), "If-Match": '"y"', "If-Unmodified-Since": "Mon, 01 Jan 2001 00:00:00 GMT" });
+  ok(r.status === 206 && r.len === 100 && r.headers["content-range"] === `bytes 100-199/${size}`, "любые условные заголовки: ровно запрошенный кусок", [r.status, r.len, r.headers["content-range"]]);
+  r = await raw(L.data.url, { Cookie: L.cookie, Range: `bytes=0-${4 * 1024 * 1024}` });
+  ok(r.status === 400, "кусок больше 4 МБ: 400", r.status);
+  r = await raw(L.data.url, { Cookie: L.cookie, Range: "bytes=0-1,5-9" });
+  ok(r.status === 400, "несколько кусков в одном запросе: 400", r.status);
+  r = await raw(L.data.url, { Cookie: L.cookie, Range: `bytes=-${3 * 1024 * 1024}`, "If-Range": '"x"' });
+  ok(r.status === 206 && r.len === 3 * 1024 * 1024, "хвост файла 3 МБ с If-Range: ровно 3 МБ", [r.status, r.len]);
+  r = await raw(L.data.url, { Cookie: L.cookie });
+  ok(r.status === 400, "PDF без Range по-прежнему 400", r.status);
+  const E = await bookLink(anna, B.id, "epub");
+  r = await raw(E.data.url, { Cookie: E.cookie, "If-Range": '"x"', "If-None-Match": "*" });
+  ok(r.status === 200 && r.len === E.data.size, "EPUB целиком для читалки (с условными заголовками тоже)", [r.status, r.len, E.data.size]);
+  r = await raw(E.data.url, { Cookie: E.cookie, Range: "bytes=0-9", "If-Range": '"x"' });
+  ok(r.status === 206 && r.len === 10, "EPUB кусок с If-Range: 10 байт", [r.status, r.len]);
+  const FL = await req("GET", `/api/knigi/files/${nf.id}/link`, { token: anna });
+  const fck = cookieOf(FL);
+  ok(FL.status === 200 && FL.data.ttl === 7200, "ссылка на PDF урока по-прежнему на 2 часа", FL.text);
+  r = await raw(FL.data.url, { Cookie: fck, Range: "bytes=0-1", "If-Range": '"x"' });
+  ok(r.status === 206 && r.len === 2, "PDF урока: If-Range даёт 2 байта", [r.status, r.len]);
+
+  section("В2. Файл не открывается как страница; читалки и плеер работают");
+  L = await bookLink(anna, B.id, "pdf");
+  for (const [h, what] of [[{ "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate" }, "адрес во вкладке"], [{ "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "empty" }, "«Сохранить ссылку как» (navigate)"], [{ "Sec-Fetch-Dest": "iframe" }, "рамка на странице"], [{ "Sec-Fetch-Dest": "embed" }, "embed"], [{ "Sec-Fetch-Dest": "object" }, "object"]]) {
+    r = await raw(L.data.url, { Cookie: L.cookie, Range: "bytes=0-1023", ...h });
+    ok(r.status === 403 && /только в читалке/.test(r.body.toString()), `PDF: ${what} → 403`, [r.status, r.body.toString().slice(0, 100)]);
+  }
+  r = await raw(L.data.url, { Cookie: L.cookie, Range: "bytes=0-1023", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin" });
+  ok(r.status === 206 && r.len === 1024, "PDF как читалка (Sec-Fetch-Dest: empty, cors): 206", [r.status, r.len]);
+  r = await raw(L.data.url, { Cookie: L.cookie, Range: "bytes=0-1023" });
+  ok(r.status === 206, "PDF без заголовков Sec-Fetch (старый браузер): 206", r.status);
+  E.data && (r = await raw(E.data.url, { Cookie: E.cookie, "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate" }));
+  ok(r.status === 403, "EPUB: адрес во вкладке → 403 (раньше браузер скачивал файл)", r.status);
+  r = await raw(E.data.url, { Cookie: E.cookie, "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors" });
+  ok(r.status === 200 && r.len === E.data.size, "EPUB как читалка: целиком", [r.status, r.len]);
+  r = await raw(FL.data.url, { Cookie: fck, Range: "bytes=0-1", "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate" });
+  ok(r.status === 403, "PDF урока во вкладке → 403", r.status);
+  const AFL = await req("GET", `/api/knigi/files/${nf.id}/link`, { token: admin });
+  r = await raw(AFL.data.url + "&dl=1", { Cookie: cookieOf(AFL), "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate" }, 1024);
+  ok(r.status === 200 && /attachment/.test(r.headers["content-disposition"] || ""), "скачивание своего урока администратором (dl=1) работает", [r.status, r.headers["content-disposition"]]);
+  const AL = await req("GET", `/api/knigi/audio/${trackId}/link`, { token: anna });
+  const ack = cookieOf(AL);
+  ok(AL.status === 200 && AL.data.ttl === 7200 && jwtBody(AL.data.url).exp - Date.now() / 1000 > 7100, "ссылка на аудио по-прежнему на 2 часа", AL.data);
+  r = await raw(AL.data.url, { Cookie: ack, Range: "bytes=0-", "Sec-Fetch-Dest": "audio", "Sec-Fetch-Mode": "no-cors" });
+  ok(r.status === 206 && r.len > 1000, "аудио тегом audio (Sec-Fetch-Dest: audio): 206", [r.status, r.len]);
+  r = await raw(AL.data.url, { Cookie: ack, Range: "bytes=0-1", "User-Agent": "AppleCoreMedia/1.0.0.21A (iPhone; U; CPU OS 17_0 like Mac OS X)" });
+  ok(r.status === 206 && r.len === 2, "плеер iPhone без заголовков Sec-Fetch: 206", [r.status, r.len]);
+  r = await raw(AL.data.url, { Cookie: ack, Range: "bytes=0-1", "If-Range": '"x"' }, 1 << 20);
+  ok(r.status === 200, "аудио: If-Range не трогали (весь файл, как раньше; ограничения у аудио нет)", r.status);
+  r = await raw(AL.data.url, { Cookie: ack, "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate" });
+  ok(r.status === 403 && /плеере приложения/.test(r.body.toString()), "аудио: адрес во вкладке → 403", [r.status, r.body.toString().slice(0, 100)]);
+  r = await raw(AL.data.url, { Cookie: ack, "Sec-Fetch-Dest": "video", "Sec-Fetch-Mode": "no-cors" });
+  ok(r.status === 200, "аудио тегом video (Sec-Fetch-Dest: video): 200", r.status);
+  const alog = (await req("GET", `/api/knigi/admin/audio-log?track=${trackId}`, { token: admin })).data.rows;
+  ok(alog.some((x) => x.dest === "document" && /отказ/.test(x.note)) && alog.some((x) => x.dest === "audio" && !x.note), "в «Сведениях о воспроизведении» видны Sec-Fetch и отказ", alog.slice(0, 3));
+
+  section("В3. Ссылка на книгу живёт 15 минут");
+  L = await bookLink(anna, B.id, "pdf");
+  const jb = jwtBody(L.data.url);
+  ok(L.data.ttl === 900 && Math.abs(jb.exp - Date.now() / 1000 - 900) < 30, "ttl 900 и срок в ключе 15 минут", [L.data.ttl, jb.exp - Math.round(Date.now() / 1000)]);
+  if (DATA) {
+    r = await raw(expiredUrl("book", pdfF.id, annaId), { Cookie: L.cookie, Range: "bytes=0-1" });
+    ok(r.status === 401 && /устарела/.test(r.body.toString()), "ссылка, чей срок прошёл: 401 «Ссылка устарела»", [r.status, r.body.toString().slice(0, 100)]);
+    const L2 = await bookLink(anna, B.id, "pdf");
+    r = await raw(L2.data.url, { Cookie: L2.cookie, Range: "bytes=0-1" });
+    ok(L2.status === 200 && r.status === 206, "новая ссылка сразу работает (так читалка продолжает сама)", [L2.status, r.status]);
+  } else console.log("  (просроченная ссылка не проверена: нет KN_DATA)");
+
+  section("В4. Журнал: «скачано больше, чем прочитано»");
+  // Анна забирает весь PDF кусками по 4 МБ, страниц не открывает
+  let rd = await readAll(await bookLink(anna, B.id, "pdf"), 4 * 1024 * 1024);
+  ok(rd.got >= pdfF.file_size, "Анна получила весь PDF кусками по 4 МБ", rd);
+  // Борис читает весь PDF как читалка и открывает все 5 страниц
+  rd = await readAll(await bookLink(boris, B.id, "pdf"), 2 * 1024 * 1024);
+  await progress(boris, B.id, { format: "pdf", page: 5, pages: 5, seen: [1, 2, 3, 4, 5] });
+  // EPUB: Анна 3 раза целиком, Борис 1 раз
+  for (let i = 0; i < 3; i++) { const e3 = await bookLink(anna, B.id, "epub"); await raw(e3.data.url, { Cookie: e3.cookie }); }
+  { const e1 = await bookLink(boris, B.id, "epub"); await raw(e1.data.url, { Cookie: e1.cookie }); }
+  const ra = await logRows(admin, B.id, annaId), rb = await logRows(admin, B.id, uid(boris));
+  const sa = ra.find((x) => x.suspect);
+  ok(sa && sa.suspect.view === "pdf" && sa.suspect.pct >= 100 && sa.suspect.seen === 0 && sa.suspect.pages === 5, "у Анны час выделен: PDF 100%, просмотрено 0 из 5", ra.map((x) => x.suspect));
+  ok(rb.length && rb.every((x) => !x.suspect), "у Бориса (прочитал все страницы, EPUB открыл раз) выделения нет", rb.map((x) => [x.pages_seen, x.bytes_sent, x.suspect]));
+  const ex = ra.find((x) => x.suspect);
+  ok(ex && ex.bytes_sent > pdfF.file_size + 2 * epF.file_size, "в той же строке учтены и байты EPUB", ex && ex.bytes_sent);
+  // только EPUB 3 раза: отдельная книга
+  const up4 = await uploadParts(admin, { name: "Проверкин - Только EPUB.epub", kind: "book" }, makeEpub("Только EPUB"));
+  await waitReady(admin, up4.id); await setVis(admin, up4.id, false);
+  for (let i = 0; i < 3; i++) { const e3 = await bookLink(anna, up4.id, "epub"); await raw(e3.data.url, { Cookie: e3.cookie }); }
+  const re = await logRows(admin, up4.id, annaId);
+  ok(re[0] && re[0].suspect && re[0].suspect.view === "epub" && re[0].suspect.copies === 3, "EPUB, отданный целиком 3 раза за час: выделен", re.map((x) => x.suspect));
+  const e2 = await bookLink(boris, up4.id, "epub"); await raw(e2.data.url, { Cookie: e2.cookie }); await raw(e2.data.url, { Cookie: e2.cookie });
+  ok((await logRows(admin, up4.id, uid(boris))).every((x) => !x.suspect), "EPUB 2 раза: не выделен");
+  ok((await req("GET", "/api/knigi/admin/log?days=1", { token: anna })).status === 403, "журнал читателю закрыт");
+  ok((await req("GET", "/api/collections/rate_use/records", { token: anna })).status === 403 && (await req("GET", "/api/collections/rate_use/records", { token: admin })).status === 403, "счётчик скорости через API не читается никем");
+
+  section("В5. «Убрать формат»: числа в окне и подтверждение");
+  const hl = (t, fmt, body, n) => req("POST", "/api/collections/notes/records", { token: t, json: { owner: uid(t), kind: "highlight", book: B.id, format: fmt, quote: "цитата " + n, color: "yellow", body: body ? `<p>${body}</p>` : "", page: fmt === "pdf" ? 1 : 0, anchor: fmt === "epub" ? { v: 1, cfi: "epubcfi(/6/2!/4/2/1:0)", pct: 0, chapter: "Глава" } : { v: 1, rects: [[0.1, 0.1, 0.2, 0.02]], s: 0, e: 5 } } });
+  const made = [await hl(anna, "epub", "мысль Анны", 1), await hl(anna, "epub", "", 2), await hl(boris, "epub", "мысль Бориса", 3), await hl(admin, "epub", "", 4), await hl(anna, "pdf", "", 5)];
+  ok(made.every((x) => x.status === 200), "цитаты созданы: Анна 2 в EPUB (одна с мыслью), Борис 1 с мыслью, администратор 1, Анна 1 в PDF", made.filter((x) => x.status !== 200).map((x) => x.text));
+  const note = await req("POST", "/api/collections/notes/records", { token: anna, json: { owner: annaId, kind: "note", book: B.id, format: "epub", title: "Заметка Анны", body: "<p>текст</p>" } });
+  const info = (await req("GET", `/api/knigi/book-files/${epF.id}`, { token: admin })).data;
+  ok(info.highlights === 4 && info.thoughts === 2 && info.people.length === 3, "в окне: 4 цитаты, 2 с мыслями, у 3 человек", info);
+  const pa = info.people.find((p) => p.id === annaId);
+  ok(pa && pa.highlights === 2 && pa.thoughts === 1 && pa.name === "Анна" && info.people.some((p) => p.admin && p.highlights === 1), "по людям: Анна 2 (мысль 1), администратор отмечен", info.people);
+  ok((await req("GET", `/api/knigi/book-files/${epF.id}`, { token: anna })).status === 403, "читатель эти числа не получает");
+  r = await req("DELETE", `/api/knigi/book-files/${epF.id}`, { token: admin });
+  ok(r.status === 409, "без подтверждения формат не убирается (409)", r.text);
+  await hl(boris, "epub", "", 6);
+  r = await req("DELETE", `/api/knigi/book-files/${epF.id}?confirm=4`, { token: admin });
+  ok(r.status === 409 && /сейчас 5/.test(r.text), "пока окно было открыто, появилась ещё цитата: 409 с новым числом", r.text);
+  r = await req("DELETE", `/api/knigi/book-files/${epF.id}?confirm=5`, { token: admin });
+  ok(r.status === 200, "с верным числом формат убран", r.text);
+  const leftA = await listIds(anna, "notes", `book = '${B.id}' && kind = 'highlight'`), leftB = await listIds(boris, "notes", `book = '${B.id}' && kind = 'highlight'`);
+  ok(leftA.length === 1 && leftA[0] === made[4].data.id && leftB.length === 0, "у Анны осталась только цитата в PDF, у Бориса ничего", [leftA, leftB]);
+  const nn = await req("GET", `/api/collections/notes/records/${note.data.id}`, { token: anna });
+  ok(nn.status === 200 && nn.data.format === "", "заметка Анны осталась без привязки к EPUB", nn.data);
+  // формат без цитат: подтверждение не нужно
+  const up5 = await uploadParts(admin, { name: "Проверкин - Большая книга.epub", kind: "book", book: B.id }, makeEpub("Большая книга"));
+  await waitReady(admin, B.id);
+  const ep2 = ((await req("GET", `/api/collections/book_files/records?${flt(`book = '${B.id}' && format = 'epub'`)}`, { token: admin })).data || { items: [] }).items[0];
+  const i2 = (await req("GET", `/api/knigi/book-files/${ep2.id}`, { token: admin })).data;
+  ok(up5.id && i2.highlights === 0 && i2.people.length === 0, "новый EPUB без цитат: в окне 0", i2);
+  r = await req("DELETE", `/api/knigi/book-files/${ep2.id}`, { token: admin });
+  ok(r.status === 200, "формат без цитат убирается без числа (обычное окно)", r.text);
+  return { bookId: B.id };
+}
+
+/* ---------- После перезапуска сервера: счётчик скорости сохранился ---------- */
+async function afterRestart(T) {
+  const { admin, anna } = T;
+  section("В6. Счётчик ограничения пережил перезапуск (сервер запущен заново с MAX_MB_PER_HOUR=8)");
+  const books = ((await req("GET", `/api/collections/books/records?${flt("title = 'Большая книга'")}`, { token: admin })).data || { items: [] }).items;
+  ok(books.length === 1, "книга из части В на месте", books.length);
+  const gleb = await register(admin, GLEB);
+  let L = await bookLink(gleb, books[0].id, "pdf");
+  let r = await raw(L.data.url, { Cookie: L.cookie, Range: `bytes=0-${4 * 1024 * 1024 - 1}` });
+  ok(r.status === 206 && r.len === 4 * 1024 * 1024, "новый читатель Глеб получает 4 МБ", [r.status, r.len]);
+  L = await bookLink(anna, books[0].id, "pdf");
+  r = await raw(L.data.url, { Cookie: L.cookie, Range: `bytes=0-${4 * 1024 * 1024 - 1}` });
+  ok(r.status === 429 && /паузу/.test(r.body.toString()), "Анна, получившая до перезапуска больше 6 МБ, сразу упирается в ограничение (429)", [r.status, r.body.toString().slice(0, 120)]);
+}
+
 /* ---------- Запуск ---------- */
 async function main() {
   const s = await req("GET", "/api/knigi/setup");
@@ -495,8 +759,12 @@ async function main() {
   const boris = await register(admin, BORIS);
   const T = { admin, anna, boris };
   const only = process.argv[2] || "";
-  if (!only || only === "a") await partA(T);
-  if ((!only || only === "b") && typeof partB === "function") await partB(T);
+  if (only === "restart") await afterRestart(T);
+  else {
+    if (!only || only === "a") await partA(T);
+    if ((!only || only === "b") && typeof partB === "function") await partB(T);
+    if (!only || only === "c") await partC(T);
+  }
   console.log(`\nПроверок: ${oks + fails}, прошло ${oks}, ошибок ${fails}.`);
   process.exit(fails ? 1 : 0);
 }

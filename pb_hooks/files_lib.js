@@ -83,7 +83,9 @@ function fileKey() {
   $os.writeFile(path, key, 0o600);
   return key;
 }
-const LINK_TTL = 2 * 3600;      // сколько живёт ссылка на файл книги или урока
+const LINK_TTL = 2 * 3600;      // сколько живёт ссылка на файл урока, главу аудио и снимок экрана
+const BOOK_LINK_TTL = 15 * 60;  // ссылка на файл книги (правки 4.8): читалка сама берёт новую, когда старая устарела
+const linkTtl = (kind) => (kind === "book" ? BOOK_LINK_TTL : LINK_TTL);
 const COOKIE_TTL = 12 * 3600;   // кука вошедшего человека, обновляется при каждой новой ссылке
 const COOKIE = "kn_s";
 const COOKIE_PATH = "/api/knigi/f";
@@ -123,7 +125,7 @@ function cookieUser(e) {
 // Ссылка: kind = "book" или "file", id записи. Ключ в адресе и кука должны принадлежать одному человеку.
 function makeLink(e, kind, id, userId) {
   setCookie(e, userId);
-  const t = $security.createJWT({ k: kind, i: id, u: userId }, fileKey(), LINK_TTL);
+  const t = $security.createJWT({ k: kind, i: id, u: userId }, fileKey(), linkTtl(kind));
   return `${COOKIE_PATH}/${kind}/${id}?t=${t}`;
 }
 function linkUser(e, kind, id) {
@@ -168,6 +170,31 @@ function parseRange(h, size) {
   if (!(start >= 0) || start > end || start >= size) return null;
   return { start, end, len: end - start + 1 };
 }
+// Отдать ровно этот кусок файла (правки 4.8). e.fileFS отдаёт файл стандартной функцией Go (http.ServeContent),
+// а она смотрит на заголовки запроса: при If-Range, который не совпал, отдаёт файл целиком вместо куска.
+// Поэтому перед отдачей сервер сам ставит Range «от и до» (тот кусок, что уже посчитан в ограничении и журнале)
+// и убирает все условные заголовки. whole = отдать файл целиком (EPUB без Range).
+const COND_HEADERS = ["If-Range", "If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"];
+function serveRange(e, dir, name, range, whole) {
+  const h = e.request.header;
+  for (const k of COND_HEADERS) h.del(k);
+  if (whole) h.del("Range");
+  else h.set("Range", `bytes=${range.start}-${range.end}`);
+  return e.fileFS($os.dirFS(dir), name);
+}
+// Файл открывают как страницу (правки 4.8): адрес вставили в новую вкладку, «Открыть в новой вкладке» во вкладке
+// «Сеть», «Сохранить ссылку как», рамка на странице. Браузеры сообщают это заголовками Sec-Fetch-Dest и Sec-Fetch-Mode.
+// Читалки и плеер просят файл из кода страницы или тегом audio (Sec-Fetch-Dest: empty или audio), их это не касается.
+// Браузеры и плееры без этих заголовков (старые, плеер iPhone при выключенном экране) проходят как раньше.
+const PAGE_DEST = { document: 1, iframe: 1, frame: 1, embed: 1, object: 1 };
+function refuseAsPage(e, text) {
+  const h = e.request.header;
+  // значения по всем строкам заголовка и через запятую: «document», «navigate, cors» и т. п.
+  const words = (name) => (h.values(name) || []).join(",").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
+  if (words("Sec-Fetch-Dest").some((d) => PAGE_DEST[d]) || words("Sec-Fetch-Mode").indexOf("navigate") >= 0) {
+    throw new ForbiddenError(text || "Книга открывается только в читалке приложения.");
+  }
+}
 function noStore(e) {
   const h = e.response.header();
   h.set("Cache-Control", "private, no-store, max-age=0");
@@ -176,9 +203,9 @@ function noStore(e) {
 }
 
 /* ---------- Ограничение скорости ---------- */
-// Сколько байт книг отдано человеку за последний час: два счётчика по часам в памяти сервера
-// (текущий и прошлый час), прошлый учитывается долей, которая ещё входит в последние 60 минут.
-// После перезапуска приложения счёт начинается заново.
+// Сколько байт книг отдано человеку за последний час: два счётчика по часам (текущий и прошлый час),
+// прошлый учитывается долей, которая ещё входит в последние 60 минут.
+// С правок 4.8 счётчики хранятся в базе (rate_use) и переживают перезапуск приложения.
 function hourIdx(t) { return Math.floor(t / 3600e3); }
 function usedBytes(st, now) {
   if (!st) return 0;
@@ -195,19 +222,31 @@ function waitMinutes(st, now, limit, n) {
   return 60;
 }
 // Проверить лимит и учесть отдачу. Возвращает 0, если можно, иначе сколько минут ждать.
+// Чтение и запись в одной транзакции: запись в SQLite идёт по одной, одновременные запросы счёт не теряют.
 function takeBytes(userId, n) {
   const limit = S.maxBytesHour();
   if (!limit) return 0;
   const now = Date.now(), h = hourIdx(now);
   let wait = 0;
-  $app.store().setFunc("kn_rate:" + userId, (old) => {
-    let st = old || { h, cur: 0, prev: 0 };
+  $app.runInTransaction((tx) => {
+    const db = tx.db();
+    let st = null;
+    try {
+      const row = new DynamicModel({ h: 0, cur: 0, prev: 0 });
+      db.newQuery('SELECT CAST(h AS INTEGER) AS h, CAST(cur AS INTEGER) AS cur, CAST(prev AS INTEGER) AS prev FROM rate_use WHERE "user" = {:u}')
+        .bind({ u: userId }).one(row);
+      st = { h: Number(row.h), cur: Number(row.cur), prev: Number(row.prev) };
+    } catch (_) { st = null; }
+    if (!st) st = { h, cur: 0, prev: 0 };
     if (st.h !== h) st = { h, cur: 0, prev: st.h === h - 1 ? st.cur : 0 };
     if (usedBytes(st, now) + n > limit) {
       wait = waitMinutes(st, now, limit, Math.min(n, limit));
-      return st;
+      return;
     }
-    return { h: st.h, cur: st.cur + n, prev: st.prev };
+    st.cur += n;
+    db.newQuery(`INSERT INTO rate_use (id, "user", h, cur, prev, updated) VALUES ({:id}, {:u}, {:h}, {:c}, {:p}, {:t})
+      ON CONFLICT ("user") DO UPDATE SET h = excluded.h, cur = excluded.cur, prev = excluded.prev, updated = excluded.updated`)
+      .bind({ id: newId(), u: userId, h: st.h, c: st.cur, p: st.prev, t: new Date().toISOString().replace("T", " ") }).execute();
   });
   return wait;
 }
@@ -225,13 +264,17 @@ function logRow(userId, book) {
     .bind({ id: newId(), u: userId, b: book.id, title: book.getString("title"), hour, t }).execute();
   return hour;
 }
-function logBytes(userId, book, n, over) {
+// fileId (правки 4.8): какой файл книги отдан; байты по файлам копятся в read_log.files
+const LOG_FILES = "(CASE WHEN json_valid(files) AND json_type(files) = 'object' THEN files ELSE '{}' END)";
+function logBytes(userId, book, n, over, fileId) {
   if (!S.readLog()) return;
   try {
     const hour = logRow(userId, book);
-    $app.db().newQuery(`UPDATE read_log SET bytes_sent = bytes_sent + {:n}, over_limit = (over_limit OR {:o}), updated = {:t}
+    const f = /^[a-z0-9]{1,30}$/.test(String(fileId || "")) && n > 0 ? String(fileId) : "";
+    $app.db().newQuery(`UPDATE read_log SET bytes_sent = bytes_sent + {:n}, over_limit = (over_limit OR {:o}), updated = {:t}` +
+      (f ? `, files = json_set(${LOG_FILES}, '$.' || {:f}, COALESCE(json_extract(${LOG_FILES}, '$.' || {:f}), 0) + {:n})` : "") + `
       WHERE "user" = {:u} AND book = {:b} AND hour = {:hour}`)
-      .bind({ n, o: !!over, t: stamp(), u: userId, b: book.id, hour }).execute();
+      .bind({ n, o: !!over, t: stamp(), u: userId, b: book.id, hour, f }).execute();
   } catch (err) {
     $app.logger().warn("Не удалось записать журнал чтения", "error", String(err));
   }
@@ -270,6 +313,37 @@ function logListen(userId, book, seconds, trackTitle) {
   } catch (err) {
     $app.logger().warn("Не удалось записать прослушивание в журнал", "error", String(err));
   }
+}
+// Подозрительные часы журнала (правки 4.8): файл книги получен почти целиком, а страниц просмотрено мало.
+// Читалка PDF (PDF, DjVu) берёт только нужные страницы, поэтому выделяется час, где отдано больше 80% файла
+// и больше, чем нужно для просмотренных страниц, с запасом 2 МБ (начало файла, оглавление, следующая страница;
+// файлы меньше 2 МБ читалка часто получает почти целиком уже при открытии, они не выделяются).
+// Читалка EPUB (EPUB, FB2, MOBI, AZW3, TXT) всегда получает файл целиком, поэтому 80% для неё ничего не значит:
+// выделяется час, где один и тот же файл отдан целиком 3 раза и больше.
+const SUSPECT_SHARE = 0.8, SUSPECT_SLACK = 2 * MB, SUSPECT_COPIES = 3;
+function logSuspect(row, fileOf) {
+  let files = null;
+  try { files = JSON.parse(toString(row.get("files")) || "null"); } catch (_) { files = null; }
+  if (!files || typeof files !== "object") return null;
+  const seen = row.getInt("pages_seen");
+  let best = null;
+  for (const id of Object.keys(files)) {
+    const bytes = Number(files[id]) || 0;
+    const f = fileOf(id);
+    if (!f || !(f.size > 0) || bytes <= 0) continue;
+    const share = bytes / f.size;
+    let hit = null;
+    if (f.view === "pdf") {
+      const pageShare = f.pages > 0 ? Math.min(1, seen / f.pages) : 0;
+      if (share > SUSPECT_SHARE && bytes > pageShare * f.size + SUSPECT_SLACK) {
+        hit = { format: f.format, view: "pdf", pct: Math.min(100, Math.round(share * 100)), pages: f.pages, seen, bytes, size: f.size };
+      }
+    } else if (share >= SUSPECT_COPIES - 0.05) {
+      hit = { format: f.format, view: "epub", copies: Math.floor(share + 0.05), bytes, size: f.size };
+    }
+    if (hit && (!best || bytes > best.bytes)) best = hit;
+  }
+  return best;
 }
 function cleanLog() {
   const before = new Date(Date.now() - S.logDays() * 864e5).toISOString().slice(0, 13);
@@ -1116,17 +1190,41 @@ function deleteBook(e, book, notesMode) {
 
 // Убрать один формат книги (не последний): файл, текст, прогресс по этому формату
 // и выделения в нём у всех. Заметки остаются (у них только пропадает ссылка на место в файле).
+// Что удалится вместе с форматом (правки 4.8: окно показывает и мысли, и у кого цитаты)
 function formatInfo(f) {
   const q = { b: f.getString("book"), f: f.getString("format") };
+  const hls = $app.findRecordsByFilter("notes", "book = {:b} && format = {:f} && kind = 'highlight'", "", 0, 0, q);
+  const by = {};
+  for (const n of hls) {
+    const u = n.getString("owner");
+    const it = by[u] || (by[u] = { id: u, name: "", highlights: 0, thoughts: 0 });
+    it.highlights++;
+    if (n.getString("body_text").trim()) it.thoughts++;
+  }
+  const people = Object.keys(by).map((id) => {
+    let u = null;
+    try { u = $app.findRecordById("users", id); } catch (_) {}
+    by[id].name = u ? (u.getString("name") || u.getString("email")) : "Пользователь удалён";
+    by[id].admin = !!(u && u.getString("role") === "admin");
+    return by[id];
+  }).sort((a, b) => b.highlights - a.highlights);
   return {
-    highlights: $app.countRecords("notes", $dbx.exp("book = {:b} AND format = {:f} AND kind = 'highlight'", q)),
+    highlights: hls.length,
+    thoughts: people.reduce((s, p) => s + p.thoughts, 0),
+    people,
     readers: $app.countRecords("reading", $dbx.exp("book = {:b} AND format = {:f}", q)),
     last: $app.countRecords("book_files", $dbx.hashExp({ book: q.b })) <= 1,
   };
 }
-function removeFormat(f) {
+// confirm (правки 4.8): сколько цитат было в окне подтверждения. Если с тех пор их стало другое число,
+// формат не убирается: администратор должен увидеть, что именно удаляется.
+function removeFormat(f, confirm) {
   const bookId = f.getString("book"), fmt = f.getString("format");
-  if (formatInfo(f).last) throw new BadRequestError("Это последний формат книги. Чтобы убрать его, удалите книгу целиком.");
+  const info = formatInfo(f);
+  if (info.last) throw new BadRequestError("Это последний формат книги. Чтобы убрать его, удалите книгу целиком.");
+  if (info.highlights > 0 && Number(confirm) !== info.highlights) {
+    throw new ApiError(409, `Пока окно было открыто, число цитат в этом формате изменилось (сейчас ${info.highlights}). Откройте «Убрать формат» заново и проверьте, что удалится.`);
+  }
   try { require(`${__hooks}/convert_lib.js`).ocrCancelFile(f.id, "Формат убрали из книги."); } catch (_) {}
   $app.runInTransaction((tx) => {
     const q = { b: bookId, f: fmt };
@@ -1197,6 +1295,7 @@ function mergeBooks(book, other) {
     db.newQuery(`UPDATE read_log SET bytes_sent = bytes_sent + COALESCE((SELECT o.bytes_sent FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour), 0),
         listen_sec = listen_sec + COALESCE((SELECT o.listen_sec FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour), 0),
         pages_seen = MAX(pages_seen, COALESCE((SELECT o.pages_seen FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour), 0)),
+        files = json_patch(${LOG_FILES}, COALESCE((SELECT ${LOG_FILES.replace(/files/g, "o.files")} FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour), '{}')),
         over_limit = (over_limit OR COALESCE((SELECT o.over_limit FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour), FALSE))
       WHERE book = {:a} AND EXISTS (SELECT 1 FROM read_log o WHERE o.book = {:b} AND o."user" = read_log."user" AND o.hour = read_log.hour)`).bind(q).execute();
     db.newQuery(`DELETE FROM read_log WHERE book = {:b} AND EXISTS (SELECT 1 FROM read_log a WHERE a.book = {:a} AND a."user" = read_log."user" AND a.hour = read_log.hour)`).bind(q).execute();
@@ -1279,8 +1378,8 @@ function setHidden(book, hidden) {
 
 module.exports = {
   MB, S, booksDir, filesDir, coversDir, textDir, audioDir, ensureDirs, rmFile, exists, freeBytes, checkFree, logListen, joinChunks, randTail, uploadMeta,
-  fileKey, LINK_TTL, setCookie, clearCookie, cookieUser, makeLink, linkUser, watermarkFor, watermarkCfg,
-  MAX_SPAN, EPUB_MAX, parseRange, noStore, takeBytes, logBytes, logPages, cleanLog,
+  fileKey, LINK_TTL, BOOK_LINK_TTL, linkTtl, setCookie, clearCookie, cookieUser, makeLink, linkUser, watermarkFor, watermarkCfg,
+  MAX_SPAN, EPUB_MAX, parseRange, noStore, serveRange, refuseAsPage, takeBytes, logBytes, logPages, logSuspect, cleanLog,
   CHUNK, KINDS, startUpload, saveChunk, finishUpload, dropUpload, uploadDir, uploadKind, cleanUploads, fromFileName,
   OFFER_MAX, approveOffer, rejectOffer, keepFor, syncKept, setHidden, notifyVisibility,
   processQueue, replaceCover, deleteBook, filesOf, syncBook, FMT_NAME, VIEW, formatInfo, removeFormat, mergeInfo, mergeBooks, htmlText,

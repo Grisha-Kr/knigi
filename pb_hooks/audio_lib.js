@@ -198,7 +198,9 @@ function logRequest(e, id, user, note) {
     const ua = String(h.get("User-Agent") || "");
     const dev = /iPhone|iPad/.test(ua) ? (/AppleCoreMedia|CFNetwork/.test(ua) ? "iPhone, звук" : "iPhone") : /Macintosh/.test(ua) ? "Mac" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : "другое";
     const row = { at: new Date().toISOString(), track: id, user: user ? user.getString("name") : "", range: String(h.get("Range") || ""),
-      ifRange: String(h.get("If-Range") || ""), method: e.request.method, dev, ua: ua.slice(0, 160), note: note || "" };
+      ifRange: String(h.get("If-Range") || ""), method: e.request.method, dev, ua: ua.slice(0, 160), note: note || "",
+      // правки 4.8: как браузер назвал запрос (audio, empty, document); у плеера iPhone обычно пусто
+      dest: String(h.get("Sec-Fetch-Dest") || "").slice(0, 20), mode: String(h.get("Sec-Fetch-Mode") || "").slice(0, 20) };
     $app.store().setFunc("kn_alog", (old) => (old || []).concat([row]).slice(-150));
   } catch (_) {}
 }
@@ -209,7 +211,9 @@ function requestLog(trackId) {
 function serve(e, id) {
   const FL = F();
   let user = null;
-  try { user = FL.linkUser(e, "audio", id); } catch (err) { logRequest(e, id, null, "отказ: " + String(err.message || err).slice(0, 80)); throw err; }
+  // правки 4.8: главу нельзя открыть как страницу (новая вкладка, «Сохранить ссылку как»); плеер приложения
+  // просит её тегом audio, плеер iPhone при выключенном экране заголовков Sec-Fetch не шлёт
+  try { FL.refuseAsPage(e, "Глава открывается только в плеере приложения."); user = FL.linkUser(e, "audio", id); } catch (err) { logRequest(e, id, null, "отказ: " + String(err.message || err).slice(0, 80)); throw err; }
   logRequest(e, id, user, "");
   const t = openTrack(id, user); // выданная раньше ссылка без доступа тоже перестаёт работать (кроме своей книги)
   const name = t.getString("file");
