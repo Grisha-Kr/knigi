@@ -318,6 +318,7 @@ async function startApp(){
     if(S.access) renderAccessBar(); // в полоске учитываются свои одобренные книги (они приходят с остальными данными)
     if(isAdmin()){ loadInvites(); loadUsers(); loadOcr(); } else loadOwner();
     loadAccess(); loadTerms();
+    homeSync(); // вид главной, не ушедший на сервер в прошлый раз (правки 4.7)
     subscribeAll().catch(() => {});
     if(route().name === 'g') gVisit(route().id);
     if(route().name === 'profile' && isAdmin()) loadGCount();
@@ -340,6 +341,7 @@ document.addEventListener('visibilitychange', () => {
     if(Date.now() - lastSession > 3600e3){ lastSession = Date.now(); pb.send('/api/knigi/session', {}).catch(() => {}); }
     loadAll().catch(() => {});
     loadAccess();
+    homeSync();
   }
 });
 window.addEventListener('pagehide', () => { RD.doc && rdSave(true); apSave(true); });
@@ -560,7 +562,7 @@ async function checkUpdate(){
 setInterval(checkUpdate, 30*60e3);
 $('#update-btn').addEventListener('click', () => location.reload());
 $('#update-close').addEventListener('click', () => { $('#update-bar').hidden = true; });
-window.addEventListener('online', () => { $('#notice').hidden = true; schedule(); if(S.loaded) loadAll().catch(() => {}); });
+window.addEventListener('online', () => { $('#notice').hidden = true; schedule(); if(S.loaded){ loadAll().catch(() => {}); homeSync(); } });
 window.addEventListener('offline', () => { showNotice('Нет подключения к интернету. Книги открываются только при подключении.'); schedule(); });
 let raf = 0;
 function schedule(){ if(raf) return; raf = requestAnimationFrame(() => { raf = 0; render(); }); }
@@ -772,18 +774,89 @@ VIEWS.home = r => {
   const common = shelfKids('', true), mine = shelfKids('', false);
   const recent = [...libBooks()].sort((a, b) => addedAt(b).localeCompare(addedAt(a))).slice(0, 12);
   return head + `
-    <section class="block"><h2>Продолжить чтение</h2>${cont.length ? `<div class="cont">${cont.map(m => { const b = byId('books', m.book), r = readingOf(b.id), multi = bookFormats(b).length > 1;
+    ${foldBlock('reading', 'Продолжить чтение', cont.length, '', cont.length ? `<div class="cont">${cont.map(m => { const b = byId('books', m.book), r = readingOf(b.id), multi = bookFormats(b).length > 1;
       return `<a class="cont-item" href="#/b/${b.id}">${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small>${esc(authorsText(b))}</small>
         ${r ? `<span class="prog wide"><i style="width:${progPct(r)}%"></i></span><small>${multi ? FORMATS[readFmt(r)] + ' · ' : ''}${progText(r)}</small>` : '<small>ещё не открывали</small>'}</span></a>`; }).join('')}</div>`
-      : '<p class="empty">Отметьте книгу «Читаю» в её карточке, и она появится здесь.</p>'}</section>
+      : '<p class="empty">Отметьте книгу «Читаю» в её карточке, и она появится здесь.</p>')}
     ${contListenHTML()}
     ${newReviewsHTML()}
-    <section class="block"><div class="block-h"><h2>Полки</h2><a class="more-link" href="#/shelves">Все полки</a></div>
-      ${common.length ? `<div class="shelf-cards">${common.map(shelfCard).join('')}</div>` : `<p class="empty">${isAdmin() ? 'Общих полок пока нет. Создайте первую на вкладке «Полки».' : 'Общих полок пока нет.'}</p>`}</section>
-    <section class="block"><div class="block-h"><h2>Мои полки</h2>${mine.length ? '' : '<a class="more-link" href="#/shelves">Создать</a>'}</div>
-      ${mine.length ? `<div class="shelf-cards">${mine.map(shelfCard).join('')}</div>` : '<p class="empty">Своих полок пока нет. Их видите только вы.</p>'}</section>
+    ${foldBlock('shelves', 'Полки', common.length, '<a class="more-link" href="#/shelves">Все полки</a>',
+      common.length ? `<div class="shelf-cards">${common.map(shelfCard).join('')}</div>` : `<p class="empty">${isAdmin() ? 'Общих полок пока нет. Создайте первую на вкладке «Полки».' : 'Общих полок пока нет.'}</p>`)}
+    ${foldBlock('mine', 'Мои полки', mine.length, mine.length ? '' : '<a class="more-link" href="#/shelves">Создать</a>',
+      mine.length ? `<div class="shelf-cards">${mine.map(shelfCard).join('')}</div>` : '<p class="empty">Своих полок пока нет. Их видите только вы.</p>')}
     <section class="block"><div class="block-h"><h2>Недавно добавленные</h2><a class="more-link" href="#/books">Все книги · ${libBooks().length}</a></div>${booksGrid(recent)}</section>`;
 };
+/* ---------- Вид главной (правки 4.7): свёрнутые блоки и закрытое «Продолжить слушание» ---------- */
+// Хранится в аккаунте (users.home_ui, пишет маршрут /api/knigi/home-ui): свернул на телефоне, свёрнуто и на компьютере.
+// Изменение сначала ложится на устройство (kn_homeUi_ID) и сразу видно на экране, потом уходит на сервер.
+// Не ушло (нет сети): запись на устройстве остаётся главнее записи аккаунта и уходит при следующем удобном случае
+// (новое изменение, возврат на вкладку, появление сети, запуск приложения).
+const HOME_BLOCKS = ['reading', 'shelves', 'mine', 'reviews'];
+const HU = {busy: false, timer: 0};
+const huClean = v => ({collapsed: HOME_BLOCKS.filter(k => !!v && Array.isArray(v.collapsed) && v.collapsed.includes(k)), listen_hidden: !!v && v.listen_hidden === true});
+const huKey = () => 'homeUi_' + me().id;
+function homeUi(){ const l = loadLS(huKey(), null); return huClean(l && l.v ? l.v : me().home_ui); }
+const homeFolded = k => homeUi().collapsed.includes(k);
+function homeSet(next){
+  saveLS(huKey(), {v: huClean(next)});
+  // небольшая пауза: несколько нажатий подряд уходят одним запросом, а ответ сервера не перерисовывает экран,
+  // пока поворачивается стрелка
+  clearTimeout(HU.timer); HU.timer = setTimeout(homeSync, 400);
+}
+async function homeSync(){
+  if(HU.busy || !pb.authStore.isValid) return;
+  const key = huKey(), l = loadLS(key, null);
+  if(!l || !l.v) return;
+  HU.busy = true;
+  const sent = JSON.stringify(l.v);
+  let ok = false;
+  try {
+    const r = await pb.send('/api/knigi/home-ui', {method: 'POST', body: l.v});
+    ok = true;
+    if(pb.authStore.isValid && huKey() === key) pb.authStore.save(pb.authStore.token, {...me(), home_ui: r});
+    const now = loadLS(key, null);
+    if(now && JSON.stringify(now.v) === sent) dropLS(key);
+  } catch(e){
+    // сервер такие настройки не принял: повторять нечего. Нет сети или сервер недоступен: запись ждёт на устройстве.
+    if(e && e.status === 400) dropLS(key);
+  }
+  HU.busy = false;
+  // пока шёл запрос, состояние поменяли ещё раз
+  if(ok && loadLS(key, null)) homeSync();
+}
+// Сворачиваемый блок: вся строка заголовка нажимается (кнопка растянута на строку), ссылка в заголовке работает как раньше.
+// Число: мелким серым у заголовка, у свёрнутого блока в кружке. Ноль не пишется.
+function foldBlock(k, title, n, link, body){
+  const off = homeFolded(k);
+  return `<section class="block hfold${off ? ' folded' : ''}" data-fold="${k}"><div class="block-h hfold-h">
+      <h2><button type="button" class="hfold-btn" id="foldb-${k}" data-act="home-fold" data-k="${k}" aria-expanded="${!off}" aria-controls="fold-${k}">${title}${n ? ` <span class="n">${n}</span>` : ''}</button></h2>
+      ${link || ''}<span class="hfold-arrow" aria-hidden="true">${ICON.chev}</span></div>
+    <div class="hfold-body" id="fold-${k}"${off ? ' hidden' : ''}>${body}</div></section>`;
+}
+// Свернуть или развернуть: экран не перерисовывается, поэтому стрелка поворачивается плавно
+function homeFold(k, btn){
+  if(!HOME_BLOCKS.includes(k)) return;
+  const cur = homeUi(), off = !cur.collapsed.includes(k);
+  homeSet({...cur, collapsed: off ? [...cur.collapsed, k] : cur.collapsed.filter(x => x !== k)});
+  const sec = btn.closest('.hfold');
+  if(!sec){ schedule(); return; }
+  sec.classList.toggle('folded', off);
+  btn.setAttribute('aria-expanded', String(!off));
+  const body = sec.querySelector('.hfold-body'); if(body) body.hidden = off;
+}
+// Крестик у «Продолжить слушание»: блок уходит с главной, звук и место прослушивания не трогаются
+function homeListenHide(){
+  homeSet({...homeUi(), listen_hidden: true});
+  render(true);
+  toast('Блок скрыт. Вернётся, когда снова включите аудио');
+}
+// Человек сам включил звук («Слушать», глава, «Играть» после паузы): блок возвращается
+function homeListenBack(){
+  const cur = homeUi();
+  if(!cur.listen_hidden) return;
+  homeSet({...cur, listen_hidden: false});
+  schedule();
+}
 function shelfCard(s){
   const n = shelfCount(s), kids = S.shelves.filter(c => c.parent === s.id).length;
   const covers = shelfBooks(s.id).slice(0, 3);
@@ -2299,8 +2372,8 @@ function newReviewsHTML(){
   const list = S.reviews.filter(r => r.user !== me().id && rvBookOk(byId('books', r.book)))
     .sort((a, b) => String(b.created).localeCompare(String(a.created))).slice(0, 3);
   if(!list.length) return '';
-  return `<section class="block"><h2>Новые отзывы</h2><div class="cont rv-new">${list.map(r => { const b = byId('books', r.book);
-    return `<a class="cont-item rv-item" href="#/b/${b.id}?tab=reviews">${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small class="rv-by">${esc(r.user_name || 'Читатель')}</small><span class="rv-ex">${esc(rvExcerpt(r.text))}</span></span></a>`; }).join('')}</div></section>`;
+  return foldBlock('reviews', 'Новые отзывы', list.length, '', `<div class="cont rv-new">${list.map(r => { const b = byId('books', r.book);
+    return `<a class="cont-item rv-item" href="#/b/${b.id}?tab=reviews">${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small class="rv-by">${esc(r.user_name || 'Читатель')}</small><span class="rv-ex">${esc(rvExcerpt(r.text))}</span></span></a>`; }).join('')}</div>`);
 }
 // Раздел администратора «Отзывы»: все отзывы, новые сверху. Открыли: непросмотренные получают пометку «Новый»
 // до ухода с экрана, а на сервере становятся просмотренными (точка на фото уходит).
@@ -3541,6 +3614,8 @@ function apEl(){
 const apOn = () => !!(AP.el && AP.real && !AP.el.paused && !AP.el.ended);
 async function apLink(tid){ return pb.send(`/api/knigi/audio/${tid}/link`, {}); }
 // Включить главу. opts.restart: с начала. Вызывать прямо из нажатия: тогда iPhone разрешает звук.
+// opts.auto: главу включил сам плеер (кончилась предыдущая), а не человек: закрытый блок «Продолжить слушание»
+// на главной (правки 4.7) от этого не возвращается.
 // Журнал событий плеера с момента нажатия (последние 120)
 const apBuf = el => { try { const b = el.buffered; const r = []; for(let i = 0; i < b.length; i++) r.push(durShort(b.start(i)) + '–' + durShort(b.end(i))); return r.join(', '); } catch(e){ return ''; } };
 function apLogEv(ev){
@@ -3556,6 +3631,7 @@ async function apPlay(tid, opts = {}){
   const t = trackById(tid);
   if(!t) return;
   if(roBook(byId('books', t.book))){ toast(`${accHead(S.access)}: слушать сейчас нельзя.`); return; }
+  if(!opts.auto) homeListenBack();
   const el = apEl();
   if(AP.track === tid && AP.real && el.getAttribute('src') && !opts.restart){ el.play().catch(apPlayErr); return; }
   if(AP.track && AP.track !== tid) apSave(true);
@@ -3626,7 +3702,7 @@ function apEnded(){
   if(!AP.real) return;
   apSave(true, true);
   const t = trackById(AP.track), nx = t && nextTrack(t);
-  if(nx) apPlay(nx.id, {restart: !!(progOf(nx.id) || {}).done});
+  if(nx) apPlay(nx.id, {restart: !!(progOf(nx.id) || {}).done, auto: true});
   else { apPaint(); schedule(); }
 }
 // Ссылка устарела (прошло больше двух часов) или оборвалась связь: новая ссылка и то же место
@@ -3644,7 +3720,7 @@ function apToggle(tid){
   const el = apEl();
   if(tid && tid !== AP.track){ apPlay(tid); return; }
   if(!AP.real){ if(AP.track) apPlay(AP.track); return; }
-  if(el.paused) el.play().catch(apPlayErr); else el.pause();
+  if(el.paused){ homeListenBack(); el.play().catch(apPlayErr); } else el.pause();
 }
 function apSkip(k){
   const el = AP.el;
@@ -3676,8 +3752,8 @@ function apSession(t){
     set('seekbackward', d => apSkip(-((d && d.seekOffset) || AU_SKIP)));
     set('seekforward', d => apSkip((d && d.seekOffset) || AU_SKIP));
     set('seekto', d => { if(AP.el && d && d.seekTime != null){ AP.el.currentTime = d.seekTime; AP.prevT = d.seekTime; apTick(); apPos(); } });
-    set('previoustrack', () => { const el = AP.el; const cur = trackById(AP.track); if(!cur) return; if(el && el.currentTime > 5){ el.currentTime = 0; return; } const list = tracksOf(cur.book); const i = list.findIndex(x => x.id === cur.id); if(i > 0) apPlay(list[i - 1].id, {restart: true}); });
-    set('nexttrack', () => { const cur = trackById(AP.track), nx = cur && nextTrack(cur); if(nx) apPlay(nx.id, {restart: !!(progOf(nx.id) || {}).done}); });
+    set('previoustrack', () => { const el = AP.el; const cur = trackById(AP.track); if(!cur) return; if(el && el.currentTime > 5){ el.currentTime = 0; return; } const list = tracksOf(cur.book); const i = list.findIndex(x => x.id === cur.id); if(i > 0) apPlay(list[i - 1].id, {restart: true, auto: apOn()}); });
+    set('nexttrack', () => { const cur = trackById(AP.track), nx = cur && nextTrack(cur); if(nx) apPlay(nx.id, {restart: !!(progOf(nx.id) || {}).done, auto: apOn()}); });
   } catch(e){}
 }
 function apPos(){
@@ -3801,6 +3877,8 @@ VIEWS.listen = r => {
 
 /* ---------- «Продолжить слушание» на главной ---------- */
 function contListenHTML(){
+  // блок закрыт крестиком (правки 4.7): вернётся, когда человек снова включит аудио (homeListenBack)
+  if(homeUi().listen_hidden) return '';
   const last = S.aprog.filter(p => { const t = trackById(p.track), b = t && byId('books', t.book); return b && !bookNA(b); })
     .sort((a, b) => String(b.updated).localeCompare(String(a.updated)))[0];
   if(!last) return '';
@@ -3811,7 +3889,7 @@ function contListenHTML(){
   // всё дослушано и следующей главы нет: блок не нужен
   if(p && p.done && t.id === last.track && !nextTrack(t)) return '';
   const left = trackLeft(t), on = apOn() && AP.track === t.id;
-  return `<section class="block"><h2>Продолжить слушание</h2><div class="cont"><button type="button" class="cont-item au-cont" data-act="au-cont" data-id="${t.id}" aria-label="${on ? 'Пауза' : 'Слушать дальше'}: ${esc(b.title)}, ${esc(t.title)}">
+  return `<section class="block" id="cont-listen"><div class="block-h"><h2>Продолжить слушание</h2><button type="button" class="icon-btn blk-x" data-act="home-listen-hide" aria-label="Скрыть" title="Скрыть блок">${ICON.close}</button></div><div class="cont"><button type="button" class="cont-item au-cont" data-act="au-cont" data-id="${t.id}" aria-label="${on ? 'Пауза' : 'Слушать дальше'}: ${esc(b.title)}, ${esc(t.title)}">
     ${coverHTML(b, 'sm')}<span><b>${esc(b.title)}</b><small>${esc(t.title)}${audioNew(b.id) ? ' · <span class="new-txt">есть новая глава</span>' : ''}</small>
     <small>${left && p && p.pos > 5 ? 'осталось ' + minText(left) : t.duration ? durShort(t.duration) : ''}</small></span><span class="au-ic ap-play" data-track="${t.id}">${on ? ICON.pause : ICON.play}</span></button></div></section>`;
 }
@@ -5665,6 +5743,8 @@ document.addEventListener('click', async e => {
   if(!a || !S.loaded) return;
   const d = a.dataset;
   switch(d.act){
+    case 'home-fold': homeFold(d.k, a); break;
+    case 'home-listen-hide': homeListenHide(); break;
     case 'search-clear': setSearch(''); { const q = $('#q'); if(q && !touchUI()) q.focus(); } break;
     case 'mark-reading': markReading(d.id); break;
     case 'mark-finish': markFinish(d.id); break;
@@ -5700,7 +5780,7 @@ document.addEventListener('click', async e => {
     case 'au-listen': {
       const b = byId('books', d.id);
       if(!b || roBook(b)) break;
-      if(AP.book === d.id && AP.track && AP.real && AP.el){ if(AP.el.paused) AP.el.play().catch(apPlayErr); break; }
+      if(AP.book === d.id && AP.track && AP.real && AP.el){ homeListenBack(); if(AP.el.paused) AP.el.play().catch(apPlayErr); break; }
       const t = contTrack(d.id); if(t) apPlay(t.id);
       break;
     }

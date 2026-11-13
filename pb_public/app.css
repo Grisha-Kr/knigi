@@ -1186,3 +1186,29 @@ a.myrv:hover{background:color-mix(in srgb,var(--ink) 3%,var(--card))}
 .myrv-t .tag{margin-top:2px}
 .myrv-ex{margin-top:4px;font-family:var(--f-head);font-size:14.5px;line-height:1.5;color:var(--ink-2);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;overflow:hidden;overflow-wrap:anywhere}
 .myrv.na{opacity:.6;box-shadow:none;border:1px dashed var(--line)}
+
+/* Главная: сворачиваемые блоки и крестик у «Продолжить слушание» (правки 4.7) */
+.hfold-h{position:relative;flex-wrap:nowrap;min-height:28px}
+.hfold-h h2{flex:1;min-width:0}
+.hfold-btn{appearance:none;border:0;background:none;padding:0;margin:0;font:inherit;color:inherit;text-align:left;cursor:pointer;display:inline-flex;align-items:center;gap:2px;max-width:100%;-webkit-tap-highlight-color:transparent}
+/* нажимается вся строка заголовка (и чуть выше и ниже, чтобы пальцем было удобно); ссылка лежит поверх */
+.hfold-btn::after{content:"";position:absolute;inset:-8px -6px}
+.hfold-h .more-link{position:relative;z-index:1}
+.hfold-arrow{display:grid;place-items:center;flex:none;pointer-events:none}
+.hfold-arrow .chev{transform:rotate(90deg);transition:transform .18s ease}
+.hfold.folded .hfold-arrow .chev{transform:none}
+@media (prefers-reduced-motion: reduce){ .hfold-arrow .chev{transition:none} }
+/* свёрнутый блок: плашка высотой со строку, число в кружке */
+.hfold.folded{position:relative;justify-content:center;min-height:48px;padding:0 14px;background:var(--card);border-radius:14px;box-shadow:var(--shadow)}
+.hfold.folded .hfold-h{position:static}
+.hfold.folded .hfold-btn::after{inset:0;border-radius:14px}
+.hfold.folded .hfold-btn{gap:8px}
+.hfold.folded .more-link{display:none}
+.hfold.folded h2 .n{display:inline-grid;place-items:center;min-width:24px;height:24px;padding:0 7px;margin-left:0;border-radius:999px;background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:700;line-height:1}
+@supports selector(:has(a)){
+  .hfold.folded .hfold-btn:focus-visible{outline:none}
+  .hfold.folded:has(.hfold-btn:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+}
+.hfold-body{display:flex;flex-direction:column;gap:10px}
+.blk-x{margin:-10px -10px -10px 0;color:var(--muted)}
+.blk-x svg{width:20px;height:20px}
